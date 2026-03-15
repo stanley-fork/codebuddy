@@ -363,7 +363,7 @@ suite("createAnalysisBudget", () => {
   });
 
   test("withFocusedContext adds focusedContext key and splits codeSnippets", () => {
-    const budget = createAnalysisBudget(32000, true);
+    const budget = createAnalysisBudget(32000, { withFocusedContext: true });
     const summary = budget.getSummary();
     const focused = summary.find((s) => s.name === "focusedContext");
     const snippets = summary.find((s) => s.name === "codeSnippets");
@@ -378,7 +378,7 @@ suite("createAnalysisBudget", () => {
   });
 
   test("withFocusedContext=false has no focusedContext key", () => {
-    const budget = createAnalysisBudget(32000, false);
+    const budget = createAnalysisBudget(32000);
     const summary = budget.getSummary();
     const focused = summary.find((s) => s.name === "focusedContext");
     assert.strictEqual(focused, undefined);
@@ -425,5 +425,15 @@ suite("TokenBudgetAllocator.boost", () => {
 
     const a = budget.getSummary().find((s) => s.name === "a")!;
     assert.strictEqual(a.budget, 2000);
+  });
+});
+
+suite("TokenBudgetAllocator.hasAllocation", () => {
+  test("returns true for existing key and false for missing key", () => {
+    const budget = new TokenBudgetAllocator(10000);
+    budget.allocate("overview", 1000, 5);
+
+    assert.strictEqual(budget.hasAllocation("overview"), true);
+    assert.strictEqual(budget.hasAllocation("nonexistent"), false);
   });
 });

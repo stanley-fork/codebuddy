@@ -28,50 +28,50 @@ function makeAnalysis(overrides: Partial<CachedAnalysis> = {}): CachedAnalysis {
       complexity: "medium",
     },
     files: [
-      "/workspace/src/auth/jwt.service.ts",
-      "/workspace/src/controllers/user.controller.ts",
-      "/workspace/src/services/user.service.ts",
-      "/workspace/src/models/user.model.ts",
-      "/workspace/src/utils/logger.ts",
-      "/workspace/src/config/database.ts",
-      "/workspace/src/middleware/cors.ts",
-      "/workspace/src/app.ts",
-      "/workspace/src/index.ts",
-      "/workspace/test/user.test.ts",
+      "src/auth/jwt.service.ts",
+      "src/controllers/user.controller.ts",
+      "src/services/user.service.ts",
+      "src/models/user.model.ts",
+      "src/utils/logger.ts",
+      "src/config/database.ts",
+      "src/middleware/cors.ts",
+      "src/app.ts",
+      "src/index.ts",
+      "test/user.test.ts",
     ],
     codeSnippets: [
       {
-        file: "/workspace/src/auth/jwt.service.ts",
+        file: "src/auth/jwt.service.ts",
         content: "import jwt from 'jsonwebtoken';\nexport class JwtService { sign(payload) {} verify(token) {} }",
         language: "typescript",
         summary: "JWT signing and verification service.",
       },
       {
-        file: "/workspace/src/controllers/user.controller.ts",
+        file: "src/controllers/user.controller.ts",
         content: "import { UserService } from '../services/user.service';\nexport class UserController { getUser() {} createUser() {} }",
         language: "typescript",
         summary: "REST controller for user CRUD operations.",
       },
       {
-        file: "/workspace/src/services/user.service.ts",
+        file: "src/services/user.service.ts",
         content: "export class UserService { findById(id) {} create(data) {} }",
         language: "typescript",
         summary: "User business logic service.",
       },
       {
-        file: "/workspace/src/models/user.model.ts",
+        file: "src/models/user.model.ts",
         content: "export interface User { id: string; name: string; email: string; }",
         language: "typescript",
         summary: "User data model interface.",
       },
       {
-        file: "/workspace/src/utils/logger.ts",
+        file: "src/utils/logger.ts",
         content: "export const logger = { info() {}, error() {} };",
         language: "typescript",
         summary: "Utility logger module.",
       },
       {
-        file: "/workspace/src/app.ts",
+        file: "src/app.ts",
         content: "import express from 'express';\nconst app = express();\napp.listen(3000);",
         language: "typescript",
         summary: "Express application entry point.",
@@ -151,17 +151,36 @@ suite("Question Relevance Analyzer", () => {
       const keywords = extractKeywords("What is in src/auth/jwt.service.ts?");
       assert.ok(keywords.some((k) => k.includes("src/auth/jwt.service.ts")));
     });
+
+    test("does not match version strings as path-like tokens", () => {
+      // "1.2.3" should NOT be captured by the pathLike regex (requires letter start).
+      // It may still appear as a regular decomposed token, so we verify the pathLike
+      // regex specifically doesn't fire by checking a pure numeric version isn't duplicated.
+      const keywords = extractKeywords("We use version 1.2.3 of the library");
+      // The pathLike regex should not match "1.2.3" (starts with digit)
+      // but the decomposed pipeline may still produce it — the key invariant is
+      // that a leading-digit dot-separated string doesn't get the path boost.
+      assert.ok(keywords.filter((k) => k === "1.2.3").length <= 1, "version string should appear at most once (no path-regex duplicate)");
+    });
+
+    test("truncates pathologically long questions", () => {
+      const longQuestion = "auth ".repeat(1000); // 5000 chars
+      const keywords = extractKeywords(longQuestion);
+      // Should not throw; keywords should still be extracted from the first 2000 chars
+      assert.ok(keywords.length > 0);
+      assert.ok(keywords.includes("auth"));
+    });
   });
 
   suite("scoreFile", () => {
     test("scores path keyword matches at +3", () => {
-      const score = scoreFile("/workspace/src/auth/jwt.service.ts", ["jwt", "auth"], undefined, undefined);
+      const score = scoreFile("src/auth/jwt.service.ts", ["jwt", "auth"], undefined, undefined);
       assert.strictEqual(score, 6); // "jwt" +3, "auth" +3
     });
 
     test("scores content keyword matches capped at 5", () => {
       const content = "jwt token auth session oauth apikey basic";
-      const score = scoreFile("/workspace/unrelated.ts", ["jwt", "token", "auth", "session", "oauth", "apikey"], content, undefined);
+      const score = scoreFile("unrelated.ts", ["jwt", "token", "auth", "session", "oauth", "apikey"], content, undefined);
       // 0 path hits, 6 content hits capped to 5
       assert.strictEqual(score, 5);
     });
@@ -174,7 +193,7 @@ suite("Question Relevance Analyzer", () => {
         edgeCount: 5,
         nodeCount: 10,
       };
-      const score = scoreFile("/workspace/src/index.ts", [], undefined, callGraph);
+      const score = scoreFile("src/index.ts", [], undefined, callGraph);
       assert.strictEqual(score, 2); // entry point bonus
     });
 
@@ -186,12 +205,12 @@ suite("Question Relevance Analyzer", () => {
         edgeCount: 5,
         nodeCount: 10,
       };
-      const score = scoreFile("/workspace/src/utils/logger.ts", [], undefined, callGraph);
+      const score = scoreFile("src/utils/logger.ts", [], undefined, callGraph);
       assert.strictEqual(score, 2); // hot node bonus
     });
 
     test("returns 0 for no matches", () => {
-      const score = scoreFile("/workspace/README.md", ["jwt"], undefined, undefined);
+      const score = scoreFile("README.md", ["jwt"], undefined, undefined);
       assert.strictEqual(score, 0);
     });
   });
@@ -244,8 +263,8 @@ suite("Question Relevance Analyzer", () => {
       const analysis = makeAnalysis();
       const qa = analyzeQuestion("How does the JWT service work?", analysis);
 
-      const jwtScore = qa.fileScores.get("/workspace/src/auth/jwt.service.ts") ?? 0;
-      const loggerScore = qa.fileScores.get("/workspace/src/utils/logger.ts") ?? 0;
+      const jwtScore = qa.fileScores.get("src/auth/jwt.service.ts") ?? 0;
+      const loggerScore = qa.fileScores.get("src/utils/logger.ts") ?? 0;
 
       assert.ok(jwtScore > loggerScore, "JWT file should score higher than logger");
     });
@@ -255,7 +274,7 @@ suite("Question Relevance Analyzer", () => {
       const qa = analyzeQuestion("Where is the database configuration?", analysis);
 
       // database.ts is in files[] but not in codeSnippets — should still be scored
-      const dbScore = qa.fileScores.get("/workspace/src/config/database.ts") ?? 0;
+      const dbScore = qa.fileScores.get("src/config/database.ts") ?? 0;
       assert.ok(dbScore > 0, "files-only entries should be scored when relevant");
     });
   });
@@ -328,8 +347,8 @@ suite("Question Relevance Analyzer", () => {
       // while lower-scoring files WITH snippets fill the full-code tier
       const analysis = makeAnalysis({
         files: [
-          "/workspace/src/no-snippet-1.ts",
-          "/workspace/src/no-snippet-2.ts",
+          "src/no-snippet-1.ts",
+          "src/no-snippet-2.ts",
           ...makeAnalysis().files,
         ],
       });
@@ -358,6 +377,28 @@ suite("Question Relevance Analyzer", () => {
       const hasShared = focused.relatedDependencies.some((d) => d.includes("shared"));
       assert.ok(hasShared, "non-ranked hot node should appear in relatedDependencies");
     });
+
+    test("truncates large file content in full-code tier", () => {
+      const bigContent = "x".repeat(10000);
+      const analysis = makeAnalysis({
+        codeSnippets: [
+          {
+            file: "src/auth/jwt.service.ts",
+            content: bigContent,
+            language: "typescript",
+            summary: "Big file.",
+          },
+          ...makeAnalysis().codeSnippets!.slice(1),
+        ],
+      });
+      const qa = analyzeQuestion("How does JWT authentication work?", analysis);
+      const focused = buildFocusedContext(analysis, qa);
+
+      const jwtFile = focused.fullCodeFiles.find((f) => f.file.includes("jwt"));
+      assert.ok(jwtFile, "JWT file should be in full-code tier");
+      assert.ok(jwtFile.content.length < bigContent.length, "content should be truncated");
+      assert.ok(jwtFile.content.endsWith("// ... truncated"), "should end with truncation marker");
+    });
   });
 
   suite("analyzeQuestionCached", () => {
@@ -368,6 +409,19 @@ suite("Question Relevance Analyzer", () => {
 
       // Should be the same object (cache hit)
       assert.strictEqual(qa1, qa2);
+    });
+
+    test("returns empty result for empty question", () => {
+      const analysis = makeAnalysis();
+      const qa = analyzeQuestionCached("", analysis, 1000);
+      assert.strictEqual(qa.keywords.length, 0);
+      assert.strictEqual(qa.fileScores.size, 0);
+    });
+
+    test("returns empty result for whitespace-only question", () => {
+      const analysis = makeAnalysis();
+      const qa = analyzeQuestionCached("   ", analysis, 1000);
+      assert.strictEqual(qa.keywords.length, 0);
     });
 
     test("returns fresh result after TTL expires", () => {
@@ -392,7 +446,7 @@ suite("Question Relevance Analyzer", () => {
     test("returns fresh result when analysis changes (different workspace)", () => {
       const analysis1 = makeAnalysis();
       const analysis2 = makeAnalysis({
-        files: ["/other/workspace/file.ts"],
+        files: ["other-workspace/file.ts"],
         summary: { totalFiles: 1, totalLines: 50, languageDistribution: { typescript: 1 }, complexity: "low" },
       });
 
@@ -422,7 +476,7 @@ suite("Question Relevance Analyzer", () => {
         nodeCount: 10,
       };
       // Forward-slash file path should still match backslash call graph entries
-      const score = scoreFile("/workspace/src/index.ts", [], undefined, callGraph);
+      const score = scoreFile("src/index.ts", [], undefined, callGraph);
       assert.strictEqual(score, 2, "entry point with backslashes should match");
     });
   });

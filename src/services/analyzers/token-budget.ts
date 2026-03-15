@@ -205,9 +205,16 @@ export class TokenBudgetAllocator {
   }
 
   /**
+   * Check whether a budget category exists.
+   */
+  hasAllocation(name: string): boolean {
+    return this.allocations.has(name);
+  }
+
+  /**
    * Boost a category's budget by redistributing from other categories.
    * Increases the target by `floor(current * (multiplier - 1))`, shrinking
-   * other categories proportionally to compensate.
+   * other categories proportionally so the total budget stays constant.
    */
   boost(name: string, multiplier: number): void {
     const allocation = this.allocations.get(name);
@@ -216,15 +223,20 @@ export class TokenBudgetAllocator {
     const extra = Math.floor(allocation.budget * (multiplier - 1));
     if (extra <= 0) return;
 
-    const otherKeys = [...this.allocations.keys()].filter((k) => k !== name);
-    if (otherKeys.length === 0) return;
+    const others = [...this.allocations.entries()].filter(([k]) => k !== name);
+    if (others.length === 0) return;
 
-    const shrinkPer = Math.floor(extra / otherKeys.length);
-    for (const k of otherKeys) {
-      const other = this.allocations.get(k)!;
-      other.budget = Math.max(0, other.budget - shrinkPer);
+    const totalOther = others.reduce((sum, [, a]) => sum + a.budget, 0);
+    if (totalOther <= 0) return;
+
+    let actuallyRemoved = 0;
+    for (const [, other] of others) {
+      const share = Math.floor((other.budget / totalOther) * extra);
+      const clamped = Math.min(share, other.budget);
+      other.budget -= clamped;
+      actuallyRemoved += clamped;
     }
-    allocation.budget += extra;
+    allocation.budget += actuallyRemoved;
   }
 
   /**
@@ -242,8 +254,9 @@ export class TokenBudgetAllocator {
  */
 export function createAnalysisBudget(
   totalChars: number = 32000,
-  withFocusedContext: boolean = false,
+  options: { withFocusedContext?: boolean } = {},
 ): TokenBudgetAllocator {
+  const { withFocusedContext = false } = options;
   const budget = new TokenBudgetAllocator(totalChars);
   const effective = budget.getTotalRemaining(); // after safety margin
 
