@@ -2,7 +2,7 @@
 
 **Created**: January 2025
 **Updated**: March 15, 2026
-**Status**: Phase 2 Complete
+**Status**: Phase 2 Complete — All 13 review rounds passed
 **Feature**: `CodeBuddy.codebaseAnalysis` command
 **Branch**: `feature/code_analysis_overhaul`
 
@@ -226,11 +226,22 @@ CHARS_PER_TOKEN = { code: 2.0, prose: 3.5, conservative: 2.0 }
 | 6th | Performance + correctness | 17 issues (3 critical) | `acquireParser`/`releaseParser` pool, DFS `stack.pop()` O(n), `CHARS_PER_TOKEN` by content type, `IMPORTANT_FILE_PATTERNS` backtrack-safe, `scoreDependency` exact matching |
 | 7th | Edge cases + production | 13 issues (2 critical) | `perSnippetBudget` post-selection compute, parser pool race fix (re-check after await), `extractTomlSection` array-table handling, scoped package normalization, `lastIndexOf` for monorepos, pom.xml two-pass parsing, `enableConsole` default false, React component `type: "function"`, `validateGrammarsPath` tightened |
 
+### Phase 2 Review History (6 Rounds)
+
+| Round | Focus | Issues | Key Fixes |
+|-------|-------|--------|-----------|
+| 1st (8th overall) | Initial Phase 2 integration | 15 issues (3 critical) | Architecture detector structure, call graph edge handling, middleware dedup |
+| 2nd (9th overall) | Correctness & memory | 12 issues (2 critical) | `disposeCallGraph` cleanup, `canonicalizeCycle` dedup, iterative DFS, `InMemorySummaryCache` |
+| 3rd (10th overall) | Budget guards & safety | 14 issues (3 critical) | Budget guard hardening, cycle dedup correctness, path safety improvements |
+| 4th (11th overall) | Path handling & accuracy | 10 issues (2 critical) | `shortFilePath` 2-segment paths, `TYPE_PRIORITY` ordering, Windows backslash normalization |
+| 5th (12th overall) | Import cap & disposal | 15 issues (3 critical) | `MAX_IMPORT_FILES_FOR_CALL_GRAPH = 2000`, `shortFilePath()` in batch prompt, middleware omitted count display |
+| 6th (13th overall) | Robustness & correctness | 7 issues (3 critical) | Off-by-one import cap fix, use-after-dispose in `disposeCallGraph`, ambiguous `shortFilePath` collision guard, `\w` exec loop replacing Unicode `/gu`, module-level `WEB_FRAMEWORK_NAMES` Set, `MAX_SNIPPET_SCAN_CHARS` bound, double-relativization removal |
+
 ---
 
 ## Test Suite
 
-**655 tests passing** (including 60 Phase 1 + 54 Phase 2 new tests)
+**677 tests passing** (60 Phase 1 + 54 Phase 2 new + incremental additions across 13 review rounds)
 
 | Test File | Tests | Covers |
 |-----------|-------|--------|
@@ -430,7 +441,10 @@ Full code for top 3 files, summaries for next 7, relationship diagram, relevant 
 | Catastrophic regex backtracking | `[^\\/]*` instead of `.*`, no unbounded quantifiers | ✅ Resolved |
 | Cross-block pom.xml matching | Two-pass extraction (blocks first, then fields) | ✅ Resolved |
 | Two-stage LLM doubles latency | Cache Stage 1 results by question hash | Phase 3 |
-| Large codebases timeout | File count limits with smart sampling | Phase 2 |
+| Large codebases timeout | `MAX_IMPORT_FILES_FOR_CALL_GRAPH = 2000` cap + smart sampling | ✅ Resolved |
+| Use-after-dispose in call graph | Extract summary values before `disposeCallGraph()`, clone `hotNodes` | ✅ Resolved |
+| Ambiguous file path matching | `shortFilePath` collision guard — skip when multiple candidates share suffix | ✅ Resolved |
+| Unbounded regex scan in middleware | `MAX_SNIPPET_SCAN_CHARS = 5000` truncation in `detectAuthStrategies` | ✅ Resolved |
 
 ---
 
