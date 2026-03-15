@@ -48,7 +48,7 @@
   ],
   "homepage": "https://github.com/olasunkanmi-SE/codebuddy#readme",
   "l10n": "./l10n",
-  "main": "./dist/extension.js",
+  "main": "./out/extension.js",
   "contributes": {
     "views": {
       "codeBuddy-view-container": [
