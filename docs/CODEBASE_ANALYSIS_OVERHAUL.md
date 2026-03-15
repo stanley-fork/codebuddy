@@ -2,7 +2,7 @@
 
 **Created**: January 2025
 **Updated**: March 15, 2026
-**Status**: Phase 1 Complete — Ready to merge
+**Status**: Phase 2 Complete
 **Feature**: `CodeBuddy.codebaseAnalysis` command
 **Branch**: `feature/code_analysis_overhaul`
 
@@ -13,7 +13,7 @@
 The "Analyze Codebase & Answer Questions" feature was overhauled to replace shallow regex-based extraction with accurate Tree-sitter AST parsing, token-budget-driven context generation, and multi-language dependency detection.
 
 **Before**: Regex-based extraction for 3 languages, no code in LLM context, hard-coded limits (20/15/10/30).
-**After**: Tree-sitter AST extraction for 7 languages, actual code snippets in context, priority-weighted token budget across 10 categories.
+**After**: Tree-sitter AST extraction for 7 languages, actual code snippets in context, priority-weighted token budget across 12 categories.
 
 ### What changed (15 files, +4684 / -296 lines)
 
@@ -50,6 +50,24 @@ CodebaseAnalysisWorker (Worker Thread)
     ├── IMPORTANT_FILE_PATTERNS (22 patterns)
     └── WorkerLogger → parentPort.postMessage()
     ↓
+Phase 2 Detectors (Step 8 in performAnalysis)
+    ├── detectArchitecture() → ArchitectureReport
+    │   ├── Layer detection (9 patterns: controllers, services, repos, ...)
+    │   ├── Pattern detection (Layered, MVC, MVVM, Module-based, Monorepo, Event-driven, Middleware Pipeline)
+    │   ├── Entry point detection
+    │   └── Project type detection (REST API, SPA, Full-stack, CLI, Library, Microservices)
+    ├── buildCallGraph() → CallGraph
+    │   ├── Node/edge construction from FileImportData
+    │   ├── Relative import resolution (extension + index fallback)
+    │   ├── Circular dependency detection (DFS)
+    │   └── Hot node detection (fan-in ranking)
+    └── detectMiddleware() → MiddlewareReport
+        ├── File-based detection (middleware/, guards/, interceptors/)
+        ├── Express app.use patterns
+        ├── NestJS @UseGuards/@UseInterceptors/@UsePipes
+        ├── Error handler detection (4-param pattern)
+        └── Auth strategy detection (JWT, session, OAuth, API-key, basic)
+    ↓
 WorkerMessage discriminated union
     ├── ANALYZE_CODEBASE
     ├── ANALYSIS_COMPLETE
@@ -57,7 +75,7 @@ WorkerMessage discriminated union
     ├── ANALYSIS_PROGRESS
     └── LOG
     ↓
-createContextFromAnalysis() → 9 budget-managed sections
+createContextFromAnalysis() → 12 budget-managed sections
     ├── Overview
     ├── Frameworks & Technologies
     ├── Language Distribution
@@ -66,10 +84,13 @@ createContextFromAnalysis() → 9 budget-managed sections
     ├── Data Models
     ├── Code Snippets (largest budget share: 40%)
     ├── Domain Relationships
+    ├── Architecture Patterns (Phase 2)
+    ├── Import Graph & Hot Nodes (Phase 2)
+    ├── Middleware & Auth (Phase 2)
     └── File Structure
     ↓
 TokenBudgetAllocator (32K chars, 10% safety margin)
-    ├── Proportional weights (sum ≈ 0.987)
+    ├── Proportional weights (sum ≈ 0.987, 12 categories)
     ├── Priority-based selection
     └── RelevanceScoring (scoreFile, scoreEndpoint)
     ↓
@@ -137,7 +158,9 @@ CHARS_PER_TOKEN = { code: 2.0, prose: 3.5, conservative: 2.0 }
 | overview | 0.025 | 10 | 720 |
 | frameworks | 0.019 | 9 | 547 |
 | languages | 0.013 | 9 | 374 |
-| architecture | 0.094 | 8 | 2707 |
+| architecture | 0.050 | 8 | 1440 |
+| callGraph | 0.022 | 8 | 633 |
+| middleware | 0.022 | 8 | 633 |
 | **codeSnippets** | **0.400** | **7** | **11520** |
 | endpoints | 0.125 | 6 | 3600 |
 | models | 0.125 | 5 | 3600 |
@@ -207,31 +230,43 @@ CHARS_PER_TOKEN = { code: 2.0, prose: 3.5, conservative: 2.0 }
 
 ## Test Suite
 
-**601 tests passing** (including 60 new tests for the overhaul)
+**655 tests passing** (including 60 Phase 1 + 54 Phase 2 new tests)
 
 | Test File | Tests | Covers |
 |-----------|-------|--------|
-| `token-budget.test.ts` | 26 | Constructor, static methods, allocate/clamp, selectWithinBudget (priority, scanning, exhaustion), truncateToFit, getSummary, isExhausted, reset, createAnalysisBudget |
+| `token-budget.test.ts` | 26 | Constructor, static methods, allocate/clamp, selectWithinBudget (priority, scanning, exhaustion), truncateToFit, getSummary, isExhausted, reset, createAnalysisBudget (12 categories) |
 | `tree-sitter-analyzer.test.ts` | 15 | Constructor (fallback path, logger DI), canAnalyze (7 languages + unsupported), getLanguageId (8 mappings), dispose (idempotent), initialize (dedup) |
 | `codebase-analysis-worker-utils.test.ts` | 10 | extractTomlSection: simple/dotted sections, `[[array-table]]` boundary, comment skipping, trailing comments, regex escaping, empty/missing |
 | `architectural-recommendation-utils.test.ts` | 9 | scoreDependency (tier 1 frameworks, tier 2 scoped, question relevance, edge cases), getRelativePath (all markers, node_modules skip, Windows paths, monorepo lastIndexOf) |
+| `architecture-detector.test.ts` | 14 | Layer detection, pattern detection (Layered, MVC, Module-based, Monorepo, Event-driven, Middleware Pipeline), entry points, project type (REST API, SPA, Full-stack, fallback), confidence sorting |
+| `call-graph.test.ts` | 11 | Empty graph, node registration, relative import edges, external import filtering, index file resolution, entry point identification, circular dependency detection (A→B→A), DAG no false positive, hot node fan-in, importedBy tracking |
+| `middleware-detector.test.ts` | 14 | File-based detection (middleware/, guards/), Express app.use, NestJS @UseGuards/@UseInterceptors/@UsePipes, multiple guards, error handler (4-param), auth strategies (JWT, session, OAuth, API-key), model-based Guard class detection, deduplication |
+| `code-summarizer.test.ts` | 10 | LLM batch response parsing, caching (hit/miss/invalidation/clear), batch splitting (>5 items), fallback (LLM throws, bad JSON, markdown fences), summary truncation (200 chars) |
 
 ---
 
 ## File Changes Summary
 
-### New Files (8)
+### New Files (16)
 
 | File | Lines | Purpose |
 |------|-------|---------|
 | `src/services/analyzers/tree-sitter-analyzer.ts` | 1179 | Tree-sitter AST extraction for 7 languages |
 | `src/services/analyzers/token-budget.ts` | 385 | Token budget allocation + relevance scoring |
+| `src/services/analyzers/architecture-detector.ts` | ~230 | Architectural pattern & layer detection |
+| `src/services/analyzers/call-graph.ts` | ~210 | Import graph builder with circular dep detection |
+| `src/services/analyzers/middleware-detector.ts` | ~280 | Middleware, auth, and error handler detection |
+| `src/services/analyzers/code-summarizer.ts` | ~250 | LLM-assisted file summarization with caching |
 | `src/interfaces/analysis.interface.ts` | 190 | Shared types: WorkerMessage, AnalysisResult, BudgetItem |
 | `src/infrastructure/logger/worker-logger.ts` | 113 | Worker-safe logger with parentPort transport |
 | `src/test/suite/token-budget.test.ts` | 349 | Token budget unit tests |
 | `src/test/suite/tree-sitter-analyzer.test.ts` | 166 | Analyzer unit tests |
 | `src/test/suite/codebase-analysis-worker-utils.test.ts` | 133 | TOML extraction tests |
 | `src/test/suite/architectural-recommendation-utils.test.ts` | 178 | Scoring + path utility tests |
+| `src/test/suite/architecture-detector.test.ts` | ~200 | Architecture detection tests |
+| `src/test/suite/call-graph.test.ts` | ~170 | Call graph builder tests |
+| `src/test/suite/middleware-detector.test.ts` | ~250 | Middleware detection tests |
+| `src/test/suite/code-summarizer.test.ts` | ~200 | Code summarizer tests |
 
 ### Modified Files (7)
 
@@ -247,33 +282,120 @@ CHARS_PER_TOKEN = { code: 2.0, prose: 3.5, conservative: 2.0 }
 
 ---
 
-## Phase 2: Rich Analysis (Planned)
+## Phase 2: Rich Analysis (Complete)
 
-**Goal**: Add architectural pattern detection and code summaries.
+**Goal**: Add architectural pattern detection, import graph analysis, middleware/auth detection, and LLM-assisted code summaries.
 
-### 2.1 Architectural Pattern Detection
+### 2.1 Architecture Detector
 
-**New file**: `src/services/analyzers/architecture-detector.ts`
+**File**: `src/services/analyzers/architecture-detector.ts` (~230 lines, new)
 
-Detect layered architecture, module-based organization, MVC/MVVM, microservices indicators, monorepo structure. Use existing `TreeSitterAnalysisResult` imports and file structure patterns.
+Detects high-level architectural patterns from file structure and analysis data.
+
+**Layer detection (9 patterns)**: controllers, services, repositories, models, middleware, views, config, utils, tests — each with regex patterns matching directory and file names.
+
+**Pattern detection (7 types)**:
+
+| Pattern | Detection Criteria |
+|---------|--------------------|
+| Layered | controllers + services layer present |
+| MVC | controllers + models (+ optional views) |
+| MVVM | viewmodels layer present |
+| Module-based | Feature directories with internal structure |
+| Monorepo | `packages/`, `apps/`, or `workspaces/` directories |
+| Event-driven | Event/listener/subscriber/handler files |
+| Middleware Pipeline | Middleware/guards/interceptors directories |
+
+**Entry point detection**: Matches files like `index.ts`, `main.ts`, `app.ts`, `server.ts` at project root or `src/`.
+
+**Project type detection**: REST API (endpoints present), Frontend SPA (React/Vue/Angular files), Full-stack (both), CLI (bin/ files), Library (exports heavy), Microservices (multiple package.json).
 
 ### 2.2 Call Graph Builder
 
-**New file**: `src/services/analyzers/call-graph.ts`
+**File**: `src/services/analyzers/call-graph.ts` (~210 lines, new)
 
-Track function→function calls, class→service dependencies, identify entry points, detect circular dependencies. Output as `CallGraph { nodes, edges, entryPoints, hotPaths }`.
+Builds a directed dependency graph from file import data collected during Tree-sitter analysis.
 
-### 2.3 Code Summarizer (LLM-assisted)
+**Input**: `FileImportData { file, imports: ExtractedImport[], exports: string[] }` — collected per-file during `analyzeFileContents`.
 
-**New file**: `src/services/analyzers/code-summarizer.ts`
+**Output**: `CallGraph { nodes: Map<string, CallGraphNode>, edges: CallGraphEdge[], entryPoints: string[], circularDependencies: CircularDependency[], hotNodes: string[] }`
 
-Generate 1-2 sentence summaries per key file, batch to reduce LLM calls, cache with content hash.
+**Key features**:
+- **Relative import resolution**: Tries exact match, then with extensions (`.ts`, `.js`, `.tsx`, `.jsx`), then `/index.*` variants
+- **Circular dependency detection**: DFS with visited + recursion stack tracking, reports full cycle path
+- **Hot node detection**: Nodes with `importedBy.length >= 3`, sorted by fan-in descending
+- **Entry points**: Nodes not imported by any other file
 
-### 2.4 Auth/Middleware Flow Detection
+### 2.3 Middleware & Auth Detector
 
-**New file**: `src/services/analyzers/middleware-detector.ts`
+**File**: `src/services/analyzers/middleware-detector.ts` (~280 lines, new)
 
-Detect Express middleware chains, NestJS guards, request lifecycle hooks, error handlers.
+Detects middleware chains, auth strategies, error handlers, and request lifecycle hooks.
+
+**Detection sources (4 layers)**:
+
+| Layer | Technique |
+|-------|-----------|
+| File-based | Regex on file paths: `middleware/`, `guards/`, `interceptors/`, `pipes/`, `filters/` |
+| Express patterns | `app.use(handler)` / `router.use('/route', handler)` regex |
+| NestJS decorators | `@UseGuards(...)`, `@UseInterceptors(...)`, `@UsePipes(...)` regex |
+| Model-based | Class names matching `Guard`, `Middleware`, `Interceptor`, `Filter`, `Pipe`, `Strategy` |
+
+**Middleware classification**: 7 types via name-pattern matching: `auth`, `validation`, `logging`, `error-handler`, `cors`, `rate-limit`, `general`.
+
+**Auth strategy detection (5 strategies)**:
+
+| Strategy | File Indicators | Content Indicators |
+|----------|-----------------|--------------------|
+| JWT | `jwt`, `token` in filename | `jsonwebtoken`, `jwt.sign`, `JwtStrategy`, `JwtAuthGuard` |
+| Session | `session` in filename | `express-session`, `cookie-session`, `req.session` |
+| OAuth | `oauth`, `passport` in filename | `passport`, `OAuth2Strategy`, `@nestjs/passport` |
+| API Key | `api-key` in filename | `x-api-key`, `apiKey`, `api_key` |
+| Basic | `basic-auth` in filename | `basic-auth`, `BasicAuthGuard`, `Authorization.*Basic` |
+
+**Error handler detection**: Matches Express-style 4-parameter functions `(err, req, res, next)`.
+
+**Deduplication**: By `name:file` composite key.
+
+### 2.4 Code Summarizer
+
+**File**: `src/services/analyzers/code-summarizer.ts` (~250 lines, new)
+
+Generates concise 1-2 sentence summaries for key files using LLM with content-hash caching.
+
+**Design**: Dependency injection via `SummarizeFunction = (prompt: string) => Promise<string>` — decouples from LLM infrastructure for testability.
+
+**Cache**: In-memory `Map<file, { summary, expiry }>` with content-hash validation (MD5, first 12 hex chars) and 30-minute TTL. Cache invalidated on content change or TTL expiry.
+
+**Batching**: Files processed in batches of ≤5 per LLM call. Prompt includes truncated file content (≤3000 chars) with language tag. Response expected as JSON array.
+
+**Fallback chain**:
+1. Parse LLM response as JSON array
+2. Strip markdown fences, retry JSON parse
+3. Line-by-line regex (`filename: summary text`)
+4. Heuristic summary (export names + framework patterns)
+
+### 2.5 Integration
+
+**Worker integration** (`codebase-analysis.worker.ts`):
+- `analyzeFileContents` now collects `fileImports: FileImportData[]` from tree-sitter import extraction
+- New Step 8 in `performAnalysis` runs all 3 detectors with individual try/catch:
+  - `detectArchitecture(partialResult)` → `architectureReport`
+  - `buildCallGraph(fileImports, workspacePath)` → `callGraphSummary`
+  - `detectMiddleware(files, codeSnippets, dataModels)` → `middlewareSummary`
+
+**Context generation** (`architectural-recommendation.ts`):
+- 3 new section generators: `generateArchitectureSection`, `generateCallGraphSection`, `generateMiddlewareSection`
+- Sections 9-11 (Architecture Patterns, Import Graph & Hot Nodes, Middleware & Auth)
+- File structure moved to section 12
+
+**Interface types** (`analysis.interface.ts`):
+- Added: `ArchitecturalPatternData`, `CallGraphSummary`, `MiddlewareSummary`
+- Extended `AnalysisResult` and `CachedAnalysis` with optional Phase 2 fields
+
+**Token budget** (`token-budget.ts`):
+- Split `architecture: 0.094` into `architecture: 0.050`, `callGraph: 0.022`, `middleware: 0.022`
+- Now 12 categories (was 10), weights sum ≈ 0.987
 
 ---
 
@@ -316,8 +438,12 @@ Full code for top 3 files, summaries for next 7, relationship diagram, relevant 
 
 - Tree-sitter analyzer: `src/services/analyzers/tree-sitter-analyzer.ts`
 - Token budget: `src/services/analyzers/token-budget.ts`
+- Architecture detector: `src/services/analyzers/architecture-detector.ts`
+- Call graph builder: `src/services/analyzers/call-graph.ts`
+- Middleware detector: `src/services/analyzers/middleware-detector.ts`
+- Code summarizer: `src/services/analyzers/code-summarizer.ts`
 - Worker: `src/workers/codebase-analysis.worker.ts`
 - Context generation: `src/commands/architectural-recommendation.ts`
 - Shared types: `src/interfaces/analysis.interface.ts`
 - Worker logger: `src/infrastructure/logger/worker-logger.ts`
-- Tests: `src/test/suite/{token-budget,tree-sitter-analyzer,codebase-analysis-worker-utils,architectural-recommendation-utils}.test.ts`
+- Tests: `src/test/suite/{token-budget,tree-sitter-analyzer,codebase-analysis-worker-utils,architectural-recommendation-utils,architecture-detector,call-graph,middleware-detector,code-summarizer}.test.ts`
