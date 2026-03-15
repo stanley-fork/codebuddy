@@ -36,6 +36,17 @@ import {
 
 const orchestrator = Orchestrator.getInstance();
 
+/** Maps domain-signal section names to budget allocation keys (module-level constant) */
+const FOCUSED_SECTION_BUDGET_KEY: Record<string, string> = {
+  middleware: "middleware",
+  endpoints: "endpoints",
+  models: "models",
+  architecture: "architecture",
+  dependencies: "dependencies",
+  callGraph: "callGraph",
+  snippets: "codeSnippets",
+};
+
 /**
  * Determines if analysis cache should be refreshed based on age and availability
  */
@@ -1012,7 +1023,8 @@ function generateFocusedContextSection(
   if (focused.summaryFiles.length > 0) {
     lines.push("\n### Related Files (summaries)");
     for (const f of focused.summaryFiles) {
-      lines.push(`- **${f.file}**: ${f.summary}`);
+      const label = f.summary || "source file";
+      lines.push(`- **${f.file}**: ${label}`);
     }
   }
 
@@ -1040,6 +1052,9 @@ function generateFocusedContextSection(
   }
 
   const content = lines.join("\n");
+  if (!budget.hasAllocation("focusedContext")) {
+    return content;
+  }
   return budget.truncateToFit("focusedContext", content);
 }
 
@@ -1060,7 +1075,9 @@ function createContextFromAnalysis(
     `Creating context from analysis with ${totalBudgetChars} char budget`,
   );
 
-  const budget = createAnalysisBudget(totalBudgetChars, !!userQuestion);
+  const budget = createAnalysisBudget(totalBudgetChars, {
+    withFocusedContext: !!userQuestion,
+  });
 
   const sections: string[] = [];
 
@@ -1078,18 +1095,9 @@ function createContextFromAnalysis(
       }
 
       // Apply domain-signal boosts to relevant budget sections
-      const SECTION_BUDGET_KEY: Record<string, string> = {
-        middleware: "middleware",
-        endpoints: "endpoints",
-        models: "models",
-        architecture: "architecture",
-        dependencies: "dependencies",
-        callGraph: "callGraph",
-        snippets: "codeSnippets",
-      };
       const BOOST_MULTIPLIER = 1.5;
       for (const section of focused.boostedSections) {
-        const budgetKey = SECTION_BUDGET_KEY[section];
+        const budgetKey = FOCUSED_SECTION_BUDGET_KEY[section];
         if (budgetKey) {
           budget.boost(budgetKey, BOOST_MULTIPLIER);
         }

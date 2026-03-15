@@ -26,6 +26,8 @@ export const TOP_FULL_CODE_FILES = 3;
 
 /** Maximum number of files to return with summary only */
 export const TOP_SUMMARY_FILES = 7;
+/** Per-file content cap to prevent a single large file from dominating focused context */
+const MAX_FILE_CONTENT_CHARS = 8000;
 
 /** Stop words excluded from keyword extraction */
 const STOP_WORDS = new Set([
@@ -225,28 +227,34 @@ export interface FocusedContext {
 // Keyword extraction
 // ---------------------------------------------------------------------------
 
+/** Maximum question length to prevent main-thread blocking */
+const MAX_QUESTION_LENGTH = 2000;
+
 /**
  * Extract meaningful keywords from the user question.
  * Decomposes camelCase/PascalCase, removes stop words, deduplicates.
  * Preserves path-like tokens (e.g. src/auth/jwt.service.ts) separately.
  */
 export function extractKeywords(question: string): string[] {
-  // Capture path-like tokens before lowercasing alters them
-  const pathLike = /[a-zA-Z0-9_\-]+[./][a-zA-Z0-9_./-]+/g;
-  const pathTokens = (question.match(pathLike) ?? []).map((t) =>
-    t.toLowerCase(),
-  );
+  // Truncate pathologically long questions
+  const q =
+    question.length > MAX_QUESTION_LENGTH
+      ? question.slice(0, MAX_QUESTION_LENGTH)
+      : question;
 
-  const decomposed = question
-    // Insert space before uppercase for camelCase splitting (getUserById → get User By Id)
+  // Capture path-like tokens (must start with a letter to exclude version strings like 1.2.3)
+  const pathLike = /[a-zA-Z][a-zA-Z0-9_\-]*[./][a-zA-Z0-9_./-]+/g;
+  const pathTokens = (q.match(pathLike) ?? []).map((t) => t.toLowerCase());
+
+  const decomposed = q
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .toLowerCase()
     .replace(/[^a-z0-9_\-/.]+/g, " ")
     .split(/\s+/);
 
-  const MIN_LEN = 2; // include "db", "id", "ts", "js", "ui"
+  const MIN_LEN = 2;
   const all = [...decomposed, ...pathTokens]
-    .map((t) => t.replace(/^[-_.]+|[-_.]+$/g, "")) // trim punctuation edges
+    .map((t) => t.replace(/^[-_.]+|[-_.]+$/g, ""))
     .filter((t) => t.length >= MIN_LEN && !STOP_WORDS.has(t));
 
   return [...new Set(all)];
@@ -282,16 +290,17 @@ export function scoreFile(
     }
   }
 
-  // Content keyword matches (capped)
+  // Content keyword matches (capped at 5, with early exit)
   if (content) {
     const lowerContent = content.toLowerCase();
     let contentHits = 0;
     for (const kw of keywords) {
       if (lowerContent.includes(kw)) {
         contentHits++;
+        if (contentHits >= 5) break;
       }
     }
-    score += Math.min(contentHits, 5);
+    score += contentHits;
   }
 
   // Call graph bonuses
@@ -462,9 +471,14 @@ export function buildFocusedContext(
   // Pass 1: fill full-code tier from highest-scoring snippet files
   for (const [file, score] of snippetFiles.slice(0, TOP_FULL_CODE_FILES)) {
     const snippet = snippetMap.get(file)!;
+    const content =
+      snippet.content.length > MAX_FILE_CONTENT_CHARS
+        ? snippet.content.slice(0, MAX_FILE_CONTENT_CHARS) +
+          "\n// ... truncated"
+        : snippet.content;
     fullCodeFiles.push({
       file: snippet.file,
-      content: snippet.content,
+      content,
       language: snippet.language,
     });
     rankedFiles.push({ file, score, tier: "full" });
@@ -478,7 +492,7 @@ export function buildFocusedContext(
 
   for (const [file, score] of summaryPool.slice(0, TOP_SUMMARY_FILES)) {
     const snippet = snippetMap.get(file);
-    const summary = snippet?.summary ?? `File: ${file}`;
+    const summary = snippet?.summary ?? `${snippet?.language ?? "source"} file`;
     summaryFiles.push({ file, summary });
     rankedFiles.push({ file, score, tier: "summary" });
   }
@@ -540,23 +554,36 @@ const questionCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_CACHE_SIZE = 100;
 
+/** FNV-1a 32-bit hash — better avalanche than djb2, still zero-dependency */
 function hashQuestion(question: string): string {
-  let h = 0;
+  let h = 0x811c9dc5; // FNV offset basis
   for (let i = 0; i < question.length; i++) {
-    h = (Math.imul(31, h) + question.charCodeAt(i)) | 0;
+    h ^= question.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0; // FNV prime, unsigned
   }
   return h.toString(36);
 }
 
 /**
- * Cheap structural fingerprint of the analysis to detect workspace changes.
- * Uses file count + first/last file path + total lines.
+ * Structural fingerprint of the analysis to detect workspace changes.
+ * Samples evenly-spaced file paths to reduce false-positive collisions in monorepos.
  */
 function analysisFingerprint(analysis: CachedAnalysis): string {
   const files = analysis.files;
-  const first = files[0] ?? "";
-  const last = files[files.length - 1] ?? "";
-  return `${files.length}:${first}:${last}:${analysis.summary.totalLines}`;
+  const len = files.length;
+  if (len === 0) return "empty";
+
+  // Sample up to 5 evenly-spaced paths
+  const indices = [
+    0,
+    Math.floor(len * 0.25),
+    Math.floor(len * 0.5),
+    Math.floor(len * 0.75),
+    len - 1,
+  ].filter((v, i, arr) => arr.indexOf(v) === i); // dedup
+
+  const sampled = indices.map((i) => files[i]).join("|");
+  return `${len}:${analysis.summary.totalLines}:${sampled}`;
 }
 
 /** Evict all stale entries from cache */
@@ -578,6 +605,11 @@ export function analyzeQuestionCached(
   analysis: CachedAnalysis,
   now: number = Date.now(),
 ): QuestionAnalysis {
+  // Guard against empty or pathologically long questions
+  if (!question || question.trim().length === 0) {
+    return { keywords: [], relevantSections: [], fileScores: new Map() };
+  }
+
   const fp = analysisFingerprint(analysis);
   const key = `${hashQuestion(question)}|${fp}`;
   const cached = questionCache.get(key);
@@ -601,7 +633,11 @@ export function analyzeQuestionCached(
   return qa;
 }
 
-/** Clear the question analysis cache (for testing) */
+/**
+ * Clear the question analysis cache.
+ * @internal Exported for testing and extension lifecycle (workspace switch).
+ * Call from the extension's workspace-change handler to prevent stale cross-workspace hits.
+ */
 export function clearQuestionCache(): void {
   questionCache.clear();
 }
