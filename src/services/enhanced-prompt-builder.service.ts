@@ -9,6 +9,11 @@ import {
   ContextSelectionResult,
 } from "./smart-context-selector.service";
 import { ContextRetriever } from "./context-retriever";
+import { PersistentCodebaseUnderstandingService } from "./persistent-codebase-understanding.service";
+import {
+  formatArchitectureContext,
+  type ArchitectureSection,
+} from "../agents/langgraph/tools/architecture";
 
 export interface QuestionAnalysis {
   isCodebaseRelated: boolean;
@@ -158,6 +163,12 @@ export class EnhancedPromptBuilderService {
       this.generateQuestionSpecificInstructions(questionType);
     const responseFormat = this.generateResponseFormatGuidelines(questionType);
 
+    // Inject architecture analysis data when question is architectural
+    let architectureContext = "";
+    if (questionType.isArchitectural) {
+      architectureContext = await this.getArchitectureContext();
+    }
+
     const enhancedPrompt = `
       persona: |
         You are CodeBuddy, an expert software engineer and architect with deep knowledge of the provided codebase context. Your goal is to provide comprehensive, accurate, and actionable responses.
@@ -170,6 +181,7 @@ export class EnhancedPromptBuilderService {
         token_budget_info: ${contextResult.totalTokens}/${contextResult.budgetTokens} tokens used${contextResult.wasTruncated ? ` (${contextResult.droppedCount} snippets omitted)` : ""}
         codebase_snippets: |
           ${formattedContext}
+        ${architectureContext ? `architecture_analysis: |\n          ${architectureContext.split("\n").join("\n          ")}` : ""}
 
       rules:
         - Base your response *only* on the provided context. Do not invent APIs or file structures.
@@ -599,5 +611,32 @@ export class EnhancedPromptBuilderService {
     }
 
     return formatSections.join("\n");
+  }
+
+  /**
+   * Retrieves architecture analysis data from the persistent codebase service.
+   * Returns formatted markdown or empty string if unavailable.
+   */
+  private async getArchitectureContext(): Promise<string> {
+    try {
+      const service = PersistentCodebaseUnderstandingService.getInstance();
+      const analysis = await service.getComprehensiveAnalysis();
+      if (!analysis) return "";
+
+      const context = formatArchitectureContext(
+        analysis,
+        "all" as ArchitectureSection,
+      );
+
+      if (context.includes("No architecture data available")) return "";
+
+      this.logger.info(
+        `Injected architecture context: ${context.length} chars`,
+      );
+      return context;
+    } catch (error) {
+      this.logger.warn("Failed to retrieve architecture context", error);
+      return "";
+    }
   }
 }
