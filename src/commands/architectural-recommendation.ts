@@ -17,6 +17,8 @@ import {
   TokenBudgetAllocator,
   createAnalysisBudget,
   RelevanceScoring,
+  FOCUSED_CONTEXT_FALLBACK_CHARS,
+  DOMAIN_BOOST_MULTIPLIER,
 } from "../services/analyzers/token-budget";
 import type {
   CodeSnippet,
@@ -28,8 +30,24 @@ import type {
   BudgetItem,
   DependencyData,
 } from "../interfaces/analysis.interface";
+import {
+  analyzeQuestionCached,
+  buildFocusedContext,
+  type FocusedContext,
+} from "../services/analyzers/question-relevance";
 
 const orchestrator = Orchestrator.getInstance();
+
+/** Maps domain-signal section names to budget allocation keys (module-level constant) */
+const FOCUSED_SECTION_BUDGET_KEY: Record<string, string> = {
+  middleware: "middleware",
+  endpoints: "endpoints",
+  models: "models",
+  architecture: "architecture",
+  dependencies: "dependencies",
+  callGraph: "callGraph",
+  snippets: "codeSnippets",
+};
 
 /**
  * Determines if analysis cache should be refreshed based on age and availability
@@ -286,7 +304,7 @@ export async function architecturalRecommendationCommand(): Promise<void> {
           message: "Preparing analysis context...",
         });
 
-        const context = createContextFromAnalysis(analysis);
+        const context = createContextFromAnalysis(analysis, question);
         const sanitizedContext = context
           .replace(/`/g, "\\`")
           .replace(/\${/g, "\\${");
@@ -804,6 +822,127 @@ function generateRelationshipsSection(
   return lines.join("\n");
 }
 
+// ─── Phase 2: Architecture Section ───────────────────────────────
+
+function generateArchitectureSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const report = analysis.architectureReport;
+  if (!report || report.patterns.length === 0) return "";
+
+  const lines = [`## Architecture`];
+  lines.push(`**Project Type**: ${report.projectType}`);
+
+  if (report.entryPoints.length > 0) {
+    lines.push(
+      `**Entry Points**: ${report.entryPoints
+        .slice(0, 5)
+        .map((e) => getRelativePath(e))
+        .join(", ")}`,
+    );
+  }
+
+  lines.push("");
+  lines.push("**Detected Patterns**:");
+  for (const pattern of report.patterns.slice(0, 5)) {
+    const pct = Math.round(pattern.confidence * 100);
+    lines.push(`- **${pattern.name}** (${pct}% confidence)`);
+    for (const ind of pattern.indicators.slice(0, 3)) {
+      lines.push(`  - ${ind}`);
+    }
+  }
+
+  const text = lines.join("\n");
+  return budget.truncateToFit("architecture", text);
+}
+
+// ─── Phase 2: Call Graph Section ─────────────────────────────────
+
+function generateCallGraphSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const graph = analysis.callGraphSummary;
+  if (!graph || graph.nodeCount === 0) return "";
+
+  const lines = [`## Import Graph`];
+  lines.push(`**${graph.nodeCount} modules**, ${graph.edgeCount} import edges`);
+
+  if (graph.hotNodes.length > 0) {
+    lines.push("");
+    lines.push("**Most-imported modules** (dependency hubs):");
+    for (const node of graph.hotNodes.slice(0, 8)) {
+      lines.push(`- ${node}`);
+    }
+  }
+
+  if (graph.entryPoints.length > 0) {
+    lines.push("");
+    lines.push(
+      `**Entry points** (not imported by others): ${graph.entryPoints.slice(0, 8).join(", ")}`,
+    );
+  }
+
+  if (graph.circularDependencies.length > 0) {
+    lines.push("");
+    lines.push(
+      `**⚠ Circular dependencies** (${graph.circularDependencies.length}):`,
+    );
+    for (const cycle of graph.circularDependencies.slice(0, 3)) {
+      lines.push(`- ${cycle.join(" → ")}`);
+    }
+  }
+
+  const text = lines.join("\n");
+  return budget.truncateToFit("callGraph", text);
+}
+
+// ─── Phase 2: Middleware Section ─────────────────────────────────
+
+function generateMiddlewareSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const mw = analysis.middlewareSummary;
+  if (!mw || (mw.middleware.length === 0 && mw.authStrategies.length === 0)) {
+    return "";
+  }
+
+  const lines = [`## Middleware & Auth`];
+
+  if (mw.authStrategies.length > 0) {
+    lines.push(`**Auth strategies**: ${mw.authStrategies.join(", ")}`);
+  }
+
+  if (mw.errorHandlerCount > 0) {
+    const filesInfo =
+      mw.errorHandlerFiles && mw.errorHandlerFiles.length > 0
+        ? ` (${mw.errorHandlerFiles.join(", ")})`
+        : "";
+    lines.push(`**Error handlers**: ${mw.errorHandlerCount}${filesInfo}`);
+  }
+
+  if (mw.middleware.length > 0) {
+    lines.push("");
+    lines.push("**Middleware**:");
+    const displayed = mw.middleware.slice(0, 15);
+    for (const m of displayed) {
+      // m.file is already relative (worker's relativize() applied at serialization boundary)
+      const file = m.file ? ` (${m.file})` : "";
+      lines.push(`- \`${m.name}\` [${m.type}]${file}`);
+    }
+    if (mw.middleware.length > 15) {
+      lines.push(
+        `- ... and ${mw.middleware.length - 15} more (${mw.middleware.length} total)`,
+      );
+    }
+  }
+
+  const text = lines.join("\n");
+  return budget.truncateToFit("middleware", text);
+}
+
 function generateFileStructureSection(
   analysis: CachedAnalysis,
   budget: TokenBudgetAllocator,
@@ -864,8 +1003,75 @@ function generateFileStructureSection(
 }
 
 /**
+ * Generate a focused-context section (Phase 3) that prepends high-relevance
+ * files and artifacts before the regular budget-managed sections.
+ */
+function generateFocusedContextSection(
+  focused: FocusedContext,
+  budget: TokenBudgetAllocator,
+): string {
+  const lines: string[] = [];
+
+  if (focused.fullCodeFiles.length > 0) {
+    lines.push("### Most Relevant Files (full code)");
+    for (const f of focused.fullCodeFiles) {
+      lines.push(`\n**${f.file}** (${f.language})`);
+      lines.push("```" + f.language);
+      lines.push(f.content);
+      lines.push("```");
+    }
+  }
+
+  if (focused.summaryFiles.length > 0) {
+    lines.push("\n### Related Files (summaries)");
+    for (const f of focused.summaryFiles) {
+      const label = f.summary || "source file";
+      lines.push(`- **${f.file}**: ${label}`);
+    }
+  }
+
+  if (focused.relevantEndpoints.length > 0) {
+    lines.push("\n### Relevant Endpoints");
+    for (const ep of focused.relevantEndpoints.slice(0, 10)) {
+      lines.push(
+        `- \`${ep.method} ${ep.path}\`${ep.file ? ` (${ep.file})` : ""}`,
+      );
+    }
+  }
+
+  if (focused.relevantModels.length > 0) {
+    lines.push("\n### Relevant Models");
+    for (const m of focused.relevantModels.slice(0, 10)) {
+      lines.push(`- \`${m.name}\` (${m.type})${m.file ? ` — ${m.file}` : ""}`);
+    }
+  }
+
+  if (focused.relatedDependencies.length > 0) {
+    lines.push("\n### Key Dependencies (high fan-in)");
+    for (const dep of focused.relatedDependencies) {
+      lines.push(`- ${dep}`);
+    }
+  }
+
+  const content = lines.join("\n");
+  if (!budget.hasAllocation("focusedContext")) {
+    // Defensive: budget wasn't configured for focused context.
+    // Truncate to a safe fallback to prevent context overflow.
+    logger.warn(
+      "generateFocusedContextSection: no focusedContext budget allocation; applying fallback truncation",
+    );
+    return content.slice(0, FOCUSED_CONTEXT_FALLBACK_CHARS);
+  }
+  return budget.truncateToFit("focusedContext", content);
+}
+
+/**
  * Create rich analysis context from persistent analysis data
  * Uses token budget allocation for optimal context utilization
+ *
+ * Phase 3: When userQuestion is provided, runs two-stage analysis:
+ *   Stage 1 — Score/rank files by question relevance (cached)
+ *   Stage 2 — Prepend focused context before budget-managed sections
  */
 function createContextFromAnalysis(
   analysis: CachedAnalysis,
@@ -876,9 +1082,42 @@ function createContextFromAnalysis(
     `Creating context from analysis with ${totalBudgetChars} char budget`,
   );
 
-  const budget = createAnalysisBudget(totalBudgetChars);
+  const budget = createAnalysisBudget(totalBudgetChars, {
+    withFocusedContext: !!userQuestion,
+  });
 
   const sections: string[] = [];
+
+  // === PHASE 3: Question-focused context (prepended when question is available) ===
+  if (userQuestion) {
+    const qa = analyzeQuestionCached(userQuestion, analysis);
+    const focused = buildFocusedContext(analysis, qa);
+
+    if (focused.rankedFiles.length > 0) {
+      const focusedSection = generateFocusedContextSection(focused, budget);
+      if (focusedSection) {
+        sections.push("## Question-Focused Context");
+        sections.push(focusedSection);
+        sections.push("");
+      }
+
+      // Apply domain-signal boosts to relevant budget sections
+      for (const section of focused.boostedSections) {
+        const budgetKey = FOCUSED_SECTION_BUDGET_KEY[section];
+        if (budgetKey) {
+          budget.boost(budgetKey, DOMAIN_BOOST_MULTIPLIER);
+        }
+      }
+
+      logger.debug(
+        `Phase 3: ${focused.fullCodeFiles.length} full-code files, ` +
+          `${focused.summaryFiles.length} summary files, ` +
+          `${focused.relevantEndpoints.length} endpoints, ` +
+          `${focused.relevantModels.length} models, ` +
+          `boosted sections: [${focused.boostedSections.join(", ")}]`,
+      );
+    }
+  }
 
   // === SECTION 1: Codebase Overview (always include) ===
   sections.push(
@@ -928,8 +1167,37 @@ function createContextFromAnalysis(
     sections.push("");
   }
 
-  // === SECTION 9: File Structure (using budget) ===
-  sections.push(generateFileStructureSection(analysis, budget));
+  // === SECTION 9: Architecture Patterns (Phase 2) ===
+  if (!budget.isExhausted()) {
+    const archSection = generateArchitectureSection(analysis, budget);
+    if (archSection) {
+      sections.push(archSection);
+      sections.push("");
+    }
+  }
+
+  // === SECTION 10: Import Graph (Phase 2) ===
+  if (!budget.isExhausted()) {
+    const callGraphSection = generateCallGraphSection(analysis, budget);
+    if (callGraphSection) {
+      sections.push(callGraphSection);
+      sections.push("");
+    }
+  }
+
+  // === SECTION 11: Middleware & Auth (Phase 2) ===
+  if (!budget.isExhausted()) {
+    const middlewareSection = generateMiddlewareSection(analysis, budget);
+    if (middlewareSection) {
+      sections.push(middlewareSection);
+      sections.push("");
+    }
+  }
+
+  // === SECTION 12: File Structure (using budget) ===
+  if (!budget.isExhausted()) {
+    sections.push(generateFileStructureSection(analysis, budget));
+  }
 
   // Log budget summary
   const budgetSummary = budget.getSummary();

@@ -8,8 +8,17 @@ import {
   TreeSitterAnalysisResult,
 } from "../services/analyzers/tree-sitter-analyzer";
 import { WorkerLogger } from "../infrastructure/logger/worker-logger";
+import { detectArchitecture } from "../services/analyzers/architecture-detector";
+import {
+  buildCallGraph,
+  disposeCallGraph,
+  type FileImportData,
+} from "../services/analyzers/call-graph";
+import { detectMiddleware } from "../services/analyzers/middleware-detector";
 import type {
   CodeSnippet,
+  EndpointData,
+  ModelData,
   AnalysisResult,
   WorkerInputData,
 } from "../interfaces/analysis.interface";
@@ -24,6 +33,7 @@ export { extractTomlSection };
 const MAX_SNIPPETS = 30;
 const MAX_SNIPPET_LINES = 75;
 const MAX_SNIPPET_CHARS = 3000;
+const MAX_IMPORT_FILES_FOR_CALL_GRAPH = 2000;
 
 // Important file patterns for code snippet collection
 // Defined at module level to avoid re-instantiation on each call
@@ -166,9 +176,10 @@ class CodebaseAnalysisTask {
         Object.keys(dependencies).length,
       );
 
-      this.reportProgress(100, 100, "Analysis complete!");
+      // Step 8: Phase 2 — Architecture detection, call graph, middleware
+      this.reportProgress(95, 100, "Detecting architecture patterns...");
 
-      return {
+      const partialResult: AnalysisResult = {
         frameworks,
         dependencies,
         files,
@@ -184,6 +195,100 @@ class CodebaseAnalysisTask {
           complexity,
         },
       };
+
+      // Architecture detection (pure, no I/O)
+      try {
+        const archReport = detectArchitecture(partialResult);
+        partialResult.architectureReport = {
+          patterns: archReport.patterns.map((p) => ({
+            name: p.name,
+            confidence: p.confidence,
+            indicators: p.indicators,
+          })),
+          entryPoints: archReport.entryPoints,
+          projectType: archReport.projectType,
+        };
+        this.logger.info(
+          `Architecture: ${archReport.projectType}, ${archReport.patterns.length} patterns detected`,
+        );
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Architecture detection failed: ${msg}`);
+      }
+
+      // Call graph (from collected imports)
+      try {
+        if (analysisResults.fileImports.length > 0) {
+          const callGraph = buildCallGraph(
+            analysisResults.fileImports,
+            data.workspacePath,
+          );
+          // Release import data — the call graph now owns the topology
+          analysisResults.fileImports.length = 0;
+
+          // Extract summary values BEFORE disposing — disposeCallGraph zeroes the arrays
+          partialResult.callGraphSummary = {
+            entryPoints: callGraph.entryPoints.slice(0, 20),
+            hotNodes: [...callGraph.hotNodes],
+            circularDependencies: callGraph.circularDependencies.slice(0, 10),
+            edgeCount: callGraph.edges.length,
+            nodeCount: callGraph.nodes.size,
+          };
+          this.logger.info(
+            `Call graph: ${callGraph.nodes.size} nodes, ${callGraph.edges.length} edges, ${callGraph.circularDependencies.length} cycles`,
+          );
+
+          // Explicitly release node arrays and Map to reduce GC pressure in worker
+          disposeCallGraph(callGraph);
+        }
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Call graph build failed: ${msg}`);
+      }
+
+      // Middleware detection (from files + snippets)
+      try {
+        const mwReport = detectMiddleware(
+          files,
+          analysisResults.codeSnippets,
+          analysisResults.dataModels,
+        );
+
+        // Relativize file paths at serialization boundary to avoid
+        // leaking absolute filesystem paths into LLM context
+        const relativize = (fp: string): string =>
+          fp.startsWith(data.workspacePath)
+            ? fp.slice(data.workspacePath.length).replace(/^[\\/]/, "")
+            : path.basename(fp);
+
+        partialResult.middlewareSummary = {
+          middleware: mwReport.middleware.slice(0, 30).map((m) => ({
+            name: m.name,
+            type: m.type,
+            file: relativize(m.file),
+          })),
+          authStrategies: mwReport.authFlows.map((f) => f.strategy),
+          authFlows: mwReport.authFlows.map((f) => ({
+            strategy: f.strategy,
+            indicators: f.indicators,
+            files: f.files.map(relativize),
+          })),
+          errorHandlerCount: mwReport.errorHandlers.length,
+          errorHandlerFiles: mwReport.errorHandlers
+            .slice(0, 5)
+            .map((e) => relativize(e.file)),
+        };
+        this.logger.info(
+          `Middleware: ${mwReport.middleware.length} detected, ${mwReport.authFlows.length} auth strategies`,
+        );
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Middleware detection failed: ${msg}`);
+      }
+
+      this.reportProgress(100, 100, "Analysis complete!");
+
+      return partialResult;
     } finally {
       // Dispose Tree-sitter analyzer to release WASM memory
       if (this.treeSitterAnalyzer) {
@@ -215,14 +320,16 @@ class CodebaseAnalysisTask {
 
   private async analyzeFileContents(files: string[]): Promise<{
     codeSnippets: CodeSnippet[];
-    apiEndpoints: any[];
-    dataModels: any[];
+    apiEndpoints: EndpointData[];
+    dataModels: ModelData[];
     totalLines: number;
     languageDistribution: Record<string, number>;
+    fileImports: FileImportData[];
   }> {
     const codeSnippets: CodeSnippet[] = [];
-    const apiEndpoints: any[] = [];
-    const dataModels: any[] = [];
+    const apiEndpoints: EndpointData[] = [];
+    const dataModels: ModelData[] = [];
+    const fileImports: FileImportData[] = [];
     let totalLines = 0;
     const languageDistribution: Record<string, number> = {};
 
@@ -262,6 +369,26 @@ class CodebaseAnalysisTask {
             dataModels,
             apiEndpoints,
           );
+
+          // Collect import data for call graph (Phase 2)
+          if (
+            fileAnalysis.treeSitterAnalysis.imports ||
+            fileAnalysis.treeSitterAnalysis.exports
+          ) {
+            if (fileImports.length < MAX_IMPORT_FILES_FOR_CALL_GRAPH) {
+              fileImports.push({
+                file,
+                imports: fileAnalysis.treeSitterAnalysis.imports || [],
+                exports: fileAnalysis.treeSitterAnalysis.exports || [],
+              });
+              if (fileImports.length === MAX_IMPORT_FILES_FOR_CALL_GRAPH) {
+                this.logger.warn(
+                  `Import collection capped at ${MAX_IMPORT_FILES_FOR_CALL_GRAPH} files; ` +
+                    `call graph may be incomplete for large codebases`,
+                );
+              }
+            }
+          }
         } else {
           // Fallback: collect regex-extracted endpoints and models
           if (fileAnalysis.endpoints.length > 0) {
@@ -319,6 +446,7 @@ class CodebaseAnalysisTask {
       dataModels,
       totalLines,
       languageDistribution,
+      fileImports,
     };
   }
 
