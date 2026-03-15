@@ -205,6 +205,29 @@ export class TokenBudgetAllocator {
   }
 
   /**
+   * Boost a category's budget by redistributing from other categories.
+   * Increases the target by `floor(current * (multiplier - 1))`, shrinking
+   * other categories proportionally to compensate.
+   */
+  boost(name: string, multiplier: number): void {
+    const allocation = this.allocations.get(name);
+    if (!allocation || multiplier <= 1) return;
+
+    const extra = Math.floor(allocation.budget * (multiplier - 1));
+    if (extra <= 0) return;
+
+    const otherKeys = [...this.allocations.keys()].filter((k) => k !== name);
+    if (otherKeys.length === 0) return;
+
+    const shrinkPer = Math.floor(extra / otherKeys.length);
+    for (const k of otherKeys) {
+      const other = this.allocations.get(k)!;
+      other.budget = Math.max(0, other.budget - shrinkPer);
+    }
+    allocation.budget += extra;
+  }
+
+  /**
    * Reset all usage counters
    */
   reset(): void {
@@ -219,29 +242,37 @@ export class TokenBudgetAllocator {
  */
 export function createAnalysisBudget(
   totalChars: number = 32000,
+  withFocusedContext: boolean = false,
 ): TokenBudgetAllocator {
   const budget = new TokenBudgetAllocator(totalChars);
   const effective = budget.getTotalRemaining(); // after safety margin
 
-  // Proportional weights applied to the *effective* budget (total minus safety margin),
-  // not the raw total. Sum ≈ 0.987, leaving ~1.3% unallocated buffer.
+  // When Phase 3 focused context is active, split the codeSnippets allocation
+  // into focusedContext (20%) + codeSnippets (20%) so they don't compete.
+  const snippetsWeight = withFocusedContext ? 0.2 : 0.4;
+  const focusedWeight = withFocusedContext ? 0.2 : 0;
+
   // Phase 2 splits architecture allocation into architecture + callGraph + middleware
-  // Code snippets reduced from 0.468 to 0.40 because code tokenizes
-  // at ~2 chars/token vs 3.5 for prose, so same char budget = more tokens
+  // Code snippets reduced from 0.468 to 0.40 (or 0.20+0.20 with focused context)
+  // because code tokenizes at ~2 chars/token vs 3.5 for prose
   const weights: [string, number, number][] = [
     ["overview", 0.025, 10],
     ["frameworks", 0.019, 9],
     ["languages", 0.013, 9],
-    ["architecture", 0.05, 8], // Phase 2: architecture patterns, project type
-    ["callGraph", 0.022, 8], // Phase 2: import graph, entry points, cycles
-    ["middleware", 0.022, 8], // Phase 2: middleware, auth flows
-    ["codeSnippets", 0.4, 7], // largest share (reduced for denser tokenization)
+    ["architecture", 0.05, 8],
+    ["callGraph", 0.022, 8],
+    ["middleware", 0.022, 8],
+    ["codeSnippets", snippetsWeight, 7],
     ["endpoints", 0.125, 6],
     ["models", 0.125, 5],
     ["dependencies", 0.062, 5],
     ["relationships", 0.062, 4],
     ["fileList", 0.062, 3],
   ];
+
+  if (withFocusedContext) {
+    weights.push(["focusedContext", focusedWeight, 11]); // highest priority
+  }
 
   for (const [name, weight, priority] of weights) {
     budget.allocate(name, Math.floor(effective * weight), priority);

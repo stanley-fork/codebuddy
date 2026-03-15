@@ -135,48 +135,51 @@ const STOP_WORDS = new Set([
  * Domain terms that indicate the user cares about a specific architectural concept.
  * Maps keywords → analysis sections they correlate with.
  */
-const DOMAIN_SIGNALS: ReadonlyMap<string, string[]> = new Map([
-  ["auth", ["middleware", "endpoints"]],
-  ["authentication", ["middleware", "endpoints"]],
-  ["authorization", ["middleware"]],
-  ["jwt", ["middleware"]],
-  ["oauth", ["middleware"]],
-  ["session", ["middleware"]],
-  ["middleware", ["middleware"]],
-  ["guard", ["middleware"]],
-  ["interceptor", ["middleware"]],
-  ["pipe", ["middleware"]],
-  ["filter", ["middleware"]],
-  ["route", ["endpoints"]],
-  ["endpoint", ["endpoints"]],
-  ["api", ["endpoints"]],
-  ["rest", ["endpoints"]],
-  ["graphql", ["endpoints"]],
-  ["controller", ["endpoints", "architecture"]],
-  ["service", ["architecture"]],
-  ["repository", ["architecture"]],
-  ["model", ["models"]],
-  ["schema", ["models"]],
-  ["entity", ["models"]],
-  ["database", ["models", "dependencies"]],
-  ["dependency", ["dependencies", "callGraph"]],
-  ["import", ["callGraph"]],
-  ["circular", ["callGraph"]],
-  ["cycle", ["callGraph"]],
-  ["architecture", ["architecture"]],
-  ["pattern", ["architecture"]],
-  ["layer", ["architecture"]],
-  ["monorepo", ["architecture"]],
-  ["microservice", ["architecture"]],
-  ["event", ["architecture"]],
-  ["component", ["snippets"]],
-  ["function", ["snippets"]],
-  ["class", ["snippets", "models"]],
-  ["test", ["snippets"]],
-  ["config", ["snippets", "dependencies"]],
-  ["error", ["middleware"]],
-  ["handler", ["middleware", "endpoints"]],
-]);
+const DOMAIN_SIGNALS: ReadonlyMap<string, readonly string[]> =
+  /* @__PURE__ */ Object.freeze(
+    new Map([
+      ["auth", ["middleware", "endpoints"]],
+      ["authentication", ["middleware", "endpoints"]],
+      ["authorization", ["middleware"]],
+      ["jwt", ["middleware"]],
+      ["oauth", ["middleware"]],
+      ["session", ["middleware"]],
+      ["middleware", ["middleware"]],
+      ["guard", ["middleware"]],
+      ["interceptor", ["middleware"]],
+      ["pipe", ["middleware"]],
+      ["filter", ["middleware"]],
+      ["route", ["endpoints"]],
+      ["endpoint", ["endpoints"]],
+      ["api", ["endpoints"]],
+      ["rest", ["endpoints"]],
+      ["graphql", ["endpoints"]],
+      ["controller", ["endpoints", "architecture"]],
+      ["service", ["architecture"]],
+      ["repository", ["architecture"]],
+      ["model", ["models"]],
+      ["schema", ["models"]],
+      ["entity", ["models"]],
+      ["database", ["models", "dependencies"]],
+      ["dependency", ["dependencies", "callGraph"]],
+      ["import", ["callGraph"]],
+      ["circular", ["callGraph"]],
+      ["cycle", ["callGraph"]],
+      ["architecture", ["architecture"]],
+      ["pattern", ["architecture"]],
+      ["layer", ["architecture"]],
+      ["monorepo", ["architecture"]],
+      ["microservice", ["architecture"]],
+      ["event", ["architecture"]],
+      ["component", ["snippets"]],
+      ["function", ["snippets"]],
+      ["class", ["snippets", "models"]],
+      ["test", ["snippets"]],
+      ["config", ["snippets", "dependencies"]],
+      ["error", ["middleware"]],
+      ["handler", ["middleware", "endpoints"]],
+    ]),
+  );
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -224,16 +227,29 @@ export interface FocusedContext {
 
 /**
  * Extract meaningful keywords from the user question.
- * Removes stop words, short tokens, and deduplicates.
+ * Decomposes camelCase/PascalCase, removes stop words, deduplicates.
+ * Preserves path-like tokens (e.g. src/auth/jwt.service.ts) separately.
  */
 export function extractKeywords(question: string): string[] {
-  const tokens = question
+  // Capture path-like tokens before lowercasing alters them
+  const pathLike = /[a-zA-Z0-9_\-]+[./][a-zA-Z0-9_./-]+/g;
+  const pathTokens = (question.match(pathLike) ?? []).map((t) =>
+    t.toLowerCase(),
+  );
+
+  const decomposed = question
+    // Insert space before uppercase for camelCase splitting (getUserById → get User By Id)
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
     .toLowerCase()
     .replace(/[^a-z0-9_\-/.]+/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length > 2 && !STOP_WORDS.has(t));
+    .split(/\s+/);
 
-  return [...new Set(tokens)];
+  const MIN_LEN = 2; // include "db", "id", "ts", "js", "ui"
+  const all = [...decomposed, ...pathTokens]
+    .map((t) => t.replace(/^[-_.]+|[-_.]+$/g, "")) // trim punctuation edges
+    .filter((t) => t.length >= MIN_LEN && !STOP_WORDS.has(t));
+
+  return [...new Set(all)];
 }
 
 // ---------------------------------------------------------------------------
@@ -281,17 +297,21 @@ export function scoreFile(
   // Call graph bonuses
   if (callGraph) {
     const normalizedPath = filePath.replace(/\\/g, "/");
+    const norm = (p: string) => p.replace(/\\/g, "/");
+
     if (
-      callGraph.entryPoints.some(
-        (ep) => normalizedPath.endsWith(ep) || ep.endsWith(normalizedPath),
-      )
+      callGraph.entryPoints.some((ep) => {
+        const n = norm(ep);
+        return normalizedPath.endsWith(n) || n.endsWith(normalizedPath);
+      })
     ) {
       score += 2;
     }
     if (
-      callGraph.hotNodes.some(
-        (hn) => normalizedPath.endsWith(hn) || hn.endsWith(normalizedPath),
-      )
+      callGraph.hotNodes.some((hn) => {
+        const n = norm(hn);
+        return normalizedPath.endsWith(n) || n.endsWith(normalizedPath);
+      })
     ) {
       score += 2;
     }
@@ -307,6 +327,7 @@ export function scoreEndpoint(
   endpoint: EndpointData,
   keywords: string[],
 ): number {
+  if (!endpoint.path) return 0;
   let score = 0;
   const lowerPath = endpoint.path.toLowerCase();
   const lowerHandler = (endpoint.handler ?? "").toLowerCase();
@@ -433,30 +454,33 @@ export function buildFocusedContext(
   const fullCodeFiles: FocusedContext["fullCodeFiles"] = [];
   const summaryFiles: FocusedContext["summaryFiles"] = [];
 
-  for (const [file, score] of ranked) {
-    if (fullCodeFiles.length < TOP_FULL_CODE_FILES) {
-      const snippet = snippetMap.get(file);
-      if (snippet) {
-        fullCodeFiles.push({
-          file: snippet.file,
-          content: snippet.content,
-          language: snippet.language,
-        });
-        rankedFiles.push({ file, score, tier: "full" });
-        continue;
-      }
-    }
+  // Two-pass selection: full-code tier from files WITH snippets first,
+  // then summary tier from remaining files (ensures full-code tier is maximally filled)
+  const snippetFiles = ranked.filter(([file]) => snippetMap.has(file));
+  const noSnippetFiles = ranked.filter(([file]) => !snippetMap.has(file));
 
-    if (summaryFiles.length < TOP_SUMMARY_FILES) {
-      const snippet = snippetMap.get(file);
-      const summary = snippet?.summary ?? `File: ${file}`;
-      summaryFiles.push({ file, summary });
-      rankedFiles.push({ file, score, tier: "summary" });
-      continue;
-    }
+  // Pass 1: fill full-code tier from highest-scoring snippet files
+  for (const [file, score] of snippetFiles.slice(0, TOP_FULL_CODE_FILES)) {
+    const snippet = snippetMap.get(file)!;
+    fullCodeFiles.push({
+      file: snippet.file,
+      content: snippet.content,
+      language: snippet.language,
+    });
+    rankedFiles.push({ file, score, tier: "full" });
+  }
 
-    // Beyond both tiers — stop
-    break;
+  // Pass 2: summary tier from remaining snippet files + no-snippet files, sorted by score
+  const summaryPool = [
+    ...snippetFiles.slice(TOP_FULL_CODE_FILES),
+    ...noSnippetFiles,
+  ].sort((a, b) => b[1] - a[1]);
+
+  for (const [file, score] of summaryPool.slice(0, TOP_SUMMARY_FILES)) {
+    const snippet = snippetMap.get(file);
+    const summary = snippet?.summary ?? `File: ${file}`;
+    summaryFiles.push({ file, summary });
+    rankedFiles.push({ file, score, tier: "summary" });
   }
 
   // Score endpoints
@@ -473,17 +497,18 @@ export function buildFocusedContext(
     .sort((a, b) => b.score - a.score)
     .map(({ m }) => m);
 
-  // Related dependencies from call graph: files that import top files
+  // Related dependencies: hot nodes NOT already in our top files
+  // (shared utilities/services that our top files likely import)
   const relatedDependencies: string[] = [];
   const callGraph = analysis.callGraphSummary;
   if (callGraph) {
-    // Hot nodes that overlap with top files are relevant dependencies
     for (const hn of callGraph.hotNodes) {
-      const isTopFile = rankedFiles.some(
+      const alreadyRanked = rankedFiles.some(
         (rf) => rf.file.endsWith(hn) || hn.endsWith(rf.file),
       );
-      if (isTopFile && !relatedDependencies.includes(hn)) {
+      if (!alreadyRanked && !relatedDependencies.includes(hn)) {
         relatedDependencies.push(hn);
+        if (relatedDependencies.length >= 5) break;
       }
     }
   }
@@ -503,12 +528,19 @@ export function buildFocusedContext(
 // Cache
 // ---------------------------------------------------------------------------
 
-/** Simple question-hash cache for Stage 1 results */
-const questionCache = new Map<string, { qa: QuestionAnalysis; ts: number }>();
+/** Cache entry stores the original question for collision validation */
+interface CacheEntry {
+  question: string;
+  analysisFP: string;
+  qa: QuestionAnalysis;
+  ts: number;
+}
+
+const questionCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_CACHE_SIZE = 100;
 
 function hashQuestion(question: string): string {
-  // Simple string hash — good enough for short question strings
   let h = 0;
   for (let i = 0; i < question.length; i++) {
     h = (Math.imul(31, h) + question.charCodeAt(i)) | 0;
@@ -517,33 +549,55 @@ function hashQuestion(question: string): string {
 }
 
 /**
+ * Cheap structural fingerprint of the analysis to detect workspace changes.
+ * Uses file count + first/last file path + total lines.
+ */
+function analysisFingerprint(analysis: CachedAnalysis): string {
+  const files = analysis.files;
+  const first = files[0] ?? "";
+  const last = files[files.length - 1] ?? "";
+  return `${files.length}:${first}:${last}:${analysis.summary.totalLines}`;
+}
+
+/** Evict all stale entries from cache */
+function evictStale(now: number): void {
+  for (const [k, v] of questionCache) {
+    if (now - v.ts > CACHE_TTL_MS) {
+      questionCache.delete(k);
+    }
+  }
+}
+
+/**
  * Analyze question with caching. Returns cached result if the same question
- * was analyzed within the TTL window.
+ * was analyzed within the TTL window against the same analysis.
+ * Uses composite key (hash + analysis fingerprint) with collision validation.
  */
 export function analyzeQuestionCached(
   question: string,
   analysis: CachedAnalysis,
   now: number = Date.now(),
 ): QuestionAnalysis {
-  const key = hashQuestion(question);
+  const fp = analysisFingerprint(analysis);
+  const key = `${hashQuestion(question)}|${fp}`;
   const cached = questionCache.get(key);
 
-  if (cached && now - cached.ts < CACHE_TTL_MS) {
+  if (
+    cached &&
+    cached.question === question && // collision guard
+    now - cached.ts < CACHE_TTL_MS
+  ) {
     return cached.qa;
   }
 
   const qa = analyzeQuestion(question, analysis);
-  questionCache.set(key, { qa, ts: now });
 
-  // Evict stale entries (keep cache bounded)
-  if (questionCache.size > 100) {
-    for (const [k, v] of questionCache) {
-      if (now - v.ts > CACHE_TTL_MS) {
-        questionCache.delete(k);
-      }
-    }
+  // Evict before writing to keep size accurate
+  if (questionCache.size >= MAX_CACHE_SIZE) {
+    evictStale(now);
   }
 
+  questionCache.set(key, { question, analysisFP: fp, qa, ts: now });
   return qa;
 }
 

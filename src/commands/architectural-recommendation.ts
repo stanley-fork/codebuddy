@@ -1040,7 +1040,7 @@ function generateFocusedContextSection(
   }
 
   const content = lines.join("\n");
-  return budget.truncateToFit("codeSnippets", content);
+  return budget.truncateToFit("focusedContext", content);
 }
 
 /**
@@ -1060,7 +1060,7 @@ function createContextFromAnalysis(
     `Creating context from analysis with ${totalBudgetChars} char budget`,
   );
 
-  const budget = createAnalysisBudget(totalBudgetChars);
+  const budget = createAnalysisBudget(totalBudgetChars, !!userQuestion);
 
   const sections: string[] = [];
 
@@ -1076,6 +1076,25 @@ function createContextFromAnalysis(
         sections.push(focusedSection);
         sections.push("");
       }
+
+      // Apply domain-signal boosts to relevant budget sections
+      const SECTION_BUDGET_KEY: Record<string, string> = {
+        middleware: "middleware",
+        endpoints: "endpoints",
+        models: "models",
+        architecture: "architecture",
+        dependencies: "dependencies",
+        callGraph: "callGraph",
+        snippets: "codeSnippets",
+      };
+      const BOOST_MULTIPLIER = 1.5;
+      for (const section of focused.boostedSections) {
+        const budgetKey = SECTION_BUDGET_KEY[section];
+        if (budgetKey) {
+          budget.boost(budgetKey, BOOST_MULTIPLIER);
+        }
+      }
+
       logger.debug(
         `Phase 3: ${focused.fullCodeFiles.length} full-code files, ` +
           `${focused.summaryFiles.length} summary files, ` +
