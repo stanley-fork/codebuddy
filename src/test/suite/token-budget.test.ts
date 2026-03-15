@@ -355,10 +355,10 @@ suite("createAnalysisBudget", () => {
     const totalAllocated = summary.reduce((sum, s) => sum + s.budget, 0);
     const effectiveBudget = 32000 * 0.9;
     const unallocatedRatio = 1 - totalAllocated / effectiveBudget;
-    // Should be between 0.5% and 5% buffer
+    // Weights sum ≈ 0.987 → ~1.3% unallocated. Tighten range to catch drift.
     assert.ok(
-      unallocatedRatio > 0.005 && unallocatedRatio < 0.05,
-      `Unallocated ratio ${(unallocatedRatio * 100).toFixed(2)}% should be between 0.5% and 5%`,
+      unallocatedRatio > 0.005 && unallocatedRatio < 0.025,
+      `Unallocated ratio ${(unallocatedRatio * 100).toFixed(2)}% should be between 0.5% and 2.5%`,
     );
   });
 });

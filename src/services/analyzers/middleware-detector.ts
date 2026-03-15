@@ -89,13 +89,26 @@ const ERROR_HANDLER_PATTERN =
   /\(\s*(?:err|error)\s*,\s*(?:req|request)\s*,\s*(?:res|response)\s*,\s*(?:next)\s*\)/;
 
 // app.use / router.use patterns — bounded quantifier to prevent ReDoS
-const MIDDLEWARE_USE_PATTERN =
-  /(?:app|router|server)\.use\(\s*(?:['"`]([^'"`]{1,200})['"`]\s*,\s*)?([^(),]{1,80})/g;
+// Defined as source string; each call site constructs a fresh RegExp to avoid lastIndex state
+const MIDDLEWARE_USE_SOURCE =
+  /(?:app|router|server)\.use\(\s*(?:['"`]([^'"`]{1,200})['"`]\s*,\s*)?([^(),]{1,80})/
+    .source;
 
-// NestJS decorators
-const NESTJS_GUARD_PATTERN = /@UseGuards\s*\(\s*([^)]+)\s*\)/g;
-const NESTJS_INTERCEPTOR_PATTERN = /@UseInterceptors\s*\(\s*([^)]+)\s*\)/g;
-const NESTJS_PIPE_PATTERN = /@UsePipes\s*\(\s*([^)]+)\s*\)/g;
+// NestJS decorator sources — constructed fresh per call to avoid stateful global regex
+const NESTJS_DECORATOR_SOURCES: {
+  source: string;
+  defaultType: MiddlewareType;
+}[] = [
+  { source: /@UseGuards\s*\(\s*([^)]+)\s*\)/.source, defaultType: "auth" },
+  {
+    source: /@UseInterceptors\s*\(\s*([^)]+)\s*\)/.source,
+    defaultType: "general",
+  },
+  {
+    source: /@UsePipes\s*\(\s*([^)]+)\s*\)/.source,
+    defaultType: "validation",
+  },
+];
 
 // ─── Detector ────────────────────────────────────────────────────
 
@@ -180,7 +193,9 @@ function detectExpressMiddleware(
 ): void {
   const content = snippet.content;
 
-  for (const match of content.matchAll(MIDDLEWARE_USE_PATTERN)) {
+  for (const match of content.matchAll(
+    new RegExp(MIDDLEWARE_USE_SOURCE, "g"),
+  )) {
     const route = match[1] || undefined;
     const handler = match[2]?.trim();
     if (!handler) continue;
@@ -207,34 +222,17 @@ function detectNestJSDecorators(
 ): void {
   const content = snippet.content;
 
-  const patterns: { regex: RegExp; defaultType: MiddlewareType }[] = [
-    {
-      regex: new RegExp(NESTJS_GUARD_PATTERN.source, "g"),
-      defaultType: "auth",
-    },
-    {
-      regex: new RegExp(NESTJS_INTERCEPTOR_PATTERN.source, "g"),
-      defaultType: "general",
-    },
-    {
-      regex: new RegExp(NESTJS_PIPE_PATTERN.source, "g"),
-      defaultType: "validation",
-    },
-  ];
-
-  for (const { regex, defaultType } of patterns) {
-    for (const match of content.matchAll(regex)) {
+  for (const { source, defaultType } of NESTJS_DECORATOR_SOURCES) {
+    for (const match of content.matchAll(new RegExp(source, "g"))) {
       const names = match[1]
         .split(",")
         .map((n) => n.trim())
         .filter(Boolean);
       for (const name of names) {
+        const classified = classifyMiddleware(name);
         middleware.push({
           name,
-          type:
-            classifyMiddleware(name) === "general"
-              ? defaultType
-              : classifyMiddleware(name),
+          type: classified === "general" ? defaultType : classified,
           file: snippet.file,
         });
       }

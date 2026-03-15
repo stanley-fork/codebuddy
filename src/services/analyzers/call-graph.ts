@@ -120,6 +120,12 @@ export function buildCallGraph(
  * Call when the graph is no longer needed to free memory on large codebases.
  */
 export function disposeCallGraph(graph: CallGraph): void {
+  // Clear individual node arrays to release references
+  for (const node of graph.nodes.values()) {
+    node.imports.length = 0;
+    node.importedBy.length = 0;
+    node.exports.length = 0;
+  }
   graph.nodes.clear();
   graph.edges.length = 0;
   graph.entryPoints.length = 0;
@@ -130,8 +136,11 @@ export function disposeCallGraph(graph: CallGraph): void {
 // ─── Path Resolution ─────────────────────────────────────────────
 
 function normalizePath(filePath: string, workspacePath: string): string {
-  const rel = path.relative(workspacePath, filePath);
-  return rel.replace(/\\/g, "/");
+  // Normalize both to forward-slash before computing relative path
+  // to ensure consistent behavior across Windows/macOS/Linux
+  const normalizedFile = filePath.replace(/\\/g, "/");
+  const normalizedWorkspace = workspacePath.replace(/\\/g, "/");
+  return path.posix.relative(normalizedWorkspace, normalizedFile);
 }
 
 function isRelativeImport(source: string): boolean {
@@ -203,20 +212,20 @@ function detectCircularDependencies(
       depIter: Iterator<string>;
       pathIndex: number;
     };
-    const path: string[] = [];
-    const pathSet = new Map<string, number>(); // file → index in path for O(1) lookup
+    const cyclePath: string[] = [];
+    const cyclePathSet = new Map<string, number>(); // file → index in path for O(1) lookup
     const workStack: Frame[] = [];
 
     const pushFrame = (file: string): void => {
       const node = nodes.get(file);
       const deps = node?.imports ?? [];
-      pathSet.set(file, path.length);
-      path.push(file);
+      cyclePathSet.set(file, cyclePath.length);
+      cyclePath.push(file);
       visited.add(file);
       workStack.push({
         file,
         depIter: deps[Symbol.iterator](),
-        pathIndex: path.length - 1,
+        pathIndex: cyclePath.length - 1,
       });
     };
 
@@ -228,16 +237,16 @@ function detectCircularDependencies(
 
       if (done) {
         // Leaving this node — pop from path
-        pathSet.delete(frame.file);
-        path.length = frame.pathIndex; // truncate path
+        cyclePathSet.delete(frame.file);
+        cyclePath.length = frame.pathIndex; // truncate path
         workStack.pop();
         continue;
       }
 
-      if (pathSet.has(dep)) {
+      if (cyclePathSet.has(dep)) {
         // Back-edge → cycle found
-        const cycleStart = pathSet.get(dep)!;
-        const cycle = path.slice(cycleStart).concat(dep);
+        const cycleStart = cyclePathSet.get(dep)!;
+        const cycle = cyclePath.slice(cycleStart).concat(dep);
         const key = [...cycle].sort().join("|");
         if (!seenCycleKeys.has(key)) {
           seenCycleKeys.add(key);
@@ -257,13 +266,15 @@ function detectCircularDependencies(
 
 // ─── Hot Node Detection ──────────────────────────────────────────
 
+const HOT_NODE_MIN_FAN_IN = 3;
+
 function findHotNodes(
   nodes: Map<string, CallGraphNode>,
   limit: number,
 ): string[] {
   return [...nodes.entries()]
     .map(([file, node]) => ({ file, fanIn: node.importedBy.length }))
-    .filter((n) => n.fanIn > 0)
+    .filter((n) => n.fanIn >= HOT_NODE_MIN_FAN_IN)
     .sort((a, b) => b.fanIn - a.fanIn)
     .slice(0, limit)
     .map((n) => n.file);

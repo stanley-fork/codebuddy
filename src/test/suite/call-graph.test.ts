@@ -167,7 +167,7 @@ suite("Call Graph Builder", () => {
   });
 
   suite("hot nodes", () => {
-    test("identifies most-imported files", () => {
+    test("identifies files imported by >= 3 others", () => {
       const graph = buildCallGraph(
         [
           makeImportData({
@@ -187,6 +187,25 @@ suite("Call Graph Builder", () => {
         WS,
       );
       assert.ok(graph.hotNodes.includes("src/shared.ts"));
+    });
+
+    test("excludes files imported by fewer than 3 others", () => {
+      const graph = buildCallGraph(
+        [
+          makeImportData({
+            file: `${WS}/src/a.ts`,
+            imports: [{ source: "./util", specifiers: ["x"], isDefault: false }],
+          }),
+          makeImportData({
+            file: `${WS}/src/b.ts`,
+            imports: [{ source: "./util", specifiers: ["y"], isDefault: false }],
+          }),
+          makeImportData({ file: `${WS}/src/util.ts`, exports: ["x", "y"] }),
+        ],
+        WS,
+      );
+      // util.ts only imported by 2 files — below threshold
+      assert.ok(!graph.hotNodes.includes("src/util.ts"));
     });
   });
 
