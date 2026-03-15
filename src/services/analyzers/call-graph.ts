@@ -150,6 +150,8 @@ function isRelativeImport(source: string): boolean {
 /**
  * Resolve a relative import to a known file in the graph.
  * Tries common extensions and index files.
+ * Returns null for imports that resolve outside the workspace
+ * (e.g., `../../../outside`) — these produce paths not in knownFiles.
  */
 function resolveImportPath(
   fromFile: string,
@@ -160,6 +162,11 @@ function resolveImportPath(
   const dir = path.posix.dirname(fromFile);
   const base = path.posix.join(dir, importSource);
   const normalized = path.posix.normalize(base);
+
+  // Paths escaping workspace root normalize to ../... which won't be in knownFiles
+  if (normalized.startsWith("../") || normalized.startsWith("..\\")) {
+    return null;
+  }
 
   // Try exact match first
   if (knownFiles.has(normalized)) return normalized;
@@ -191,6 +198,25 @@ function resolveImportPath(
 }
 
 // ─── Circular Dependency Detection ───────────────────────────────
+
+/**
+ * Normalize a cycle to its canonical form for deduplication.
+ * Rotates the body (excluding the repeated closing node) so the
+ * lexicographically smallest node comes first. This ensures that
+ * A→B→C→A and B→C→A→B produce the same key.
+ */
+function canonicalizeCycle(cycle: string[]): string {
+  // cycle = [A, B, C, A] — last element repeats first
+  const body = cycle.slice(0, -1);
+  if (body.length === 0) return "";
+
+  const minIdx = body.reduce(
+    (minI, val, i) => (val < body[minI] ? i : minI),
+    0,
+  );
+  const rotated = [...body.slice(minIdx), ...body.slice(0, minIdx)];
+  return rotated.join("|");
+}
 
 /**
  * Iterative DFS to detect circular dependencies.
@@ -236,9 +262,11 @@ function detectCircularDependencies(
       const { value: dep, done } = frame.depIter.next();
 
       if (done) {
-        // Leaving this node — pop from path
+        // Leaving this node — pop from path.
+        // Truncate via .length assignment: a JS trick that shrinks the array
+        // in-place by discarding all elements at or after pathIndex.
         cyclePathSet.delete(frame.file);
-        cyclePath.length = frame.pathIndex; // truncate path
+        cyclePath.length = frame.pathIndex;
         workStack.pop();
         continue;
       }
@@ -247,8 +275,8 @@ function detectCircularDependencies(
         // Back-edge → cycle found
         const cycleStart = cyclePathSet.get(dep)!;
         const cycle = cyclePath.slice(cycleStart).concat(dep);
-        const key = [...cycle].sort().join("|");
-        if (!seenCycleKeys.has(key)) {
+        const key = canonicalizeCycle(cycle);
+        if (key && !seenCycleKeys.has(key)) {
           seenCycleKeys.add(key);
           cycles.push(cycle);
         }
