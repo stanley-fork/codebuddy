@@ -407,6 +407,6 @@ function parseFallbackLine(response: string, basename: string): string | null {
   // Find the delimiter after the filename in the ORIGINAL string
   const after = response.slice(idx + basename.length).trimStart();
   // Bound capture to 210 chars to prevent excessive allocation from malformed LLM output
-  const delimMatch = after.match(/^[:—\-]\s*(.{1,210})/);
+  const delimMatch = after.match(/^[:—-]\s*(.{1,210})/);
   return delimMatch ? delimMatch[1].trim().slice(0, 200) : null;
 }
