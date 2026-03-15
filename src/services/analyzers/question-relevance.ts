@@ -28,6 +28,8 @@ export const TOP_FULL_CODE_FILES = 3;
 export const TOP_SUMMARY_FILES = 7;
 /** Per-file content cap to prevent a single large file from dominating focused context */
 const MAX_FILE_CONTENT_CHARS = 8000;
+/** Max chars to scan for keyword scoring — keeps main-thread work bounded */
+const MAX_SCORE_SCAN_CHARS = 8000;
 
 /** Stop words excluded from keyword extraction */
 const STOP_WORDS = new Set([
@@ -243,9 +245,12 @@ export function extractKeywords(question: string): string[] {
       : question;
 
   // Capture path-like tokens: must start with a letter, contain / or .,
-  // and the segment after the separator must also start with a letter
+  // and the segment after the separator must also start with a letter.
+  // Cap matches at 120 chars to prevent greedy suffix consumption.
   const pathLike = /[a-zA-Z][a-zA-Z0-9_\-]*[./][a-zA-Z][a-zA-Z0-9_./-]*/g;
-  const pathTokens = (q.match(pathLike) ?? []).map((t) => t.toLowerCase());
+  const pathTokens = (q.match(pathLike) ?? []).map((t) =>
+    (t.length > 120 ? t.slice(0, 120) : t).toLowerCase(),
+  );
 
   const decomposed = q
     .replace(/([a-z])([A-Z])/g, "$1 $2")
@@ -292,13 +297,17 @@ export function scoreFile(
   }
 
   // Content keyword matches (capped at 5, with early exit)
-  if (content) {
-    const lowerContent = content.toLowerCase();
+  if (content && keywords.length > 0) {
+    // Cap scan window to prevent main-thread blocking on large files
+    const scannable =
+      content.length > MAX_SCORE_SCAN_CHARS
+        ? content.slice(0, MAX_SCORE_SCAN_CHARS)
+        : content;
+    const lowerContent = scannable.toLowerCase();
     let contentHits = 0;
     for (const kw of keywords) {
       if (lowerContent.includes(kw)) {
-        contentHits++;
-        if (contentHits >= 5) break;
+        if (++contentHits >= 5) break;
       }
     }
     score += contentHits;
@@ -363,16 +372,17 @@ export function scoreModel(model: ModelData, keywords: string[]): number {
     if (lowerName.includes(kw)) score += 4;
   }
 
-  // Property/method matches (early exit at cap)
+  // Property/method matches — labeled break exits both loops at cap
   const members = [...(model.methods ?? []), ...(model.properties ?? [])];
   let memberHits = 0;
-  for (const m of members) {
-    if (memberHits >= 3) break;
+
+  memberScan: for (const m of members) {
     const lowerMember = m.toLowerCase();
     for (const kw of keywords) {
       if (lowerMember.includes(kw)) {
         memberHits++;
-        break; // one hit per member is enough
+        if (memberHits >= 3) break memberScan;
+        break; // one hit per member is enough; continue outer
       }
     }
   }
@@ -443,6 +453,27 @@ export function analyzeQuestion(
 // Focused context builder
 // ---------------------------------------------------------------------------
 
+const EXT_TO_LANGUAGE: Record<string, string> = {
+  ts: "typescript",
+  js: "javascript",
+  py: "python",
+  go: "go",
+  rs: "rust",
+  java: "java",
+  cs: "csharp",
+  rb: "ruby",
+  tsx: "typescript",
+  jsx: "javascript",
+  vue: "vue",
+  svelte: "svelte",
+};
+
+/** Infer a human-readable language name from a file path extension */
+function inferLanguageFromPath(filePath: string): string {
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+  return (EXT_TO_LANGUAGE[ext] ?? ext) || "source";
+}
+
 /**
  * Build a FocusedContext from the question analysis.
  * Full code for top N files, summaries for the next M, relevant endpoints/models.
@@ -494,7 +525,11 @@ export function buildFocusedContext(
 
   for (const [file, score] of summaryPool.slice(0, TOP_SUMMARY_FILES)) {
     const snippet = snippetMap.get(file);
-    const summary = snippet?.summary ?? `${snippet?.language ?? "source"} file`;
+    // Progressive fallback: snippet summary → snippet language → path-derived language
+    const summary =
+      snippet?.summary ??
+      (snippet?.language ? `${snippet.language} file` : null) ??
+      `${inferLanguageFromPath(file)} file — ${file}`;
     summaryFiles.push({ file, summary });
     rankedFiles.push({ file, score, tier: "summary" });
   }
@@ -521,18 +556,25 @@ export function buildFocusedContext(
   const callGraph = analysis.callGraphSummary;
   if (callGraph) {
     const norm = (p: string) => p.replace(/\\/g, "/");
+    // Pre-build a segment set: full path + trailing filename for O(1) lookup
     const rankedFileSet = new Set(rankedFiles.map((rf) => norm(rf.file)));
+    const rankedSegments = new Set<string>();
+    for (const p of rankedFileSet) {
+      rankedSegments.add(p);
+      const slash = p.lastIndexOf("/");
+      if (slash >= 0) rankedSegments.add(p.slice(slash + 1));
+    }
     const seenDeps = new Set<string>();
 
     for (const hn of callGraph.hotNodes) {
       const normHn = norm(hn);
 
-      // Match at path segment boundaries to avoid partial-name false positives
+      // Segment-index lookup: O(1) instead of O(n) spread-and-scan
+      const hnSegment = normHn.includes("/")
+        ? normHn.slice(normHn.lastIndexOf("/") + 1)
+        : normHn;
       const alreadyRanked =
-        rankedFileSet.has(normHn) ||
-        [...rankedFileSet].some(
-          (rf) => rf.endsWith(`/${normHn}`) || normHn.endsWith(`/${rf}`),
-        );
+        rankedSegments.has(normHn) || rankedSegments.has(hnSegment);
 
       if (!alreadyRanked && !seenDeps.has(normHn)) {
         relatedDependencies.push(hn);
@@ -640,26 +682,25 @@ function hashQuestion(question: string): string {
 }
 
 /**
- * Structural fingerprint of the analysis to detect workspace changes.
- * Samples evenly-spaced file paths and uses file count (more sensitive to
- * add/remove than totalLines) for change detection.
+ * Content-addressable fingerprint of the analysis file list.
+ * FNV-1a hashes ALL file paths in a single O(total_chars) pass — cheap
+ * and eliminates the cross-workspace collision risk of sampling.
  */
 function analysisFingerprint(analysis: CachedAnalysis): string {
   const files = analysis.files;
-  const len = files.length;
-  if (len === 0) return "empty";
+  if (files.length === 0) return "empty";
 
-  // Sample up to 5 evenly-spaced paths
-  const indices = [
-    0,
-    Math.floor(len * 0.25),
-    Math.floor(len * 0.5),
-    Math.floor(len * 0.75),
-    len - 1,
-  ].filter((v, i, arr) => arr.indexOf(v) === i); // dedup
-
-  const sampled = indices.map((i) => files[i]).join("|");
-  return `${len}:${analysis.summary.totalFiles}:${sampled}`;
+  let h = 0x811c9dc5; // FNV offset basis
+  for (const f of files) {
+    for (let i = 0; i < f.length; i++) {
+      h ^= f.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    // Separator sentinel between file paths
+    h ^= 0x2f;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${files.length}:${h.toString(36)}`;
 }
 
 /**
@@ -680,19 +721,22 @@ export function analyzeQuestionCached(
     return { keywords: [], relevantSections: [], fileScores: new Map() };
   }
 
+  // Normalize: trim + collapse whitespace + lowercase for cache hit rate
+  const normalized = question.trim().replace(/\s+/g, " ").toLowerCase();
+
   const fp = analysisFingerprint(analysis);
-  const key = `${hashQuestion(question)}|${fp}`;
+  const key = `${hashQuestion(normalized)}|${fp}`;
   const cached = cache.get(key, now);
 
   if (
     cached &&
-    cached.question === question // collision guard
+    cached.question === normalized // collision guard
   ) {
     return cached.qa;
   }
 
-  const qa = analyzeQuestion(question, analysis);
-  cache.set(key, { question, analysisFP: fp, qa, ts: now }, now);
+  const qa = analyzeQuestion(question, analysis); // original question for keyword extraction
+  cache.set(key, { question: normalized, analysisFP: fp, qa, ts: now }, now);
   return qa;
 }
 
@@ -700,7 +744,10 @@ export function analyzeQuestionCached(
  * Clear the question analysis cache.
  * @internal Exported for testing and extension lifecycle (workspace switch).
  * Call from the extension's workspace-change handler to prevent stale cross-workspace hits.
+ * @param cache Optional cache instance; defaults to the singleton.
  */
-export function clearQuestionCache(): void {
-  questionCache.clear();
+export function clearQuestionCache(
+  cache: QuestionAnalysisCache = questionCache,
+): void {
+  cache.clear();
 }
