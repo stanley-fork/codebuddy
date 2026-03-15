@@ -804,6 +804,116 @@ function generateRelationshipsSection(
   return lines.join("\n");
 }
 
+// ─── Phase 2: Architecture Section ───────────────────────────────
+
+function generateArchitectureSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const report = analysis.architectureReport;
+  if (!report || report.patterns.length === 0) return "";
+
+  const lines = [`## Architecture`];
+  lines.push(`**Project Type**: ${report.projectType}`);
+
+  if (report.entryPoints.length > 0) {
+    lines.push(
+      `**Entry Points**: ${report.entryPoints
+        .slice(0, 5)
+        .map((e) => getRelativePath(e))
+        .join(", ")}`,
+    );
+  }
+
+  lines.push("");
+  lines.push("**Detected Patterns**:");
+  for (const pattern of report.patterns.slice(0, 5)) {
+    const pct = Math.round(pattern.confidence * 100);
+    lines.push(`- **${pattern.name}** (${pct}% confidence)`);
+    for (const ind of pattern.indicators.slice(0, 3)) {
+      lines.push(`  - ${ind}`);
+    }
+  }
+
+  const text = lines.join("\n");
+  return budget.truncateToFit("architecture", text);
+}
+
+// ─── Phase 2: Call Graph Section ─────────────────────────────────
+
+function generateCallGraphSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const graph = analysis.callGraphSummary;
+  if (!graph || graph.nodeCount === 0) return "";
+
+  const lines = [`## Import Graph`];
+  lines.push(`**${graph.nodeCount} modules**, ${graph.edgeCount} import edges`);
+
+  if (graph.hotNodes.length > 0) {
+    lines.push("");
+    lines.push("**Most-imported modules** (dependency hubs):");
+    for (const node of graph.hotNodes.slice(0, 8)) {
+      lines.push(`- ${node}`);
+    }
+  }
+
+  if (graph.entryPoints.length > 0) {
+    lines.push("");
+    lines.push(
+      `**Entry points** (not imported by others): ${graph.entryPoints.slice(0, 8).join(", ")}`,
+    );
+  }
+
+  if (graph.circularDependencies.length > 0) {
+    lines.push("");
+    lines.push(
+      `**⚠ Circular dependencies** (${graph.circularDependencies.length}):`,
+    );
+    for (const cycle of graph.circularDependencies.slice(0, 3)) {
+      lines.push(`- ${cycle.join(" → ")}`);
+    }
+  }
+
+  const text = lines.join("\n");
+  return budget.truncateToFit("callGraph", text);
+}
+
+// ─── Phase 2: Middleware Section ─────────────────────────────────
+
+function generateMiddlewareSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const mw = analysis.middlewareSummary;
+  if (!mw || (mw.middleware.length === 0 && mw.authStrategies.length === 0)) {
+    return "";
+  }
+
+  const lines = [`## Middleware & Auth`];
+
+  if (mw.authStrategies.length > 0) {
+    lines.push(`**Auth strategies**: ${mw.authStrategies.join(", ")}`);
+  }
+
+  if (mw.errorHandlerCount > 0) {
+    lines.push(`**Error handlers**: ${mw.errorHandlerCount}`);
+  }
+
+  if (mw.middleware.length > 0) {
+    lines.push("");
+    lines.push("**Middleware**:");
+    for (const m of mw.middleware.slice(0, 15)) {
+      const file = m.file ? ` (${getRelativePath(m.file)})` : "";
+      lines.push(`- \`${m.name}\` [${m.type}]${file}`);
+    }
+  }
+
+  const text = lines.join("\n");
+  return budget.truncateToFit("middleware", text);
+}
+
 function generateFileStructureSection(
   analysis: CachedAnalysis,
   budget: TokenBudgetAllocator,
@@ -928,7 +1038,28 @@ function createContextFromAnalysis(
     sections.push("");
   }
 
-  // === SECTION 9: File Structure (using budget) ===
+  // === SECTION 9: Architecture Patterns (Phase 2) ===
+  const archSection = generateArchitectureSection(analysis, budget);
+  if (archSection) {
+    sections.push(archSection);
+    sections.push("");
+  }
+
+  // === SECTION 10: Import Graph (Phase 2) ===
+  const callGraphSection = generateCallGraphSection(analysis, budget);
+  if (callGraphSection) {
+    sections.push(callGraphSection);
+    sections.push("");
+  }
+
+  // === SECTION 11: Middleware & Auth (Phase 2) ===
+  const middlewareSection = generateMiddlewareSection(analysis, budget);
+  if (middlewareSection) {
+    sections.push(middlewareSection);
+    sections.push("");
+  }
+
+  // === SECTION 12: File Structure (using budget) ===
   sections.push(generateFileStructureSection(analysis, budget));
 
   // Log budget summary

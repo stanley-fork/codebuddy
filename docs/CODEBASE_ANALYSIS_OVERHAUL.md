@@ -1,25 +1,36 @@
 # Codebase Analysis Feature Overhaul
 
-**Created**: January 2025  
-**Updated**: March 2025  
-**Status**: Phase 1 Complete  
-**Feature**: `CodeBuddy.codebaseAnalysis` command  
+**Created**: January 2025
+**Updated**: March 15, 2026
+**Status**: Phase 1 Complete — Ready to merge
+**Feature**: `CodeBuddy.codebaseAnalysis` command
+**Branch**: `feature/code_analysis_overhaul`
 
 ---
 
 ## Executive Summary
 
-The "Analyze Codebase & Answer Questions" feature currently produces shallow, unreliable analysis due to:
-1. Regex-based code extraction (misses complex patterns)
-2. No actual code in LLM context (only file paths/names)
-3. Aggressive context limits (20 deps, 15 endpoints, 10 models)
-4. Unused Tree-sitter infrastructure
+The "Analyze Codebase & Answer Questions" feature was overhauled to replace shallow regex-based extraction with accurate Tree-sitter AST parsing, token-budget-driven context generation, and multi-language dependency detection.
 
-This document outlines a phased overhaul to transform this into a competitive, accurate analysis feature.
+**Before**: Regex-based extraction for 3 languages, no code in LLM context, hard-coded limits (20/15/10/30).
+**After**: Tree-sitter AST extraction for 7 languages, actual code snippets in context, priority-weighted token budget across 10 categories.
+
+### What changed (15 files, +4684 / -296 lines)
+
+| Area | Before | After |
+|------|--------|-------|
+| Code extraction | Regex (3 languages) | Tree-sitter AST (7 languages) |
+| LLM context | File paths only | Code snippets, endpoints, models, relationships |
+| Context limits | Hard-coded counts | `TokenBudgetAllocator` with proportional weights |
+| Endpoint detection | 3 regex patterns | 25+ patterns across 7 languages |
+| Dependency parsing | `package.json` only | 6 formats (npm, pip, Cargo, Maven, Go, Composer) |
+| Worker safety | None | Path traversal prevention, grammar path validation |
+| Type safety | `data?: any` | Discriminated union `WorkerMessage` (5 variants) |
+| Logging | `console.log` | `WorkerLogger` with level filtering + `parentPort` transport |
 
 ---
 
-## Current Architecture
+## Architecture
 
 ```
 User Question
@@ -27,393 +38,286 @@ User Question
 PersistentCodebaseUnderstandingService
     ↓
 CodebaseAnalysisWorker (Worker Thread)
-    ├── AnalyzerFactory → TypeScriptAnalyzer (regex)
-    ├── extractApiEndpoints() (regex)
-    └── extractDataModels() (regex)
+    ├── validateWorkerInput() → path traversal prevention
+    ├── TreeSitterAnalyzer (7 languages, parser pool)
+    │   ├── extractFunctions()
+    │   ├── extractClasses()
+    │   ├── extractEndpoints()
+    │   ├── extractImports()
+    │   ├── extractExports()
+    │   └── extractReactComponents()
+    ├── Dependency parsers (6 formats)
+    ├── IMPORTANT_FILE_PATTERNS (22 patterns)
+    └── WorkerLogger → parentPort.postMessage()
     ↓
-createContextFromAnalysis() → Markdown (NO CODE)
+WorkerMessage discriminated union
+    ├── ANALYZE_CODEBASE
+    ├── ANALYSIS_COMPLETE
+    ├── ANALYSIS_ERROR
+    ├── ANALYSIS_PROGRESS
+    └── LOG
     ↓
-LLM Provider → Response
+createContextFromAnalysis() → 9 budget-managed sections
+    ├── Overview
+    ├── Frameworks & Technologies
+    ├── Language Distribution
+    ├── Dependencies (scored with scoreDependency)
+    ├── API Endpoints
+    ├── Data Models
+    ├── Code Snippets (largest budget share: 40%)
+    ├── Domain Relationships
+    └── File Structure
     ↓
-New Markdown Document
+TokenBudgetAllocator (32K chars, 10% safety margin)
+    ├── Proportional weights (sum ≈ 0.987)
+    ├── Priority-based selection
+    └── RelevanceScoring (scoreFile, scoreEndpoint)
+    ↓
+LLM Provider → Response → Markdown Document
 ```
 
-### Problems Identified
+---
 
-| Component | Issue | Impact |
+## Phase 1 Implementation (Complete)
+
+### 1.1 Tree-sitter Analyzer
+
+**File**: `src/services/analyzers/tree-sitter-analyzer.ts` (1179 lines, new)
+
+**Supported languages (7)**:
+
+| Language | Extensions | Endpoint Frameworks |
+|----------|-----------|-------------------|
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | Express, Fastify, Hono |
+| TypeScript | `.ts`, `.tsx`, `.mts`, `.cts` | Express, NestJS, Fastify, Hono |
+| Python | `.py` | FastAPI, Flask, Django |
+| Java | `.java` | Spring (`@GetMapping`), JAX-RS (`@GET`) |
+| Go | `.go` | Gin, Chi, Echo, net/http |
+| Rust | `.rs` | Actix (`#[get]`), Axum, Rocket |
+| PHP | `.php`, `.phtml` | Laravel, Symfony |
+
+**Parser pool architecture**:
+
+```typescript
+interface ParserPoolEntry {
+  available: Parser[];   // ready for checkout
+  inUse: Set<Parser>;    // currently checked out
+}
+```
+
+- `acquireParser(languageId)` — fast path (reuse available), in-flight dedup (await shared init promise, re-check pool), first-time init (load WASM grammar)
+- `releaseParser(languageId, parser)` — returns to available pool
+- `dispose()` — clears all parsers, caches, and init state
+
+**Extraction pipeline (6 methods)**:
+
+| Method | Technique | Output |
+|--------|-----------|--------|
+| `extractFunctions` | DFS stack traversal, `TOP_LEVEL_FUNCTION_MAX_DEPTH = 3` | `ExtractedFunction[]` |
+| `extractClasses` | AST node type mapping per language, decorator extraction | `ExtractedClass[]` |
+| `extractEndpoints` | `API_ENDPOINT_QUERIES` regex per language with `matchAll` | `ExtractedEndpoint[]` |
+| `extractImports` | AST import node parsing | `ExtractedImport[]` |
+| `extractExports` | AST export node parsing | `string[]` |
+| `extractReactComponents` | DFS for `lexical_declaration` with JSX, uppercase naming | `ExtractedClass[]` (type: `"function"`) |
+
+### 1.2 Token Budget Allocator
+
+**File**: `src/services/analyzers/token-budget.ts` (385 lines, new)
+
+**Content-type-aware tokenization**:
+
+```typescript
+CHARS_PER_TOKEN = { code: 2.0, prose: 3.5, conservative: 2.0 }
+```
+
+**Budget categories** (from `createAnalysisBudget`, default 32K chars):
+
+| Category | Weight | Priority | Effective (chars) |
+|----------|--------|----------|--------------------|
+| overview | 0.025 | 10 | 720 |
+| frameworks | 0.019 | 9 | 547 |
+| languages | 0.013 | 9 | 374 |
+| architecture | 0.094 | 8 | 2707 |
+| **codeSnippets** | **0.400** | **7** | **11520** |
+| endpoints | 0.125 | 6 | 3600 |
+| models | 0.125 | 5 | 3600 |
+| dependencies | 0.062 | 5 | 1785 |
+| relationships | 0.062 | 4 | 1785 |
+| fileList | 0.062 | 3 | 1785 |
+
+**Key methods**: `allocate()` (clamped to remaining), `selectWithinBudget()` (score-sorted greedy with skip), `truncateToFit()`, `recordUsage()`, `getSummary()`.
+
+**`RelevanceScoring`** utility: `scoreFile()` (entry points, key directories, question keywords), `scoreEndpoint()` (path patterns, question relevance).
+
+### 1.3 Worker Hardening
+
+**File**: `src/workers/codebase-analysis.worker.ts` (~1300 lines, heavily modified)
+
+**Security**:
+- `validateWorkerInput()` — absolute path check, array validation, path traversal prevention (`path.resolve` + `startsWith`)
+- `validateGrammarsPath()` — requires `grammars` segment in path
+
+**Dependency parsers (6 formats)**:
+
+| Format | File | Technique |
+|--------|------|-----------|
+| npm | `package.json` | `JSON.parse` + merge `dependencies`/`devDependencies` |
+| pip | `requirements.txt` | Line-by-line `==`/`>=` parsing |
+| pyproject | `pyproject.toml` | `extractTomlSection("tool.poetry.dependencies")` |
+| Cargo | `Cargo.toml` | `extractTomlSection("dependencies")` |
+| Maven | `pom.xml` | Two-pass: extract `<dependency>` blocks, then parse fields |
+| Go | `go.mod` | Line regex for `require` blocks |
+| Composer | `composer.json` | `JSON.parse` + merge `require`/`require-dev` |
+
+**`extractTomlSection`**: Line-by-line state machine. Distinguishes `[section]` from `[[array-table]]`, skips comments, handles trailing comments on headers, full regex-escaping of section names.
+
+**IMPORTANT_FILE_PATTERNS (22 regexes)**: Entry points (5), directories (5), README (1), manifests (11). All use `[^\\/]*` instead of `.*` to prevent catastrophic backtracking.
+
+### 1.4 Shared Infrastructure
+
+**`src/interfaces/analysis.interface.ts`** (190 lines, new) — `WorkerMessage` discriminated union (5 variants: `ANALYZE_CODEBASE`, `ANALYSIS_COMPLETE`, `ANALYSIS_ERROR`, `ANALYSIS_PROGRESS`, `LOG`), `AnalysisResult`, `WorkerInputData`, `BudgetItem<T>`.
+
+**`src/infrastructure/logger/worker-logger.ts`** (113 lines, new) — `WorkerLogger` class with `LogLevel` enum (DEBUG/INFO/WARN/ERROR), `parentPort.postMessage()` transport, console fallback (disabled by default), `IWorkerLoggerConfig` for DI.
+
+### 1.5 Context Generation
+
+**File**: `src/commands/architectural-recommendation.ts` (+693 lines modified)
+
+**9 sections** generated by dedicated `generateXxxSection()` functions, each consuming from named budget allocations via `TokenBudgetAllocator`.
+
+**Utility functions**:
+- `scoreDependency(name, question?)` — tiered scoring: Tier 1 (exact framework match, +3), Tier 2 (scoped package normalization `@nestjs/core` → scope `nestjs`, +3), question relevance (+5)
+- `getRelativePath(fullPath)` — VS Code API → marker-based `lastIndexOf` fallback (deepest match for monorepos) → `node_modules` skip → basename
+
+---
+
+## Review History (7 Rounds)
+
+| Round | Focus | Issues | Key Fixes |
+|-------|-------|--------|-----------|
+| 1st | Build | Build errors | Type fixes, import resolution |
+| 2nd | Type safety | Type looseness | Stronger typing, null checks |
+| 3rd | Thread safety | Race conditions | Worker message typing |
+| 4th | Memory + security | 15 issues | Parser pool leak fix, Map serialization, path traversal |
+| 5th | Architecture | 16 issues (3 critical) | Removed `fileContents` Map leak, `validateWorkerInput`, discriminated union `WorkerMessage`, iterative BFS, `matchAll` for regex |
+| 6th | Performance + correctness | 17 issues (3 critical) | `acquireParser`/`releaseParser` pool, DFS `stack.pop()` O(n), `CHARS_PER_TOKEN` by content type, `IMPORTANT_FILE_PATTERNS` backtrack-safe, `scoreDependency` exact matching |
+| 7th | Edge cases + production | 13 issues (2 critical) | `perSnippetBudget` post-selection compute, parser pool race fix (re-check after await), `extractTomlSection` array-table handling, scoped package normalization, `lastIndexOf` for monorepos, pom.xml two-pass parsing, `enableConsole` default false, React component `type: "function"`, `validateGrammarsPath` tightened |
+
+---
+
+## Test Suite
+
+**601 tests passing** (including 60 new tests for the overhaul)
+
+| Test File | Tests | Covers |
 |-----------|-------|--------|
-| `TypeScriptAnalyzer` | Regex-based class/function extraction | Misses decorated exports, arrow functions, complex patterns |
-| `extractApiEndpoints()` | Only 3 regex patterns | Misses NestJS decorators, Fastify, Hono, tRPC |
-| `createContextFromAnalysis()` | No code snippets | LLM has no actual code to reason about |
-| Context limits | 20/15/10/30 hard limits | Loses critical information in large codebases |
-| `tree-sitter.parser.ts` | Exists but unused | Accurate AST parsing available but not integrated |
-
----
-
-## Target Architecture
-
-```
-User Question
-    ↓
-STAGE 1: Question Analysis (NEW)
-    ├── Classify question type (HOW/BUILD/UNDERSTAND)
-    └── Extract key entities/concepts
-    ↓
-PersistentCodebaseUnderstandingService
-    ↓
-CodebaseAnalysisWorker (Worker Thread)
-    ├── TreeSitterAnalyzer (NEW) → Accurate AST
-    ├── ArchitecturalPatternDetector (NEW)
-    ├── CallGraphBuilder (NEW)
-    └── CodeSummarizer (NEW)
-    ↓
-STAGE 2: Relevance Filtering (NEW)
-    ├── Score files by question relevance
-    └── Select top files within token budget
-    ↓
-createRichContextFromAnalysis() (NEW)
-    ├── Architecture overview
-    ├── Key component summaries
-    ├── Relevant code snippets (actual code!)
-    └── Dependency/call relationships
-    ↓
-LLM Provider → Response
-    ↓
-New Markdown Document
-```
-
----
-
-## Implementation Phases
-
-### Phase 1: Immediate Fixes (3-4 days) ✅ COMPLETE
-
-**Goal**: Get code snippets into context and remove arbitrary limits.
-
-#### 1.1 Integrate Tree-sitter for Extraction
-
-**Files to modify**:
-- `src/workers/codebase-analysis.worker.ts`
-- `src/services/analyzers/analyzer-factory.ts`
-- `src/ast/language-config.ts` (add PHP)
-
-**Supported Languages** (from `src/grammars/`):
-| Language | Grammar File | In Config? | Has Analyzer? |
-|----------|--------------|------------|---------------|
-| JavaScript | tree-sitter-javascript.wasm | ✅ | ✅ (regex) |
-| TypeScript/TSX | tree-sitter-tsx.wasm | ✅ | ✅ (regex) |
-| Python | tree-sitter-python.wasm | ✅ | ✅ (regex) |
-| Java | tree-sitter-java.wasm | ✅ | ❌ |
-| Go | tree-sitter-go.wasm | ✅ | ❌ |
-| Rust | tree-sitter-rust.wasm | ✅ | ❌ |
-| PHP | tree-sitter-php.wasm | ❌ | ❌ |
-
-**Tasks**:
-- [x] Add PHP to `languageConfigs` in `src/ast/language-config.ts`
-- [x] Create `TreeSitterAnalyzerService` that wraps existing `tree-sitter.parser.ts`
-- [x] Replace regex-based extraction in worker with Tree-sitter queries for ALL 7 languages
-- [x] Add Tree-sitter queries for:
-  - Classes with decorators (TS/JS/Java/PHP)
-  - Exported functions (arrow and regular)
-  - React components (functional and class) — JS/TS only
-  - Structs and impls (Go/Rust)
-  - API endpoint decorators (Express, NestJS, Fastify, Spring, Gin, Actix)
-  - Type definitions and interfaces
-- [ ] Create language-specific API endpoint patterns:
-  - **JS/TS**: Express (`app.get`), NestJS (`@Get`), Fastify, Hono
-  - **Python**: FastAPI (`@app.get`), Flask, Django URLs
-  - **Java**: Spring (`@GetMapping`), JAX-RS (`@GET`)
-  - **Go**: Gin (`r.GET`), Chi, Echo, net/http
-  - **Rust**: Actix (`#[get]`), Axum, Rocket
-  - **PHP**: Laravel routes, Symfony controllers
-
-**Expected outcome**: 90%+ accuracy on code element extraction for ALL 7 languages (vs ~60% with regex for 3 languages)
-
-#### 1.2 Include Code Snippets in Context
-
-**Files to modify**:
-- `src/commands/architectural-recommendation.ts` (function `createContextFromAnalysis`)
-- `src/workers/codebase-analysis.worker.ts` (return code excerpts)
-
-**Tasks**:
-- [x] Store truncated code snippets (first 50 lines) for key files
-- [x] Add `codeSnippets` field to `AnalysisResult`
-- [x] Modify `createContextFromAnalysis()` to include code blocks
-- [x] Prioritize: entry points, API handlers, service classes, models
-
-**Context format change**:
-```markdown
-## Key Files
-
-### src/controllers/UserController.ts
-**Type**: Express Controller  
-**Endpoints**: GET /users, POST /users  
-```typescript
-export class UserController {
-  constructor(private userService: UserService) {}
-  
-  async getUsers(req: Request, res: Response) {
-    const users = await this.userService.findAll();
-    return res.json(users);
-  }
-  ...
-}
-```
-
-#### 1.3 Token-Budget Based Limits
-
-**Files to modify**:
-- `src/commands/architectural-recommendation.ts`
-
-**Tasks**:
-- [x] Replace hardcoded limits (20/15/10/30) with token budget
-- [x] Add `TokenBudgetAllocator` utility:
-  ```typescript
-  const budget = new TokenBudgetAllocator(32000); // ~8K tokens
-  budget.allocate('overview', 2000);
-  budget.allocate('endpoints', 6000);
-  budget.allocate('models', 6000);
-  budget.allocate('codeSnippets', 15000);
-  budget.allocate('fileList', 3000);
-  ```
-- [ ] Prioritize items by relevance score within each category
-
----
-
-### Phase 2: Rich Analysis (1 week)
-
-**Goal**: Add architectural pattern detection and code summaries.
-
-#### 2.1 Architectural Pattern Detection
-
-**New file**: `src/services/analyzers/architecture-detector.ts`
-
-**Patterns to detect**:
-- Layered architecture (Controller → Service → Repository)
-- Module/feature-based organization
-- MVC/MVVM patterns
-- Microservices indicators
-- Monorepo structure
-
-**Detection heuristics**:
-```typescript
-interface ArchitecturalPattern {
-  name: string;
-  confidence: number;
-  indicators: string[];
-  layers?: Layer[];
-}
-
-// Example detection
-if (hasDirectory('controllers') && hasDirectory('services') && hasDirectory('repositories')) {
-  patterns.push({ name: 'Layered', confidence: 0.9, layers: [...] });
-}
-```
-
-#### 2.2 Call Graph Builder
-
-**New file**: `src/services/analyzers/call-graph.ts`
-
-**Features**:
-- Track function → function calls
-- Track class → service dependencies
-- Identify entry points (exports, API handlers)
-- Detect circular dependencies
-
-**Output format**:
-```typescript
-interface CallGraph {
-  nodes: Map<string, CallGraphNode>;
-  edges: CallGraphEdge[];
-  entryPoints: string[];
-  hotPaths: string[][]; // Most common call chains
-}
-```
-
-#### 2.3 Code Summarizer (LLM-assisted)
-
-**New file**: `src/services/analyzers/code-summarizer.ts`
-
-**Features**:
-- Generate 1-2 sentence summary for each key file
-- Batch summaries to reduce LLM calls
-- Cache summaries with content hash
-
-**Prompt template**:
-```
-Summarize this code file in 1-2 sentences. Focus on:
-- What it does (purpose)
-- Key exports
-- Dependencies it uses
-
-File: {filename}
-```typescript
-{code}
-```
-
-Summary:
-```
-
-#### 2.4 Auth/Middleware Flow Detection
-
-**New file**: `src/services/analyzers/middleware-detector.ts`
-
-**Detect**:
-- Express middleware chains
-- Auth guards (NestJS, custom)
-- Request lifecycle hooks
-- Error handlers
-
----
-
-### Phase 3: Multi-pass Analysis (1 week)
-
-**Goal**: Two-stage LLM calls for focused, accurate answers.
-
-#### 3.1 Question Analysis Stage
-
-**New flow**:
-```
-User Question
-    ↓
-Stage 1 LLM Call: "What files/concepts are relevant to this question?"
-    ↓
-Filter analysis to relevant subset
-    ↓
-Stage 2 LLM Call: "Answer the question using this focused context"
-```
-
-**Stage 1 Prompt**:
-```
-Given this codebase structure:
-{file_list_with_types}
-
-And this question: "{user_question}"
-
-List the 5-10 most relevant files and concepts to answer this question.
-Return as JSON: { "files": [...], "concepts": [...] }
-```
-
-#### 3.2 Relevance Scoring
-
-**New file**: `src/services/analyzers/question-relevance.ts`
-
-**Scoring factors**:
-- Keyword overlap with question
-- File type relevance (API question → controller files)
-- Import/dependency proximity
-- Recency of changes
-
-#### 3.3 Focused Context Generation
-
-Build context from Stage 1 results:
-- Full code for top 3 files
-- Summaries for next 7 files
-- Relationship diagram
-- Relevant dependencies only
+| `token-budget.test.ts` | 26 | Constructor, static methods, allocate/clamp, selectWithinBudget (priority, scanning, exhaustion), truncateToFit, getSummary, isExhausted, reset, createAnalysisBudget |
+| `tree-sitter-analyzer.test.ts` | 15 | Constructor (fallback path, logger DI), canAnalyze (7 languages + unsupported), getLanguageId (8 mappings), dispose (idempotent), initialize (dedup) |
+| `codebase-analysis-worker-utils.test.ts` | 10 | extractTomlSection: simple/dotted sections, `[[array-table]]` boundary, comment skipping, trailing comments, regex escaping, empty/missing |
+| `architectural-recommendation-utils.test.ts` | 9 | scoreDependency (tier 1 frameworks, tier 2 scoped, question relevance, edge cases), getRelativePath (all markers, node_modules skip, Windows paths, monorepo lastIndexOf) |
 
 ---
 
 ## File Changes Summary
 
-### New Files
+### New Files (8)
 
-| File | Purpose | Phase |
-|------|---------|-------|
-| `src/services/analyzers/tree-sitter-analyzer.ts` | Tree-sitter based code extraction | 1 |
-| `src/services/analyzers/token-budget.ts` | Context budget allocation | 1 |
-| `src/services/analyzers/architecture-detector.ts` | Pattern detection | 2 |
-| `src/services/analyzers/call-graph.ts` | Function relationship tracking | 2 |
-| `src/services/analyzers/code-summarizer.ts` | LLM-based file summaries | 2 |
-| `src/services/analyzers/middleware-detector.ts` | Auth/middleware flow detection | 2 |
-| `src/services/analyzers/question-relevance.ts` | Question-based file scoring | 3 |
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/services/analyzers/tree-sitter-analyzer.ts` | 1179 | Tree-sitter AST extraction for 7 languages |
+| `src/services/analyzers/token-budget.ts` | 385 | Token budget allocation + relevance scoring |
+| `src/interfaces/analysis.interface.ts` | 190 | Shared types: WorkerMessage, AnalysisResult, BudgetItem |
+| `src/infrastructure/logger/worker-logger.ts` | 113 | Worker-safe logger with parentPort transport |
+| `src/test/suite/token-budget.test.ts` | 349 | Token budget unit tests |
+| `src/test/suite/tree-sitter-analyzer.test.ts` | 166 | Analyzer unit tests |
+| `src/test/suite/codebase-analysis-worker-utils.test.ts` | 133 | TOML extraction tests |
+| `src/test/suite/architectural-recommendation-utils.test.ts` | 178 | Scoring + path utility tests |
 
-### Modified Files
+### Modified Files (7)
 
-| File | Changes | Phase |
-|------|---------|-------|
-| `src/workers/codebase-analysis.worker.ts` | Use Tree-sitter, return code snippets | 1 |
-| `src/services/analyzers/analyzer-factory.ts` | Add Tree-sitter analyzer | 1 |
-| `src/commands/architectural-recommendation.ts` | Rich context, token budget, two-stage | 1, 3 |
-| `src/services/persistent-codebase-understanding.service.ts` | Store code snippets, summaries | 1, 2 |
-
----
-
-## Success Metrics
-
-| Metric | Current | Target |
-|--------|---------|--------|
-| Endpoint detection accuracy | ~60% | 95%+ |
-| Class/interface detection | ~70% | 98%+ |
-| LLM context usefulness | Low (no code) | High (with code) |
-| User satisfaction | Poor | Good |
-| Analysis time | ~30s | ~45s (acceptable for quality) |
+| File | Delta | Changes |
+|------|-------|---------|
+| `src/workers/codebase-analysis.worker.ts` | +800 | Tree-sitter integration, 6 dep parsers, input validation, TOML state machine |
+| `src/commands/architectural-recommendation.ts` | +500 | 9-section budget-managed context, scoreDependency, getRelativePath |
+| `src/services/codebase-analysis-worker.ts` | +40 | WorkerMessage handling, progress reporting |
+| `src/services/persistent-codebase-understanding.service.ts` | +20 | Code snippet storage |
+| `src/ast/language-config.ts` | +15 | PHP language config |
+| `.vscode-test.mjs` | +1 | Register new test files |
+| `docs/CODEBASE_ANALYSIS_OVERHAUL.md` | rewrite | This file |
 
 ---
 
-## Testing Strategy
+## Phase 2: Rich Analysis (Planned)
 
-### Unit Tests
-- Tree-sitter queries against known code patterns
-- Token budget allocation edge cases
-- Architecture pattern detection on test fixtures
+**Goal**: Add architectural pattern detection and code summaries.
 
-### Integration Tests
-- Full analysis pipeline on sample projects
-- Compare output against expected elements
+### 2.1 Architectural Pattern Detection
 
-### Manual Validation
-- Test on 5 diverse codebases:
-  1. Express REST API
-  2. NestJS monorepo
-  3. Next.js full-stack
-  4. Python FastAPI
-  5. Mixed language project
+**New file**: `src/services/analyzers/architecture-detector.ts`
+
+Detect layered architecture, module-based organization, MVC/MVVM, microservices indicators, monorepo structure. Use existing `TreeSitterAnalysisResult` imports and file structure patterns.
+
+### 2.2 Call Graph Builder
+
+**New file**: `src/services/analyzers/call-graph.ts`
+
+Track function→function calls, class→service dependencies, identify entry points, detect circular dependencies. Output as `CallGraph { nodes, edges, entryPoints, hotPaths }`.
+
+### 2.3 Code Summarizer (LLM-assisted)
+
+**New file**: `src/services/analyzers/code-summarizer.ts`
+
+Generate 1-2 sentence summaries per key file, batch to reduce LLM calls, cache with content hash.
+
+### 2.4 Auth/Middleware Flow Detection
+
+**New file**: `src/services/analyzers/middleware-detector.ts`
+
+Detect Express middleware chains, NestJS guards, request lifecycle hooks, error handlers.
 
 ---
 
-## Rollout Plan
+## Phase 3: Multi-pass Analysis (Planned)
 
-1. **Phase 1 Complete**: Ship as experimental flag (`codebuddy.analysis.experimental`)
-2. **Phase 2 Complete**: Enable by default, keep flag for opt-out
-3. **Phase 3 Complete**: Remove flag, deprecate old implementation
+**Goal**: Two-stage LLM calls for focused, accurate answers.
 
----
+### 3.1 Question Analysis Stage
 
-## Dependencies
+Stage 1 LLM call identifies relevant files/concepts → filter analysis → Stage 2 LLM call answers with focused context.
 
-- `tree-sitter` (WASM) — already in project
-- No new npm dependencies required for Phase 1
-- Phase 2 may need `tiktoken` for accurate token counting
+### 3.2 Question-based Relevance Scoring
+
+**New file**: `src/services/analyzers/question-relevance.ts`
+
+Keyword overlap, file type relevance, import proximity, recency of changes. Builds on existing `RelevanceScoring` utilities.
+
+### 3.3 Focused Context Generation
+
+Full code for top 3 files, summaries for next 7, relationship diagram, relevant dependencies only.
 
 ---
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
-| Tree-sitter WASM loading in worker | Test worker thread compatibility, fallback to regex |
-| Token budget miscalculation | Add 10% safety margin, truncate gracefully |
-| Two-stage LLM doubles latency | Cache Stage 1 results by question hash |
-| Large codebases timeout | Add file count limits with smart sampling |
-
----
-
-## Timeline
-
-| Phase | Duration | Start | End |
-|-------|----------|-------|-----|
-| Phase 1 | 3-4 days | March 15 | March 19 |
-| Phase 2 | 5-7 days | March 20 | March 27 |
-| Phase 3 | 5-7 days | March 28 | April 4 |
-
-**Total**: ~3 weeks for full overhaul
+| Risk | Mitigation | Status |
+|------|------------|--------|
+| Tree-sitter WASM in worker thread | Parser pool with checkout/checkin, dispose on deactivation | ✅ Resolved |
+| Token budget miscalculation | 10% safety margin, `Math.floor` clamping, proportional weights | ✅ Resolved |
+| Parser pool race conditions | In-flight dedup with re-check after await | ✅ Resolved |
+| Path traversal via worker input | `validateWorkerInput` + `validateGrammarsPath` | ✅ Resolved |
+| Catastrophic regex backtracking | `[^\\/]*` instead of `.*`, no unbounded quantifiers | ✅ Resolved |
+| Cross-block pom.xml matching | Two-pass extraction (blocks first, then fields) | ✅ Resolved |
+| Two-stage LLM doubles latency | Cache Stage 1 results by question hash | Phase 3 |
+| Large codebases timeout | File count limits with smart sampling | Phase 2 |
 
 ---
 
 ## References
 
-- Current implementation: `src/commands/architectural-recommendation.ts`
-- Tree-sitter parser: `src/ast/parser/tree-sitter.parser.ts`
+- Tree-sitter analyzer: `src/services/analyzers/tree-sitter-analyzer.ts`
+- Token budget: `src/services/analyzers/token-budget.ts`
 - Worker: `src/workers/codebase-analysis.worker.ts`
-- Analyzers: `src/services/analyzers/`
+- Context generation: `src/commands/architectural-recommendation.ts`
+- Shared types: `src/interfaces/analysis.interface.ts`
+- Worker logger: `src/infrastructure/logger/worker-logger.ts`
+- Tests: `src/test/suite/{token-budget,tree-sitter-analyzer,codebase-analysis-worker-utils,architectural-recommendation-utils}.test.ts`

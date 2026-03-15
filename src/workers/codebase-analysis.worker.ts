@@ -8,6 +8,12 @@ import {
   TreeSitterAnalysisResult,
 } from "../services/analyzers/tree-sitter-analyzer";
 import { WorkerLogger } from "../infrastructure/logger/worker-logger";
+import { detectArchitecture } from "../services/analyzers/architecture-detector";
+import {
+  buildCallGraph,
+  type FileImportData,
+} from "../services/analyzers/call-graph";
+import { detectMiddleware } from "../services/analyzers/middleware-detector";
 import type {
   CodeSnippet,
   AnalysisResult,
@@ -166,9 +172,10 @@ class CodebaseAnalysisTask {
         Object.keys(dependencies).length,
       );
 
-      this.reportProgress(100, 100, "Analysis complete!");
+      // Step 8: Phase 2 — Architecture detection, call graph, middleware
+      this.reportProgress(95, 100, "Detecting architecture patterns...");
 
-      return {
+      const partialResult: AnalysisResult = {
         frameworks,
         dependencies,
         files,
@@ -184,6 +191,79 @@ class CodebaseAnalysisTask {
           complexity,
         },
       };
+
+      // Architecture detection (pure, no I/O)
+      try {
+        const archReport = detectArchitecture(partialResult);
+        partialResult.architectureReport = {
+          patterns: archReport.patterns.map((p) => ({
+            name: p.name,
+            confidence: p.confidence,
+            indicators: p.indicators,
+          })),
+          entryPoints: archReport.entryPoints,
+          projectType: archReport.projectType,
+        };
+        this.logger.info(
+          `Architecture: ${archReport.projectType}, ${archReport.patterns.length} patterns detected`,
+        );
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Architecture detection failed: ${msg}`);
+      }
+
+      // Call graph (from collected imports)
+      try {
+        if (analysisResults.fileImports.length > 0) {
+          const callGraph = buildCallGraph(
+            analysisResults.fileImports,
+            data.workspacePath,
+          );
+          partialResult.callGraphSummary = {
+            entryPoints: callGraph.entryPoints.slice(0, 20),
+            hotNodes: callGraph.hotNodes,
+            circularDependencies: callGraph.circularDependencies
+              .slice(0, 10)
+              .map((c) => c.cycle),
+            edgeCount: callGraph.edges.length,
+            nodeCount: callGraph.nodes.size,
+          };
+          this.logger.info(
+            `Call graph: ${callGraph.nodes.size} nodes, ${callGraph.edges.length} edges, ${callGraph.circularDependencies.length} cycles`,
+          );
+        }
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Call graph build failed: ${msg}`);
+      }
+
+      // Middleware detection (from files + snippets)
+      try {
+        const mwReport = detectMiddleware(
+          files,
+          analysisResults.codeSnippets,
+          analysisResults.dataModels,
+        );
+        partialResult.middlewareSummary = {
+          middleware: mwReport.middleware.slice(0, 30).map((m) => ({
+            name: m.name,
+            type: m.type,
+            file: m.file,
+          })),
+          authStrategies: mwReport.authFlows.map((f) => f.strategy),
+          errorHandlerCount: mwReport.errorHandlers.length,
+        };
+        this.logger.info(
+          `Middleware: ${mwReport.middleware.length} detected, ${mwReport.authFlows.length} auth strategies`,
+        );
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Middleware detection failed: ${msg}`);
+      }
+
+      this.reportProgress(100, 100, "Analysis complete!");
+
+      return partialResult;
     } finally {
       // Dispose Tree-sitter analyzer to release WASM memory
       if (this.treeSitterAnalyzer) {
@@ -219,10 +299,12 @@ class CodebaseAnalysisTask {
     dataModels: any[];
     totalLines: number;
     languageDistribution: Record<string, number>;
+    fileImports: FileImportData[];
   }> {
     const codeSnippets: CodeSnippet[] = [];
     const apiEndpoints: any[] = [];
     const dataModels: any[] = [];
+    const fileImports: FileImportData[] = [];
     let totalLines = 0;
     const languageDistribution: Record<string, number> = {};
 
@@ -262,6 +344,18 @@ class CodebaseAnalysisTask {
             dataModels,
             apiEndpoints,
           );
+
+          // Collect import data for call graph (Phase 2)
+          if (
+            fileAnalysis.treeSitterAnalysis.imports ||
+            fileAnalysis.treeSitterAnalysis.exports
+          ) {
+            fileImports.push({
+              file,
+              imports: fileAnalysis.treeSitterAnalysis.imports || [],
+              exports: fileAnalysis.treeSitterAnalysis.exports || [],
+            });
+          }
         } else {
           // Fallback: collect regex-extracted endpoints and models
           if (fileAnalysis.endpoints.length > 0) {
@@ -319,6 +413,7 @@ class CodebaseAnalysisTask {
       dataModels,
       totalLines,
       languageDistribution,
+      fileImports,
     };
   }
 
