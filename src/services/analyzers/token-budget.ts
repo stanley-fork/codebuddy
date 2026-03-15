@@ -213,14 +213,24 @@ export class TokenBudgetAllocator {
 
   /**
    * Boost a category's budget by redistributing from other categories.
-   * Increases the target by `floor(current * (multiplier - 1))`, shrinking
+   * Increases the target by `floor(current * (clampedMultiplier - 1))`, shrinking
    * other categories proportionally so the total budget stays constant.
+   * Each donor category retains at least MIN_ALLOCATION_CHARS.
    */
+  private static readonly MIN_ALLOCATION_CHARS = 200;
+  private static readonly MAX_BOOST_MULTIPLIER = 2.0;
+
   boost(name: string, multiplier: number): void {
     const allocation = this.allocations.get(name);
     if (!allocation || multiplier <= 1) return;
 
-    const extra = Math.floor(allocation.budget * (multiplier - 1));
+    // Clamp multiplier to prevent starvation of other categories
+    const clampedMultiplier = Math.min(
+      multiplier,
+      TokenBudgetAllocator.MAX_BOOST_MULTIPLIER,
+    );
+
+    const extra = Math.floor(allocation.budget * (clampedMultiplier - 1));
     if (extra <= 0) return;
 
     const others = [...this.allocations.entries()].filter(([k]) => k !== name);
@@ -232,7 +242,12 @@ export class TokenBudgetAllocator {
     let actuallyRemoved = 0;
     for (const [, other] of others) {
       const share = Math.floor((other.budget / totalOther) * extra);
-      const clamped = Math.min(share, other.budget);
+      const minFloor = Math.min(
+        TokenBudgetAllocator.MIN_ALLOCATION_CHARS,
+        other.budget,
+      );
+      const maxRemovable = Math.max(0, other.budget - minFloor);
+      const clamped = Math.min(share, maxRemovable);
       other.budget -= clamped;
       actuallyRemoved += clamped;
     }

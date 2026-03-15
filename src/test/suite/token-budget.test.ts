@@ -426,6 +426,26 @@ suite("TokenBudgetAllocator.boost", () => {
     const a = budget.getSummary().find((s) => s.name === "a")!;
     assert.strictEqual(a.budget, 2000);
   });
+
+  test("clamps multiplier to MAX_BOOST_MULTIPLIER and preserves MIN_ALLOCATION_CHARS floor", () => {
+    const budget = new TokenBudgetAllocator(10000);
+    budget.allocate("a", 500, 5);
+    budget.allocate("b", 300, 3); // small allocation
+
+    // multiplier 3.0 exceeds MAX_BOOST_MULTIPLIER (2.0), should be clamped
+    budget.boost("a", 3.0);
+
+    const summary = budget.getSummary();
+    const a = summary.find((s) => s.name === "a")!;
+    const b = summary.find((s) => s.name === "b")!;
+
+    // Clamped to 2.0: extra = floor(500 * 1.0) = 500
+    // b: share = floor(300/300 * 500) = 500, minFloor = min(200, 300) = 200,
+    //    maxRemovable = 100, clamped = min(500, 100) = 100
+    assert.ok(b.budget >= 200, `b should retain at least MIN_ALLOCATION_CHARS (got ${b.budget})`);
+    // total should be conserved
+    assert.strictEqual(a.budget + b.budget, 800, "total budget should be conserved");
+  });
 });
 
 suite("TokenBudgetAllocator.hasAllocation", () => {

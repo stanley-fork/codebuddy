@@ -1053,7 +1053,12 @@ function generateFocusedContextSection(
 
   const content = lines.join("\n");
   if (!budget.hasAllocation("focusedContext")) {
-    return content;
+    // Defensive: budget wasn't configured for focused context.
+    // Truncate to a safe fallback to prevent context overflow.
+    logger.warn(
+      "generateFocusedContextSection: no focusedContext budget allocation; applying fallback truncation",
+    );
+    return content.slice(0, 4000);
   }
   return budget.truncateToFit("focusedContext", content);
 }

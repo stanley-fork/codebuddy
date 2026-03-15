@@ -242,8 +242,9 @@ export function extractKeywords(question: string): string[] {
       ? question.slice(0, MAX_QUESTION_LENGTH)
       : question;
 
-  // Capture path-like tokens (must start with a letter to exclude version strings like 1.2.3)
-  const pathLike = /[a-zA-Z][a-zA-Z0-9_\-]*[./][a-zA-Z0-9_./-]+/g;
+  // Capture path-like tokens: must start with a letter, contain / or .,
+  // and the segment after the separator must also start with a letter
+  const pathLike = /[a-zA-Z][a-zA-Z0-9_\-]*[./][a-zA-Z][a-zA-Z0-9_./-]*/g;
   const pathTokens = (q.match(pathLike) ?? []).map((t) => t.toLowerCase());
 
   const decomposed = q
@@ -353,6 +354,8 @@ export function scoreEndpoint(
  * Score a data model against the question keywords.
  */
 export function scoreModel(model: ModelData, keywords: string[]): number {
+  if (keywords.length === 0) return 0;
+
   let score = 0;
   const lowerName = model.name.toLowerCase();
 
@@ -360,10 +363,11 @@ export function scoreModel(model: ModelData, keywords: string[]): number {
     if (lowerName.includes(kw)) score += 4;
   }
 
-  // Property/method matches
+  // Property/method matches (early exit at cap)
   const members = [...(model.methods ?? []), ...(model.properties ?? [])];
   let memberHits = 0;
   for (const m of members) {
+    if (memberHits >= 3) break;
     const lowerMember = m.toLowerCase();
     for (const kw of keywords) {
       if (lowerMember.includes(kw)) {
@@ -372,7 +376,7 @@ export function scoreModel(model: ModelData, keywords: string[]): number {
       }
     }
   }
-  score += Math.min(memberHits, 3);
+  score += memberHits;
 
   return score;
 }
@@ -402,10 +406,8 @@ export function analyzeQuestion(
 
   // Score every file that has a code snippet
   const fileScores = new Map<string, number>();
-  const snippetMap = new Map<string, CodeSnippet>();
 
   for (const snippet of analysis.codeSnippets ?? []) {
-    snippetMap.set(snippet.file, snippet);
     const score = scoreFile(
       snippet.file,
       keywords,
@@ -497,18 +499,20 @@ export function buildFocusedContext(
     rankedFiles.push({ file, score, tier: "summary" });
   }
 
-  // Score endpoints
+  // Score endpoints (cap at 10 to bound FocusedContext size)
   const relevantEndpoints = (analysis.apiEndpoints ?? [])
     .map((ep) => ({ ep, score: scoreEndpoint(ep, qa.keywords) }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score)
+    .slice(0, 10)
     .map(({ ep }) => ep);
 
-  // Score models
+  // Score models (cap at 10)
   const relevantModels = (analysis.dataModels ?? [])
     .map((m) => ({ m, score: scoreModel(m, qa.keywords) }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score)
+    .slice(0, 10)
     .map(({ m }) => m);
 
   // Related dependencies: hot nodes NOT already in our top files
@@ -516,12 +520,23 @@ export function buildFocusedContext(
   const relatedDependencies: string[] = [];
   const callGraph = analysis.callGraphSummary;
   if (callGraph) {
+    const norm = (p: string) => p.replace(/\\/g, "/");
+    const rankedFileSet = new Set(rankedFiles.map((rf) => norm(rf.file)));
+    const seenDeps = new Set<string>();
+
     for (const hn of callGraph.hotNodes) {
-      const alreadyRanked = rankedFiles.some(
-        (rf) => rf.file.endsWith(hn) || hn.endsWith(rf.file),
-      );
-      if (!alreadyRanked && !relatedDependencies.includes(hn)) {
+      const normHn = norm(hn);
+
+      // Match at path segment boundaries to avoid partial-name false positives
+      const alreadyRanked =
+        rankedFileSet.has(normHn) ||
+        [...rankedFileSet].some(
+          (rf) => rf.endsWith(`/${normHn}`) || normHn.endsWith(`/${rf}`),
+        );
+
+      if (!alreadyRanked && !seenDeps.has(normHn)) {
         relatedDependencies.push(hn);
+        seenDeps.add(normHn);
         if (relatedDependencies.length >= 5) break;
       }
     }
@@ -550,9 +565,69 @@ interface CacheEntry {
   ts: number;
 }
 
-const questionCache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_CACHE_SIZE = 100;
+/**
+ * Bounded question-analysis cache with TTL expiry and LRU fallback.
+ * Encapsulated as a class for lifecycle ownership and testability.
+ */
+export class QuestionAnalysisCache {
+  private readonly cache = new Map<string, CacheEntry>();
+  private lastEvictionSweep = 0;
+
+  /** How often to run a full stale-eviction sweep (ms) */
+  private static readonly EVICTION_INTERVAL_MS = 60 * 1000;
+
+  constructor(
+    private readonly maxSize: number = 100,
+    private readonly ttlMs: number = 5 * 60 * 1000,
+  ) {}
+
+  get(key: string, now: number): CacheEntry | undefined {
+    const entry = this.cache.get(key);
+    if (!entry) return undefined;
+    if (now - entry.ts > this.ttlMs) {
+      this.cache.delete(key);
+      return undefined;
+    }
+    return entry;
+  }
+
+  set(key: string, entry: CacheEntry, now: number): void {
+    // Periodic sweep regardless of cache size
+    if (
+      now - this.lastEvictionSweep >
+      QuestionAnalysisCache.EVICTION_INTERVAL_MS
+    ) {
+      this.evictStale(now);
+      this.lastEvictionSweep = now;
+    }
+
+    // LRU fallback if still at capacity after stale eviction
+    if (this.cache.size >= this.maxSize) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) this.cache.delete(oldestKey);
+    }
+
+    this.cache.set(key, entry);
+  }
+
+  clear(): void {
+    this.cache.clear();
+    this.lastEvictionSweep = 0;
+  }
+
+  get size(): number {
+    return this.cache.size;
+  }
+
+  private evictStale(now: number): void {
+    for (const [k, v] of this.cache) {
+      if (now - v.ts > this.ttlMs) this.cache.delete(k);
+    }
+  }
+}
+
+/** Singleton cache for production use — exported for extension lifecycle hooks */
+export const questionCache = new QuestionAnalysisCache();
 
 /** FNV-1a 32-bit hash — better avalanche than djb2, still zero-dependency */
 function hashQuestion(question: string): string {
@@ -566,7 +641,8 @@ function hashQuestion(question: string): string {
 
 /**
  * Structural fingerprint of the analysis to detect workspace changes.
- * Samples evenly-spaced file paths to reduce false-positive collisions in monorepos.
+ * Samples evenly-spaced file paths and uses file count (more sensitive to
+ * add/remove than totalLines) for change detection.
  */
 function analysisFingerprint(analysis: CachedAnalysis): string {
   const files = analysis.files;
@@ -583,27 +659,21 @@ function analysisFingerprint(analysis: CachedAnalysis): string {
   ].filter((v, i, arr) => arr.indexOf(v) === i); // dedup
 
   const sampled = indices.map((i) => files[i]).join("|");
-  return `${len}:${analysis.summary.totalLines}:${sampled}`;
-}
-
-/** Evict all stale entries from cache */
-function evictStale(now: number): void {
-  for (const [k, v] of questionCache) {
-    if (now - v.ts > CACHE_TTL_MS) {
-      questionCache.delete(k);
-    }
-  }
+  return `${len}:${analysis.summary.totalFiles}:${sampled}`;
 }
 
 /**
  * Analyze question with caching. Returns cached result if the same question
  * was analyzed within the TTL window against the same analysis.
  * Uses composite key (hash + analysis fingerprint) with collision validation.
+ *
+ * @param cache Injectable cache instance for testing; defaults to the singleton.
  */
 export function analyzeQuestionCached(
   question: string,
   analysis: CachedAnalysis,
   now: number = Date.now(),
+  cache: QuestionAnalysisCache = questionCache,
 ): QuestionAnalysis {
   // Guard against empty or pathologically long questions
   if (!question || question.trim().length === 0) {
@@ -612,24 +682,17 @@ export function analyzeQuestionCached(
 
   const fp = analysisFingerprint(analysis);
   const key = `${hashQuestion(question)}|${fp}`;
-  const cached = questionCache.get(key);
+  const cached = cache.get(key, now);
 
   if (
     cached &&
-    cached.question === question && // collision guard
-    now - cached.ts < CACHE_TTL_MS
+    cached.question === question // collision guard
   ) {
     return cached.qa;
   }
 
   const qa = analyzeQuestion(question, analysis);
-
-  // Evict before writing to keep size accurate
-  if (questionCache.size >= MAX_CACHE_SIZE) {
-    evictStale(now);
-  }
-
-  questionCache.set(key, { question, analysisFP: fp, qa, ts: now });
+  cache.set(key, { question, analysisFP: fp, qa, ts: now }, now);
   return qa;
 }
 
