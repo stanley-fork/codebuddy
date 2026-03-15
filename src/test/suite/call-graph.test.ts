@@ -1,6 +1,7 @@
 import * as assert from "assert";
 import {
   buildCallGraph,
+  disposeCallGraph,
   type FileImportData,
   type CallGraph,
 } from "../../services/analyzers/call-graph";
@@ -204,6 +205,52 @@ suite("Call Graph Builder", () => {
       const bNode = graph.nodes.get("src/b.ts");
       assert.ok(bNode);
       assert.ok(bNode.importedBy.includes("src/a.ts"));
+    });
+  });
+
+  suite("disposeCallGraph", () => {
+    test("clears all graph data", () => {
+      const graph = buildCallGraph(
+        [
+          makeImportData({
+            file: `${WS}/src/a.ts`,
+            imports: [{ source: "./b", specifiers: ["B"], isDefault: false }],
+          }),
+          makeImportData({ file: `${WS}/src/b.ts`, exports: ["B"] }),
+        ],
+        WS,
+      );
+      assert.strictEqual(graph.nodes.size, 2);
+      assert.strictEqual(graph.edges.length, 1);
+
+      disposeCallGraph(graph);
+
+      assert.strictEqual(graph.nodes.size, 0);
+      assert.strictEqual(graph.edges.length, 0);
+      assert.strictEqual(graph.entryPoints.length, 0);
+    });
+  });
+
+  suite("deep chains (iterative DFS)", () => {
+    test("handles chain of 500 files without stack overflow", () => {
+      const data: FileImportData[] = [];
+      for (let i = 0; i < 500; i++) {
+        const imports =
+          i < 499
+            ? [{ source: `./file${i + 1}`, specifiers: ["x"], isDefault: false }]
+            : [];
+        data.push(
+          makeImportData({
+            file: `${WS}/src/file${i}.ts`,
+            imports,
+            exports: ["x"],
+          }),
+        );
+      }
+      const graph = buildCallGraph(data, WS);
+      assert.strictEqual(graph.nodes.size, 500);
+      assert.strictEqual(graph.circularDependencies.length, 0);
+      assert.ok(graph.entryPoints.includes("src/file0.ts"));
     });
   });
 });

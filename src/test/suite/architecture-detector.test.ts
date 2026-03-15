@@ -235,4 +235,39 @@ suite("Architecture Detector", () => {
       }
     });
   });
+
+  suite("confidence clamping", () => {
+    test("Event-driven confidence clamped to <= 0.95", () => {
+      const result = detectArchitecture(
+        makeAnalysis({
+          frameworks: ["kafkajs"],
+          files: [
+            "src/events/handler.ts",
+            "src/listeners/user.ts",
+            "src/subscribers/order.ts",
+          ],
+        }),
+      );
+      const eventDriven = result.patterns.find(
+        (p) => p.name === "Event-driven",
+      );
+      assert.ok(eventDriven);
+      assert.ok(
+        eventDriven.confidence <= 0.95,
+        `Confidence ${eventDriven.confidence} should be <= 0.95`,
+      );
+    });
+  });
+
+  suite("Library / SDK detection", () => {
+    test("does not claim Library / SDK when web framework present", () => {
+      const result = detectArchitecture(
+        makeAnalysis({
+          files: ["src/index.ts"],
+          frameworks: ["express"],
+        }),
+      );
+      assert.notStrictEqual(result.projectType, "Library / SDK");
+    });
+  });
 });

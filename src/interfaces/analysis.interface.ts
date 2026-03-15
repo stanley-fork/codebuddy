@@ -102,6 +102,16 @@ export interface ArchitecturalPatternData {
 }
 
 /**
+ * Architecture report summary for serialization into AnalysisResult/CachedAnalysis.
+ * Subset of the full ArchitectureReport (omits layerMap which is internal-only).
+ */
+export interface ArchitectureReportSummary {
+  patterns: ArchitecturalPatternData[];
+  entryPoints: string[];
+  projectType: string;
+}
+
+/**
  * Call graph summary for LLM context
  */
 export interface CallGraphSummary {
@@ -118,6 +128,7 @@ export interface CallGraphSummary {
 export interface MiddlewareSummary {
   middleware: { name: string; type: string; file: string }[];
   authStrategies: string[];
+  authFlows: { strategy: string; indicators: string[]; files: string[] }[];
   errorHandlerCount: number;
 }
 
@@ -136,11 +147,7 @@ export interface AnalysisResult {
   summary: AnalysisSummary;
 
   // Phase 2 fields
-  architectureReport?: {
-    patterns: ArchitecturalPatternData[];
-    entryPoints: string[];
-    projectType: string;
-  };
+  architectureReport?: ArchitectureReportSummary;
   callGraphSummary?: CallGraphSummary;
   middlewareSummary?: MiddlewareSummary;
 }
@@ -166,11 +173,7 @@ export interface CachedAnalysis {
   analysisMetadata?: AnalysisMetadata;
 
   // Phase 2 fields
-  architectureReport?: {
-    patterns: ArchitecturalPatternData[];
-    entryPoints: string[];
-    projectType: string;
-  };
+  architectureReport?: ArchitectureReportSummary;
   callGraphSummary?: CallGraphSummary;
   middlewareSummary?: MiddlewareSummary;
 }

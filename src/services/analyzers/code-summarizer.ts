@@ -39,7 +39,7 @@ export type SummarizeFunction = (prompt: string) => Promise<string>;
 
 const MAX_BATCH_SIZE = 5;
 const MAX_FILE_CHARS_FOR_SUMMARY = 3000;
-const SUMMARY_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 const SUMMARY_PROMPT_TEMPLATE = `Summarize each code file below in exactly 1-2 sentences. Focus on:
 - What it does (purpose)
@@ -57,9 +57,14 @@ FILES:
 export class CodeSummarizer {
   private cache = new Map<string, { summary: FileSummary; expiry: number }>();
   private readonly summarizeFn: SummarizeFunction;
+  private readonly cacheTtlMs: number;
 
-  constructor(summarizeFn: SummarizeFunction) {
+  constructor(
+    summarizeFn: SummarizeFunction,
+    cacheTtlMs = DEFAULT_CACHE_TTL_MS,
+  ) {
     this.summarizeFn = summarizeFn;
+    this.cacheTtlMs = cacheTtlMs;
   }
 
   /**
@@ -174,19 +179,24 @@ export class CodeSummarizer {
       const parsed = JSON.parse(cleaned);
       if (!Array.isArray(parsed)) return [];
 
-      // Map parsed results back to full file paths
-      const snippetsByBasename = new Map<string, CodeSnippet>();
+      // Build basename → candidates (handles collisions like src/index.ts and test/index.ts)
+      const byBasename = new Map<string, CodeSnippet[]>();
       for (const s of snippets) {
         const basename = s.file.split(/[\\/]/).pop() ?? s.file;
-        snippetsByBasename.set(basename, s);
+        const list = byBasename.get(basename) ?? [];
+        list.push(s);
+        byBasename.set(basename, list);
       }
 
       for (const item of parsed) {
         if (!item.file || !item.summary) continue;
 
-        const snippet =
-          snippetsByBasename.get(item.file) ??
-          snippets.find((s) => s.file.endsWith(item.file));
+        // Prefer exact/suffix file path match, fall back to basename candidates
+        const exactMatch = snippets.find(
+          (s) => s.file === item.file || s.file.endsWith(item.file),
+        );
+        const candidates = byBasename.get(item.file) ?? [];
+        const snippet = exactMatch ?? candidates[0];
 
         if (snippet) {
           results.push({
@@ -198,19 +208,15 @@ export class CodeSummarizer {
         }
       }
     } catch {
-      // JSON parse failed — try line-by-line fallback
+      // JSON parse failed — try line-by-line fallback using plain string search
       // e.g. "filename.ts: Summary text here"
       for (const snippet of snippets) {
         const basename = snippet.file.split(/[\\/]/).pop() ?? "";
-        const linePattern = new RegExp(
-          `${escapeRegex(basename)}\\s*[:—-]\\s*(.+)`,
-          "i",
-        );
-        const match = response.match(linePattern);
-        if (match) {
+        const summary = parseFallbackLine(response, basename);
+        if (summary) {
           results.push({
             file: snippet.file,
-            summary: match[1].trim().slice(0, 200),
+            summary,
             contentHash: hashContent(snippet.content),
             language: snippet.language,
           });
@@ -240,7 +246,7 @@ export class CodeSummarizer {
   private putInCache(summary: FileSummary): void {
     this.cache.set(summary.file, {
       summary,
-      expiry: Date.now() + SUMMARY_CACHE_TTL_MS,
+      expiry: Date.now() + this.cacheTtlMs,
     });
   }
 
@@ -291,6 +297,18 @@ function generateFallbackSummary(snippet: CodeSnippet): string {
   return `${basename}: ${parts.join(". ")}.`;
 }
 
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * Parse a single file summary from unstructured LLM response using plain string search.
+ * Avoids dynamic RegExp construction to eliminate ReDoS risk.
+ */
+function parseFallbackLine(response: string, basename: string): string | null {
+  const lower = response.toLowerCase();
+  const target = basename.toLowerCase();
+  const idx = lower.indexOf(target);
+  if (idx === -1) return null;
+
+  // Find the delimiter after the filename
+  const after = response.slice(idx + basename.length).trimStart();
+  const delimMatch = after.match(/^[:—\-]\s*(.+)/);
+  return delimMatch ? delimMatch[1].trim().slice(0, 200) : null;
 }
