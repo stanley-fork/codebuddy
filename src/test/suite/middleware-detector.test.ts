@@ -59,7 +59,7 @@ suite("Middleware Detector", () => {
         [],
         [
           makeSnippet({
-            content: `app.use(cors());\napp.use(helmet());`,
+            content: `app.use(cors);\napp.use(helmet);`,
           }),
         ],
         [],
