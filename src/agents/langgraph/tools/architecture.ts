@@ -1,5 +1,6 @@
 import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
+import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../../infrastructure/logger/logger";
 import { PersistentCodebaseUnderstandingService } from "../../../services/persistent-codebase-understanding.service";
 import type {
@@ -59,6 +60,37 @@ const MAX_MODELS = 10;
 
 /** Maximum fields shown per model. */
 const MAX_FIELDS_PER_MODEL = 5;
+
+/**
+ * Convert an absolute file path to a workspace-relative path.
+ * Falls back to the original path if no workspace folder matches.
+ */
+function toRelativePath(absolutePath: string): string {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || !absolutePath) return absolutePath ?? "unknown";
+
+  for (const folder of folders) {
+    const root = folder.uri.fsPath;
+    if (absolutePath.startsWith(root)) {
+      // +1 to skip the trailing separator
+      return absolutePath.slice(root.length + 1);
+    }
+  }
+  return absolutePath;
+}
+
+/**
+ * Extract a display string from a property that may be a string or
+ * an `{ name: string; type?: string }` object (worker shape mismatch).
+ */
+function propertyToString(prop: unknown): string {
+  if (!prop) return "";
+  if (typeof prop === "string") return prop;
+  if (typeof prop === "object" && "name" in (prop as Record<string, unknown>)) {
+    return (prop as { name: string }).name;
+  }
+  return String(prop);
+}
 
 // ─── Section Type ────────────────────────────────────────────────
 
@@ -230,7 +262,7 @@ export function formatArchitectureContext(
         lines.push("");
         lines.push("**Middleware Chain**:");
         for (const m of mw.middleware.slice(0, MAX_MIDDLEWARE)) {
-          lines.push(`- ${m.name} (${m.type}) — ${m.file}`);
+          lines.push(`- ${m.name} (${m.type}) — ${toRelativePath(m.file)}`);
         }
       }
 
@@ -257,7 +289,9 @@ export function formatArchitectureContext(
       lines.push("## API Endpoints");
       lines.push("");
       for (const ep of analysis.apiEndpoints.slice(0, MAX_ENDPOINTS)) {
-        lines.push(`- \`${ep.method} ${ep.path}\` — ${ep.file ?? "unknown"}`);
+        lines.push(
+          `- \`${ep.method} ${ep.path}\` — ${toRelativePath(ep.file ?? "unknown")}`,
+        );
       }
       if (analysis.apiEndpoints.length > MAX_ENDPOINTS) {
         lines.push(
@@ -273,13 +307,14 @@ export function formatArchitectureContext(
       lines.push("## Data Models");
       lines.push("");
       for (const model of analysis.dataModels.slice(0, MAX_MODELS)) {
-        const fields = model.properties
-          ? ` (${model.properties
-              .slice(0, MAX_FIELDS_PER_MODEL)
-              .join(
-                ", ",
-              )}${model.properties.length > MAX_FIELDS_PER_MODEL ? ", ..." : ""})`
-          : "";
+        const props = (model.properties ?? [])
+          .slice(0, MAX_FIELDS_PER_MODEL)
+          .map(propertyToString)
+          .filter(Boolean);
+        const suffix =
+          (model.properties?.length ?? 0) > MAX_FIELDS_PER_MODEL ? ", ..." : "";
+        const fields =
+          props.length > 0 ? ` (${props.join(", ")}${suffix})` : "";
         lines.push(`- **${model.name}**${fields}`);
       }
       if (analysis.dataModels.length > MAX_MODELS) {
