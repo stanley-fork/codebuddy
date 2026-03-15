@@ -305,10 +305,10 @@ suite("CHARS_PER_TOKEN", () => {
 });
 
 suite("createAnalysisBudget", () => {
-  test("creates budget with 10 categories", () => {
+  test("creates budget with 12 categories", () => {
     const budget = createAnalysisBudget();
     const summary = budget.getSummary();
-    assert.strictEqual(summary.length, 10);
+    assert.strictEqual(summary.length, 12);
   });
 
   test("allocates codeSnippets as largest share", () => {

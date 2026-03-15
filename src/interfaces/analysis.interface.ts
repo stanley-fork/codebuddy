@@ -93,6 +93,35 @@ export interface AnalysisMetadata {
 }
 
 /**
+ * Architectural pattern detected in the codebase
+ */
+export interface ArchitecturalPatternData {
+  name: string;
+  confidence: number;
+  indicators: string[];
+}
+
+/**
+ * Call graph summary for LLM context
+ */
+export interface CallGraphSummary {
+  entryPoints: string[];
+  hotNodes: string[];
+  circularDependencies: string[][];
+  edgeCount: number;
+  nodeCount: number;
+}
+
+/**
+ * Middleware/auth detection summary for LLM context
+ */
+export interface MiddlewareSummary {
+  middleware: { name: string; type: string; file: string }[];
+  authStrategies: string[];
+  errorHandlerCount: number;
+}
+
+/**
  * Complete analysis result from the worker
  */
 export interface AnalysisResult {
@@ -105,6 +134,15 @@ export interface AnalysisResult {
   domainRelationships: RelationshipData[];
   codeSnippets: CodeSnippet[];
   summary: AnalysisSummary;
+
+  // Phase 2 fields
+  architectureReport?: {
+    patterns: ArchitecturalPatternData[];
+    entryPoints: string[];
+    projectType: string;
+  };
+  callGraphSummary?: CallGraphSummary;
+  middlewareSummary?: MiddlewareSummary;
 }
 
 /**
@@ -126,6 +164,15 @@ export interface CachedAnalysis {
   codeSnippets?: CodeSnippet[];
   gitState?: GitState;
   analysisMetadata?: AnalysisMetadata;
+
+  // Phase 2 fields
+  architectureReport?: {
+    patterns: ArchitecturalPatternData[];
+    entryPoints: string[];
+    projectType: string;
+  };
+  callGraphSummary?: CallGraphSummary;
+  middlewareSummary?: MiddlewareSummary;
 }
 
 /**
