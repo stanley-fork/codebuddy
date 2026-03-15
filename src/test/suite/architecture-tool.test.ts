@@ -223,6 +223,31 @@ suite("Architecture Tool", () => {
         const result = formatArchitectureContext(analysis, "models");
         assert.ok(result.includes("... and 5 more models"));
       });
+
+      test("handles object-shaped properties from worker", () => {
+        const analysis = makeAnalysis({
+          dataModels: [
+            {
+              name: "Order",
+              type: "class",
+              properties: [
+                { name: "userId", type: "string" },
+                { name: "total", type: "number" },
+              ] as unknown as string[],
+            },
+          ],
+        });
+        const result = formatArchitectureContext(analysis, "models");
+        assert.ok(
+          result.includes("userId"),
+          "Should extract name from object properties",
+        );
+        assert.ok(result.includes("total"));
+        assert.ok(
+          !result.includes("[object Object]"),
+          "Should not show [object Object]",
+        );
+      });
     });
 
     suite("empty data", () => {
