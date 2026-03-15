@@ -222,6 +222,8 @@ class CodebaseAnalysisTask {
             analysisResults.fileImports,
             data.workspacePath,
           );
+          // Release import data — the call graph now owns the topology
+          analysisResults.fileImports.length = 0;
           try {
             partialResult.callGraphSummary = {
               entryPoints: callGraph.entryPoints.slice(0, 20),

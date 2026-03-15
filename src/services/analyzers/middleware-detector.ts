@@ -269,14 +269,14 @@ function detectAuthStrategies(
 ): void {
   for (const [strategy, patterns] of Object.entries(AUTH_PATTERNS)) {
     const indicators: string[] = [];
-    const authFiles: string[] = [];
+    const authFileSet = new Set<string>();
 
     // Check file names
     for (const file of files) {
       const basename = file.split(/[\\/]/).pop() ?? "";
       if (patterns.filePatterns.some((p) => p.test(basename))) {
         indicators.push(`File: ${basename}`);
-        authFiles.push(file);
+        authFileSet.add(file);
       }
     }
 
@@ -284,14 +284,12 @@ function detectAuthStrategies(
     for (const snippet of snippets) {
       if (patterns.contentPatterns.some((p) => p.test(snippet.content))) {
         indicators.push(`Code pattern in ${snippet.file.split(/[\\/]/).pop()}`);
-        if (!authFiles.includes(snippet.file)) {
-          authFiles.push(snippet.file);
-        }
+        authFileSet.add(snippet.file);
       }
     }
 
     if (indicators.length > 0) {
-      authFlows.push({ strategy, indicators, files: authFiles });
+      authFlows.push({ strategy, indicators, files: [...authFileSet] });
     }
   }
 }

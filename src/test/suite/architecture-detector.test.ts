@@ -172,6 +172,8 @@ suite("Architecture Detector", () => {
     });
 
     test("does not match deeply nested vendor files as entry points", () => {
+      // vendor/somelib/deep/src/index.ts = 3 prefix segments (exceeds Level 2 max of 2)
+      // a/b/c/d/src/main.js = 4 prefix segments (exceeds Level 2 max of 2)
       const result = detectArchitecture(
         makeAnalysis({
           files: [
@@ -291,6 +293,16 @@ suite("Architecture Detector", () => {
         makeAnalysis({
           files: ["src/index.ts"],
           frameworks: ["express"],
+        }),
+      );
+      assert.notStrictEqual(result.projectType, "Library / SDK");
+    });
+
+    test("does not claim Library / SDK when app-like directories present", () => {
+      const result = detectArchitecture(
+        makeAnalysis({
+          files: ["src/index.ts", "src/controllers/user.ts", "src/routes/api.ts"],
+          frameworks: [],
         }),
       );
       assert.notStrictEqual(result.projectType, "Library / SDK");

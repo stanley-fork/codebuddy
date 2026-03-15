@@ -36,6 +36,38 @@ export interface SummarizeBatchResult {
  */
 export type SummarizeFunction = (prompt: string) => Promise<string>;
 
+/**
+ * Abstraction for summary cache storage.
+ * Default: in-memory Map. Can be swapped for persistent storage
+ * (e.g., workspace-scoped file cache) via dependency injection.
+ */
+export interface SummaryCache {
+  get(file: string): { summary: FileSummary; expiry: number } | undefined;
+  set(file: string, entry: { summary: FileSummary; expiry: number }): void;
+  delete(file: string): void;
+  clear(): void;
+}
+
+/** Default in-memory cache implementation. */
+export class InMemorySummaryCache implements SummaryCache {
+  private readonly store = new Map<
+    string,
+    { summary: FileSummary; expiry: number }
+  >();
+  get(file: string) {
+    return this.store.get(file);
+  }
+  set(file: string, entry: { summary: FileSummary; expiry: number }) {
+    this.store.set(file, entry);
+  }
+  delete(file: string) {
+    this.store.delete(file);
+  }
+  clear() {
+    this.store.clear();
+  }
+}
+
 // ─── Constants ───────────────────────────────────────────────────
 
 const MAX_BATCH_SIZE = 5;
@@ -56,16 +88,21 @@ FILES:
 // ─── Summarizer ──────────────────────────────────────────────────
 
 export class CodeSummarizer {
-  private cache = new Map<string, { summary: FileSummary; expiry: number }>();
+  private readonly cache: SummaryCache;
   private readonly summarizeFn: SummarizeFunction;
   private readonly cacheTtlMs: number;
+  private readonly now: () => number;
 
   constructor(
     summarizeFn: SummarizeFunction,
     cacheTtlMs = DEFAULT_CACHE_TTL_MS,
+    cache: SummaryCache = new InMemorySummaryCache(),
+    now: () => number = Date.now,
   ) {
     this.summarizeFn = summarizeFn;
     this.cacheTtlMs = cacheTtlMs;
+    this.cache = cache;
+    this.now = now;
   }
 
   /**
@@ -261,7 +298,7 @@ export class CodeSummarizer {
   private getFromCache(file: string, contentHash: string): FileSummary | null {
     const entry = this.cache.get(file);
     if (!entry) return null;
-    if (Date.now() > entry.expiry) {
+    if (this.now() > entry.expiry) {
       this.cache.delete(file);
       return null;
     }
@@ -275,7 +312,7 @@ export class CodeSummarizer {
   private putInCache(summary: FileSummary): void {
     this.cache.set(summary.file, {
       summary,
-      expiry: Date.now() + this.cacheTtlMs,
+      expiry: this.now() + this.cacheTtlMs,
     });
   }
 
@@ -299,6 +336,7 @@ function generateFallbackSummary(snippet: CodeSnippet): string {
   const parts: string[] = [];
 
   // Check for exports (supports Unicode identifiers via \p{L})
+  // Requires ES2018+ (Node 10+) for Unicode property escapes with /u flag
   const exportMatches = content.match(
     /export\s+(?:default\s+)?(?:class|function|const|interface)\s+([\p{L}\p{N}_]+)/gu,
   );
@@ -341,6 +379,7 @@ function parseFallbackLine(response: string, basename: string): string | null {
 
   // Find the delimiter after the filename in the ORIGINAL string
   const after = response.slice(idx + basename.length).trimStart();
-  const delimMatch = after.match(/^[:—\-]\s*(.+)/);
+  // Bound capture to 210 chars to prevent excessive allocation from malformed LLM output
+  const delimMatch = after.match(/^[:—\-]\s*(.{1,210})/);
   return delimMatch ? delimMatch[1].trim().slice(0, 200) : null;
 }
