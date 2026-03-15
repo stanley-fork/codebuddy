@@ -28,6 +28,11 @@ import type {
   BudgetItem,
   DependencyData,
 } from "../interfaces/analysis.interface";
+import {
+  analyzeQuestionCached,
+  buildFocusedContext,
+  type FocusedContext,
+} from "../services/analyzers/question-relevance";
 
 const orchestrator = Orchestrator.getInstance();
 
@@ -286,7 +291,7 @@ export async function architecturalRecommendationCommand(): Promise<void> {
           message: "Preparing analysis context...",
         });
 
-        const context = createContextFromAnalysis(analysis);
+        const context = createContextFromAnalysis(analysis, question);
         const sanitizedContext = context
           .replace(/`/g, "\\`")
           .replace(/\${/g, "\\${");
@@ -985,8 +990,64 @@ function generateFileStructureSection(
 }
 
 /**
+ * Generate a focused-context section (Phase 3) that prepends high-relevance
+ * files and artifacts before the regular budget-managed sections.
+ */
+function generateFocusedContextSection(
+  focused: FocusedContext,
+  budget: TokenBudgetAllocator,
+): string {
+  const lines: string[] = [];
+
+  if (focused.fullCodeFiles.length > 0) {
+    lines.push("### Most Relevant Files (full code)");
+    for (const f of focused.fullCodeFiles) {
+      lines.push(`\n**${f.file}** (${f.language})`);
+      lines.push("```" + f.language);
+      lines.push(f.content);
+      lines.push("```");
+    }
+  }
+
+  if (focused.summaryFiles.length > 0) {
+    lines.push("\n### Related Files (summaries)");
+    for (const f of focused.summaryFiles) {
+      lines.push(`- **${f.file}**: ${f.summary}`);
+    }
+  }
+
+  if (focused.relevantEndpoints.length > 0) {
+    lines.push("\n### Relevant Endpoints");
+    for (const ep of focused.relevantEndpoints.slice(0, 10)) {
+      lines.push(`- \`${ep.method} ${ep.path}\`${ep.file ? ` (${ep.file})` : ""}`);
+    }
+  }
+
+  if (focused.relevantModels.length > 0) {
+    lines.push("\n### Relevant Models");
+    for (const m of focused.relevantModels.slice(0, 10)) {
+      lines.push(`- \`${m.name}\` (${m.type})${m.file ? ` — ${m.file}` : ""}`);
+    }
+  }
+
+  if (focused.relatedDependencies.length > 0) {
+    lines.push("\n### Key Dependencies (high fan-in)");
+    for (const dep of focused.relatedDependencies) {
+      lines.push(`- ${dep}`);
+    }
+  }
+
+  const content = lines.join("\n");
+  return budget.truncateToFit("codeSnippets", content);
+}
+
+/**
  * Create rich analysis context from persistent analysis data
  * Uses token budget allocation for optimal context utilization
+ *
+ * Phase 3: When userQuestion is provided, runs two-stage analysis:
+ *   Stage 1 — Score/rank files by question relevance (cached)
+ *   Stage 2 — Prepend focused context before budget-managed sections
  */
 function createContextFromAnalysis(
   analysis: CachedAnalysis,
@@ -1000,6 +1061,28 @@ function createContextFromAnalysis(
   const budget = createAnalysisBudget(totalBudgetChars);
 
   const sections: string[] = [];
+
+  // === PHASE 3: Question-focused context (prepended when question is available) ===
+  if (userQuestion) {
+    const qa = analyzeQuestionCached(userQuestion, analysis);
+    const focused = buildFocusedContext(analysis, qa);
+
+    if (focused.rankedFiles.length > 0) {
+      const focusedSection = generateFocusedContextSection(focused, budget);
+      if (focusedSection) {
+        sections.push("## Question-Focused Context");
+        sections.push(focusedSection);
+        sections.push("");
+      }
+      logger.debug(
+        `Phase 3: ${focused.fullCodeFiles.length} full-code files, ` +
+        `${focused.summaryFiles.length} summary files, ` +
+        `${focused.relevantEndpoints.length} endpoints, ` +
+        `${focused.relevantModels.length} models, ` +
+        `boosted sections: [${focused.boostedSections.join(", ")}]`,
+      );
+    }
+  }
 
   // === SECTION 1: Codebase Overview (always include) ===
   sections.push(
