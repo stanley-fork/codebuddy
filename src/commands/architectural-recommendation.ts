@@ -898,15 +898,25 @@ function generateMiddlewareSection(
   }
 
   if (mw.errorHandlerCount > 0) {
-    lines.push(`**Error handlers**: ${mw.errorHandlerCount}`);
+    const filesInfo =
+      mw.errorHandlerFiles && mw.errorHandlerFiles.length > 0
+        ? ` (${mw.errorHandlerFiles.join(", ")})`
+        : "";
+    lines.push(`**Error handlers**: ${mw.errorHandlerCount}${filesInfo}`);
   }
 
   if (mw.middleware.length > 0) {
     lines.push("");
     lines.push("**Middleware**:");
-    for (const m of mw.middleware.slice(0, 15)) {
+    const displayed = mw.middleware.slice(0, 15);
+    for (const m of displayed) {
       const file = m.file ? ` (${getRelativePath(m.file)})` : "";
       lines.push(`- \`${m.name}\` [${m.type}]${file}`);
+    }
+    if (mw.middleware.length > 15) {
+      lines.push(
+        `- ... and ${mw.middleware.length - 15} more (${mw.middleware.length} total)`,
+      );
     }
   }
 

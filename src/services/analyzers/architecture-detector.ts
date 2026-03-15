@@ -59,6 +59,8 @@ const ENTRY_POINT_PATTERNS = [
   // Level 2: two prefix segments — covers monorepo layouts (packages/api/src/index.ts)
   // Intentionally broad: matches any two path segments, not just packages/ or apps/.
   // Deeper paths (3+ segments before src/) are excluded to avoid vendor/build artifacts.
+  // NOTE: node_modules paths are already excluded from the file list by the worker,
+  // so these patterns do not need to guard against matching them.
   /^[^\/]+[\/][^\/]+[\/](?:src[\/])?(?:index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs|java|php)$/i,
   // Bootstrap/startup variants (levels 0-2)
   /^(?:[^\/]+[\/]){0,2}(?:src[\/])?(?:bootstrap|startup|entry)\.(ts|js|py|go)$/i,
@@ -315,6 +317,16 @@ function detectEntryPoints(files: string[]): string[] {
 
 // ─── Project Type Detection ──────────────────────────────────────
 
+/** Explicit priority for tie-breaking when multiple project types score equally. */
+const TYPE_PRIORITY: Record<string, number> = {
+  "Full-stack Web App": 6,
+  Microservices: 5,
+  "REST API": 4,
+  "Frontend SPA": 3,
+  "CLI Tool": 2,
+  "Library / SDK": 1,
+};
+
 function detectProjectType(files: string[], frameworks: string[]): string {
   const scores: Record<string, number> = {};
 
@@ -358,9 +370,13 @@ function detectProjectType(files: string[], frameworks: string[]): string {
     if (score > 0) scores[projectType] = score;
   }
 
-  // Stable sort: break ties alphabetically so result is deterministic
+  // Stable sort: break ties by explicit priority (higher = preferred),
+  // then alphabetically for types not in TYPE_PRIORITY
   const sorted = Object.entries(scores).sort(
-    ([nameA, a], [nameB, b]) => b - a || nameA.localeCompare(nameB),
+    ([nameA, a], [nameB, b]) =>
+      b - a ||
+      (TYPE_PRIORITY[nameB] ?? 0) - (TYPE_PRIORITY[nameA] ?? 0) ||
+      nameA.localeCompare(nameB),
   );
   return sorted.length > 0 ? sorted[0][0] : "General Application";
 }

@@ -313,4 +313,40 @@ suite("Call Graph Builder", () => {
       assert.ok(graph.entryPoints.includes("src/file0.ts"));
     });
   });
+
+  suite("Windows backslash imports", () => {
+    test("resolves backslash relative imports (.\\b)", () => {
+      const graph = buildCallGraph(
+        [
+          makeImportData({
+            file: `${WS}/src/a.ts`,
+            imports: [
+              { source: ".\\b", specifiers: ["foo"], isDefault: false },
+            ],
+          }),
+          makeImportData({ file: `${WS}/src/b.ts`, exports: ["foo"] }),
+        ],
+        WS,
+      );
+      assert.strictEqual(graph.edges.length, 1);
+      assert.strictEqual(graph.edges[0].to, "src/b.ts");
+    });
+
+    test("resolves backslash parent imports (..\\shared\\util)", () => {
+      const graph = buildCallGraph(
+        [
+          makeImportData({
+            file: `${WS}/src/sub/a.ts`,
+            imports: [
+              { source: "..\\shared\\util", specifiers: ["x"], isDefault: false },
+            ],
+          }),
+          makeImportData({ file: `${WS}/src/shared/util.ts`, exports: ["x"] }),
+        ],
+        WS,
+      );
+      assert.strictEqual(graph.edges.length, 1);
+      assert.strictEqual(graph.edges[0].to, "src/shared/util.ts");
+    });
+  });
 });

@@ -219,8 +219,8 @@ export class CodeSummarizer {
             "\n// ... truncated"
           : snippet.content;
 
-      const basename = snippet.file.split(/[\\/]/).pop() ?? snippet.file;
-      prompt += `\n--- ${basename} (${snippet.language}) ---\n${truncated}\n`;
+      const shortPath = shortFilePath(snippet.file);
+      prompt += `\n--- ${shortPath} (${snippet.language}) ---\n${truncated}\n`;
     }
 
     return prompt;
@@ -245,23 +245,26 @@ export class CodeSummarizer {
       const parsed = JSON.parse(cleaned);
       if (!Array.isArray(parsed)) return [];
 
-      // Build basename → candidates (handles collisions like src/index.ts and test/index.ts)
-      const byBasename = new Map<string, CodeSnippet[]>();
+      // Build short path → candidates (handles collisions like src/index.ts and test/index.ts)
+      const byShortPath = new Map<string, CodeSnippet[]>();
       for (const s of snippets) {
-        const basename = s.file.split(/[\\/]/).pop() ?? s.file;
-        const list = byBasename.get(basename) ?? [];
+        const sp = shortFilePath(s.file);
+        const list = byShortPath.get(sp) ?? [];
         list.push(s);
-        byBasename.set(basename, list);
+        byShortPath.set(sp, list);
       }
 
       for (const item of parsed) {
         if (!item.file || !item.summary) continue;
 
-        // Prefer exact/suffix file path match, fall back to basename candidates
+        const itemNormalized = item.file.replace(/\\/g, "/");
+        // Prefer exact match, then suffix match with leading "/" to avoid partial collisions
         const exactMatch = snippets.find(
-          (s) => s.file === item.file || s.file.endsWith(item.file),
+          (s) =>
+            s.file === itemNormalized ||
+            s.file.replace(/\\/g, "/").endsWith("/" + itemNormalized),
         );
-        const candidates = byBasename.get(item.file) ?? [];
+        const candidates = byShortPath.get(itemNormalized) ?? [];
         const snippet = exactMatch ?? candidates[0];
 
         if (snippet) {
@@ -323,6 +326,25 @@ export class CodeSummarizer {
 
 // ─── Utilities ───────────────────────────────────────────────────
 
+/**
+ * Return the last two path segments for a file path.
+ * This disambiguates files better than basename alone when multiple files
+ * share the same filename (e.g., src/index.ts vs test/index.ts).
+ */
+export function shortFilePath(filePath: string): string {
+  const segments = filePath.replace(/\\/g, "/").split("/");
+  return segments.length >= 2
+    ? segments.slice(-2).join("/")
+    : segments[segments.length - 1];
+}
+
+/**
+ * Content-hash for cache keying.
+ * Uses SHA-256 truncated to 12 hex chars (48 bits). Collision probability
+ * is negligible for the expected cache population (~thousands of files)
+ * and acceptable because a collision only causes a stale-cache hit, not
+ * a correctness issue.
+ */
 function hashContent(content: string): string {
   return crypto.createHash("sha256").update(content).digest("hex").slice(0, 12);
 }
@@ -367,8 +389,11 @@ function generateFallbackSummary(snippet: CodeSnippet): string {
 /**
  * Parse a single file summary from unstructured LLM response using plain string search.
  * Uses indexOf for case-insensitive search — no RegExp construction, no ReDoS risk.
+ * Accepts basename only (no path separators) so indexOf cannot match partial directory names.
  */
 function parseFallbackLine(response: string, basename: string): string | null {
+  // Length guard: filesystem basenames are bounded at 255 chars; anything
+  // longer is not a real filename and should be rejected immediately.
   if (!basename || basename.length > 255) return null;
 
   // Normalize to lowercase for case-insensitive comparison

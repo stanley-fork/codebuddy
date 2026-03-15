@@ -144,7 +144,8 @@ function normalizePath(filePath: string, workspacePath: string): string {
 }
 
 function isRelativeImport(source: string): boolean {
-  return source.startsWith("./") || source.startsWith("../");
+  const normalized = source.replace(/\\/g, "/");
+  return normalized.startsWith("./") || normalized.startsWith("../");
 }
 
 /**
@@ -159,8 +160,11 @@ function resolveImportPath(
   knownFiles: Map<string, CallGraphNode>,
   _workspacePath: string,
 ): string | null {
+  // Normalize backslashes so Windows-style relative imports (e.g. .\foo)
+  // are handled consistently with forward-slash paths
+  const normalizedSource = importSource.replace(/\\/g, "/");
   const dir = path.posix.dirname(fromFile);
-  const base = path.posix.join(dir, importSource);
+  const base = path.posix.join(dir, normalizedSource);
   const normalized = path.posix.normalize(base);
 
   // path.posix.normalize always uses forward slashes; only "../" check needed
@@ -222,12 +226,13 @@ function canonicalizeCycle(cycle: string[]): string {
  * Iterative DFS to detect circular dependencies.
  * Uses an explicit work-stack to avoid stack overflow on deep graphs.
  *
- * Two-set coloring scheme (equivalent to white/gray/black):
- *  - `visited` = gray ∪ black (entered but may not be fully explored)
- *  - `cyclePathSet` = gray only (currently on the DFS path)
- * A node in `visited` but NOT in `cyclePathSet` is fully explored (black):
- * all its descendants have been processed and any cycles through it were
- * already detected. Skipping it from another DFS start is safe.
+ * Two-set coloring scheme:
+ *  - `visited` tracks all nodes that have been entered (gray + black)
+ *  - `cyclePathSet` tracks nodes currently on the active DFS path (gray only)
+ * When a frame is popped, the node leaves `cyclePathSet` (gray → black),
+ * but stays in `visited`. A node still in `visited` on a later DFS start
+ * is black (fully explored): all its descendants have been processed and
+ * any cycles through it were already detected. Skipping it is safe.
  */
 function detectCircularDependencies(
   nodes: Map<string, CallGraphNode>,
