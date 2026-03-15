@@ -2,7 +2,7 @@
 
 **Created**: January 2025
 **Updated**: March 15, 2026
-**Status**: Phase 2 Complete
+**Status**: Phase 3 In Progress
 **Feature**: `CodeBuddy.codebaseAnalysis` command
 **Branch**: `feature/code_analysis_overhaul`
 
@@ -75,7 +75,21 @@ WorkerMessage discriminated union
     ├── ANALYSIS_PROGRESS
     └── LOG
     ↓
+Phase 3 Question-Relevance (when question provided)
+    ├── analyzeQuestionCached(question, analysis) → QuestionAnalysis
+    │   ├── extractKeywords() — stop-word removal, dedup
+    │   ├── DOMAIN_SIGNALS map → boosted sections
+    │   ├── scoreFile() per snippet/file — path, content, callGraph bonuses
+    │   └── 5-min TTL cache, bounded at 100 entries
+    ├── buildFocusedContext(analysis, qa) → FocusedContext
+    │   ├── Full code tier (top 3 files)
+    │   ├── Summary tier (next 7 files)
+    │   ├── Scored endpoints & models
+    │   └── Related dependencies (hot node overlap)
+    └── generateFocusedContextSection() → prepended to sections
+    ↓
 createContextFromAnalysis() → 12 budget-managed sections
+    ├── [Phase 3: Question-Focused Context (prepended)]
     ├── Overview
     ├── Frameworks & Technologies
     ├── Language Distribution
@@ -226,11 +240,22 @@ CHARS_PER_TOKEN = { code: 2.0, prose: 3.5, conservative: 2.0 }
 | 6th | Performance + correctness | 17 issues (3 critical) | `acquireParser`/`releaseParser` pool, DFS `stack.pop()` O(n), `CHARS_PER_TOKEN` by content type, `IMPORTANT_FILE_PATTERNS` backtrack-safe, `scoreDependency` exact matching |
 | 7th | Edge cases + production | 13 issues (2 critical) | `perSnippetBudget` post-selection compute, parser pool race fix (re-check after await), `extractTomlSection` array-table handling, scoped package normalization, `lastIndexOf` for monorepos, pom.xml two-pass parsing, `enableConsole` default false, React component `type: "function"`, `validateGrammarsPath` tightened |
 
+### Phase 2 Review History (6 Rounds)
+
+| Round | Focus | Issues | Key Fixes |
+|-------|-------|--------|-----------|
+| 1st (8th overall) | Initial Phase 2 integration | 15 issues (3 critical) | Architecture detector structure, call graph edge handling, middleware dedup |
+| 2nd (9th overall) | Correctness & memory | 12 issues (2 critical) | `disposeCallGraph` cleanup, `canonicalizeCycle` dedup, iterative DFS, `InMemorySummaryCache` |
+| 3rd (10th overall) | Budget guards & safety | 14 issues (3 critical) | Budget guard hardening, cycle dedup correctness, path safety improvements |
+| 4th (11th overall) | Path handling & accuracy | 10 issues (2 critical) | `shortFilePath` 2-segment paths, `TYPE_PRIORITY` ordering, Windows backslash normalization |
+| 5th (12th overall) | Import cap & disposal | 15 issues (3 critical) | `MAX_IMPORT_FILES_FOR_CALL_GRAPH = 2000`, `shortFilePath()` in batch prompt, middleware omitted count display |
+| 6th (13th overall) | Robustness & correctness | 7 issues (3 critical) | Off-by-one import cap fix, use-after-dispose in `disposeCallGraph`, ambiguous `shortFilePath` collision guard, `\w` exec loop replacing Unicode `/gu`, module-level `WEB_FRAMEWORK_NAMES` Set, `MAX_SNIPPET_SCAN_CHARS` bound, double-relativization removal |
+
 ---
 
 ## Test Suite
 
-**655 tests passing** (including 60 Phase 1 + 54 Phase 2 new tests)
+**703 tests passing** (60 Phase 1 + 54 Phase 2 + 26 Phase 3 new + incremental additions across 13 review rounds)
 
 | Test File | Tests | Covers |
 |-----------|-------|--------|
@@ -242,6 +267,7 @@ CHARS_PER_TOKEN = { code: 2.0, prose: 3.5, conservative: 2.0 }
 | `call-graph.test.ts` | 11 | Empty graph, node registration, relative import edges, external import filtering, index file resolution, entry point identification, circular dependency detection (A→B→A), DAG no false positive, hot node fan-in, importedBy tracking |
 | `middleware-detector.test.ts` | 14 | File-based detection (middleware/, guards/), Express app.use, NestJS @UseGuards/@UseInterceptors/@UsePipes, multiple guards, error handler (4-param), auth strategies (JWT, session, OAuth, API-key), model-based Guard class detection, deduplication |
 | `code-summarizer.test.ts` | 10 | LLM batch response parsing, caching (hit/miss/invalidation/clear), batch splitting (>5 items), fallback (LLM throws, bad JSON, markdown fences), summary truncation (200 chars) |
+| `question-relevance.test.ts` | 26 | Keyword extraction (stop words, dedup, case, paths), scoreFile (path/content/callGraph bonuses), scoreEndpoint (path/handler), scoreModel (name/member caps), analyzeQuestion (domain signals, file scoring, file-list-only entries), buildFocusedContext (full/summary tiers, endpoint/model filtering, boosted sections), cache (TTL, eviction, key isolation) |
 
 ---
 
@@ -257,6 +283,7 @@ CHARS_PER_TOKEN = { code: 2.0, prose: 3.5, conservative: 2.0 }
 | `src/services/analyzers/call-graph.ts` | ~210 | Import graph builder with circular dep detection |
 | `src/services/analyzers/middleware-detector.ts` | ~280 | Middleware, auth, and error handler detection |
 | `src/services/analyzers/code-summarizer.ts` | ~250 | LLM-assisted file summarization with caching |
+| `src/services/analyzers/question-relevance.ts` | ~340 | Question-relevance scoring, focused context builder, question cache (Phase 3) |
 | `src/interfaces/analysis.interface.ts` | 190 | Shared types: WorkerMessage, AnalysisResult, BudgetItem |
 | `src/infrastructure/logger/worker-logger.ts` | 113 | Worker-safe logger with parentPort transport |
 | `src/test/suite/token-budget.test.ts` | 349 | Token budget unit tests |
@@ -267,6 +294,7 @@ CHARS_PER_TOKEN = { code: 2.0, prose: 3.5, conservative: 2.0 }
 | `src/test/suite/call-graph.test.ts` | ~170 | Call graph builder tests |
 | `src/test/suite/middleware-detector.test.ts` | ~250 | Middleware detection tests |
 | `src/test/suite/code-summarizer.test.ts` | ~200 | Code summarizer tests |
+| `src/test/suite/question-relevance.test.ts` | ~270 | Question relevance tests (Phase 3) |
 
 ### Modified Files (7)
 
@@ -399,23 +427,54 @@ Generates concise 1-2 sentence summaries for key files using LLM with content-ha
 
 ---
 
-## Phase 3: Multi-pass Analysis (Planned)
+## Phase 3: Multi-pass Analysis (In Progress)
 
-**Goal**: Two-stage LLM calls for focused, accurate answers.
+**Goal**: Two-stage analysis pipeline — score/rank files by question relevance (Stage 1), then build focused context for the LLM (Stage 2).
 
-### 3.1 Question Analysis Stage
+### 3.1 Question-Relevance Analyzer
 
-Stage 1 LLM call identifies relevant files/concepts → filter analysis → Stage 2 LLM call answers with focused context.
+**File**: `src/services/analyzers/question-relevance.ts` (~340 lines, new)
 
-### 3.2 Question-based Relevance Scoring
+Stage 1 analyzes the user question to identify and rank the most relevant files, endpoints, models, and sections.
 
-**New file**: `src/services/analyzers/question-relevance.ts`
+**Keyword extraction**: Lowercased tokens, stop-word removal (80+ English stop words), deduplication, preserves path-like tokens.
 
-Keyword overlap, file type relevance, import proximity, recency of changes. Builds on existing `RelevanceScoring` utilities.
+**Domain signal mapping**: 40+ domain terms (e.g., `jwt` → `middleware`, `route` → `endpoints`, `model` → `models`) that identify which analysis sections are relevant to the question.
 
-### 3.3 Focused Context Generation
+**Scoring functions (4)**:
 
-Full code for top 3 files, summaries for next 7, relationship diagram, relevant dependencies only.
+| Function | Factors | Caps |
+|----------|---------|------|
+| `scoreFile` | Path keyword match (+3), content keyword match (+1), entry point bonus (+2), hot node bonus (+2) | Content hits capped at 5 |
+| `scoreEndpoint` | Path keyword match (+3), handler keyword match (+2) | — |
+| `scoreModel` | Name match (+4), member/property match (+1) | Member hits capped at 3 |
+| `analyzeQuestion` | Orchestrates all scoring, produces `QuestionAnalysis` | — |
+
+**Cache**: In-memory `Map<questionHash, { qa, ts }>` with 5-minute TTL. Hash uses `Math.imul(31, h)` string hash. Bounded at 100 entries with stale eviction.
+
+### 3.2 Focused Context Builder
+
+**`buildFocusedContext(analysis, qa) → FocusedContext`**
+
+Two-tier file selection:
+- **Full code tier** (top 3 files): Complete source code included in context
+- **Summary tier** (next 7 files): Summary string only (from Phase 2's `CodeSummarizer`)
+
+Also includes: scored endpoints, scored models, related dependencies (hot nodes overlapping top files), boosted section names.
+
+### 3.3 Integration
+
+**Context generation** (`architectural-recommendation.ts`):
+- `createContextFromAnalysis` now accepts `userQuestion` (passed from call site)
+- When question is provided: runs `analyzeQuestionCached` → `buildFocusedContext` → `generateFocusedContextSection`
+- Focused context is prepended as "## Question-Focused Context" before the 12 budget-managed sections
+- Uses `codeSnippets` budget allocation for the focused section (largest share: 40%)
+- Logs Phase 3 diagnostics: file counts, endpoint/model counts, boosted sections
+
+### 3.4 Planned Enhancements
+- Stage 1 LLM call for semantic question analysis (beyond keyword matching)
+- Import proximity scoring (files importing top-ranked files get bonus)
+- Recency-of-changes scoring (recently modified files rank higher)
 
 ---
 
@@ -429,8 +488,11 @@ Full code for top 3 files, summaries for next 7, relationship diagram, relevant 
 | Path traversal via worker input | `validateWorkerInput` + `validateGrammarsPath` | ✅ Resolved |
 | Catastrophic regex backtracking | `[^\\/]*` instead of `.*`, no unbounded quantifiers | ✅ Resolved |
 | Cross-block pom.xml matching | Two-pass extraction (blocks first, then fields) | ✅ Resolved |
-| Two-stage LLM doubles latency | Cache Stage 1 results by question hash | Phase 3 |
-| Large codebases timeout | File count limits with smart sampling | Phase 2 |
+| Two-stage LLM doubles latency | Cache Stage 1 results by question hash (5-min TTL, bounded at 100) | ✅ Resolved |
+| Large codebases timeout | `MAX_IMPORT_FILES_FOR_CALL_GRAPH = 2000` cap + smart sampling | ✅ Resolved |
+| Use-after-dispose in call graph | Extract summary values before `disposeCallGraph()`, clone `hotNodes` | ✅ Resolved |
+| Ambiguous file path matching | `shortFilePath` collision guard — skip when multiple candidates share suffix | ✅ Resolved |
+| Unbounded regex scan in middleware | `MAX_SNIPPET_SCAN_CHARS = 5000` truncation in `detectAuthStrategies` | ✅ Resolved |
 
 ---
 
@@ -442,8 +504,9 @@ Full code for top 3 files, summaries for next 7, relationship diagram, relevant 
 - Call graph builder: `src/services/analyzers/call-graph.ts`
 - Middleware detector: `src/services/analyzers/middleware-detector.ts`
 - Code summarizer: `src/services/analyzers/code-summarizer.ts`
+- Question relevance: `src/services/analyzers/question-relevance.ts`
 - Worker: `src/workers/codebase-analysis.worker.ts`
 - Context generation: `src/commands/architectural-recommendation.ts`
 - Shared types: `src/interfaces/analysis.interface.ts`
 - Worker logger: `src/infrastructure/logger/worker-logger.ts`
-- Tests: `src/test/suite/{token-budget,tree-sitter-analyzer,codebase-analysis-worker-utils,architectural-recommendation-utils,architecture-detector,call-graph,middleware-detector,code-summarizer}.test.ts`
+- Tests: `src/test/suite/{token-budget,tree-sitter-analyzer,codebase-analysis-worker-utils,architectural-recommendation-utils,architecture-detector,call-graph,middleware-detector,code-summarizer,question-relevance}.test.ts`

@@ -30,6 +30,12 @@ export interface BudgetAllocation {
   used: number;
 }
 
+/** Fallback char limit when focusedContext budget key is absent */
+export const FOCUSED_CONTEXT_FALLBACK_CHARS = 4_000;
+
+/** Standard boost multiplier applied to domain-signal sections */
+export const DOMAIN_BOOST_MULTIPLIER = 1.5;
+
 /**
  * Allocates and manages a token budget for context generation
  */
@@ -205,6 +211,56 @@ export class TokenBudgetAllocator {
   }
 
   /**
+   * Check whether a budget category exists.
+   */
+  hasAllocation(name: string): boolean {
+    return this.allocations.has(name);
+  }
+
+  /**
+   * Boost a category's budget by redistributing from other categories.
+   * Increases the target by `floor(current * (clampedMultiplier - 1))`, shrinking
+   * other categories proportionally so the total budget stays constant.
+   * Each donor category retains at least MIN_ALLOCATION_CHARS.
+   */
+  private static readonly MIN_ALLOCATION_CHARS = 200;
+  static readonly MAX_BOOST_MULTIPLIER = 2.0;
+
+  boost(name: string, multiplier: number): void {
+    const allocation = this.allocations.get(name);
+    if (!allocation || multiplier <= 1) return;
+
+    // Clamp multiplier to prevent starvation of other categories
+    const clampedMultiplier = Math.min(
+      multiplier,
+      TokenBudgetAllocator.MAX_BOOST_MULTIPLIER,
+    );
+
+    const extra = Math.floor(allocation.budget * (clampedMultiplier - 1));
+    if (extra <= 0) return;
+
+    const others = [...this.allocations.entries()].filter(([k]) => k !== name);
+    if (others.length === 0) return;
+
+    const totalOther = others.reduce((sum, [, a]) => sum + a.budget, 0);
+    if (totalOther <= 0) return;
+
+    let actuallyRemoved = 0;
+    for (const [, other] of others) {
+      const share = Math.floor((other.budget / totalOther) * extra);
+      const minFloor = Math.min(
+        TokenBudgetAllocator.MIN_ALLOCATION_CHARS,
+        other.budget,
+      );
+      const maxRemovable = Math.max(0, other.budget - minFloor);
+      const clamped = Math.min(share, maxRemovable);
+      other.budget -= clamped;
+      actuallyRemoved += clamped;
+    }
+    allocation.budget += actuallyRemoved;
+  }
+
+  /**
    * Reset all usage counters
    */
   reset(): void {
@@ -219,29 +275,39 @@ export class TokenBudgetAllocator {
  */
 export function createAnalysisBudget(
   totalChars: number = 32000,
+  options: { withFocusedContext?: boolean } = {},
 ): TokenBudgetAllocator {
+  const { withFocusedContext = false } = options;
   const budget = new TokenBudgetAllocator(totalChars);
   const effective = budget.getTotalRemaining(); // after safety margin
 
-  // Proportional weights applied to the *effective* budget (total minus safety margin),
-  // not the raw total. Sum ≈ 0.987, leaving ~1.3% unallocated buffer.
+  // When Phase 3 focused context is active, split the codeSnippets allocation
+  // into focusedContext (20%) + codeSnippets (20%) so they don't compete.
+  const snippetsWeight = withFocusedContext ? 0.2 : 0.4;
+  const focusedWeight = withFocusedContext ? 0.2 : 0;
+
   // Phase 2 splits architecture allocation into architecture + callGraph + middleware
-  // Code snippets reduced from 0.468 to 0.40 because code tokenizes
-  // at ~2 chars/token vs 3.5 for prose, so same char budget = more tokens
+  // Base weights sum: 0.025+0.019+0.013+0.05+0.022+0.022+0.4+0.125+0.125+0.062+0.062+0.062 = 0.987
+  // With focusedContext: codeSnippets→0.2 + focusedContext→0.2 → sum stays 0.987
+  // Remaining ~1.3% is unallocated safety buffer absorbed by allocate() clamping
   const weights: [string, number, number][] = [
     ["overview", 0.025, 10],
     ["frameworks", 0.019, 9],
     ["languages", 0.013, 9],
-    ["architecture", 0.05, 8], // Phase 2: architecture patterns, project type
-    ["callGraph", 0.022, 8], // Phase 2: import graph, entry points, cycles
-    ["middleware", 0.022, 8], // Phase 2: middleware, auth flows
-    ["codeSnippets", 0.4, 7], // largest share (reduced for denser tokenization)
+    ["architecture", 0.05, 8],
+    ["callGraph", 0.022, 8],
+    ["middleware", 0.022, 8],
+    ["codeSnippets", snippetsWeight, 7],
     ["endpoints", 0.125, 6],
     ["models", 0.125, 5],
     ["dependencies", 0.062, 5],
     ["relationships", 0.062, 4],
     ["fileList", 0.062, 3],
   ];
+
+  if (withFocusedContext) {
+    weights.push(["focusedContext", focusedWeight, 11]); // highest priority
+  }
 
   for (const [name, weight, priority] of weights) {
     budget.allocate(name, Math.floor(effective * weight), priority);
