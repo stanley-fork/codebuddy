@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as path from "path";
 import { PersistentCodebaseUnderstandingService } from "../services/persistent-codebase-understanding.service";
 import { GeminiLLM } from "../llms/gemini/gemini";
 import { GroqLLM } from "../llms/groq/groq";
@@ -12,8 +13,41 @@ import { LogLevel } from "../services/telemetry";
 import { Orchestrator } from "../orchestrator";
 import { generativeAiModels } from "../application/constant";
 import { ILlmConfig } from "../llms/interface";
+import {
+  TokenBudgetAllocator,
+  createAnalysisBudget,
+  RelevanceScoring,
+  FOCUSED_CONTEXT_FALLBACK_CHARS,
+  DOMAIN_BOOST_MULTIPLIER,
+} from "../services/analyzers/token-budget";
+import type {
+  CodeSnippet,
+  CachedAnalysis,
+  EndpointData,
+  ModelData,
+  RelationshipData,
+  DirectoryData,
+  BudgetItem,
+  DependencyData,
+} from "../interfaces/analysis.interface";
+import {
+  analyzeQuestionCached,
+  buildFocusedContext,
+  type FocusedContext,
+} from "../services/analyzers/question-relevance";
 
 const orchestrator = Orchestrator.getInstance();
+
+/** Maps domain-signal section names to budget allocation keys (module-level constant) */
+const FOCUSED_SECTION_BUDGET_KEY: Record<string, string> = {
+  middleware: "middleware",
+  endpoints: "endpoints",
+  models: "models",
+  architecture: "architecture",
+  dependencies: "dependencies",
+  callGraph: "callGraph",
+  snippets: "codeSnippets",
+};
 
 /**
  * Determines if analysis cache should be refreshed based on age and availability
@@ -270,7 +304,7 @@ export async function architecturalRecommendationCommand(): Promise<void> {
           message: "Preparing analysis context...",
         });
 
-        const context = createContextFromAnalysis(analysis);
+        const context = createContextFromAnalysis(analysis, question);
         const sanitizedContext = context
           .replace(/`/g, "\\`")
           .replace(/\${/g, "\\${");
@@ -345,78 +379,879 @@ ${sanitizedQuestion}
         await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
 
         progress.report({ increment: 100, message: "Done!" });
-      } catch (error: any) {
-        logger.error("Error in architectural recommendation:", error);
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        logger.error("Error in architectural recommendation:", errorMessage);
         vscode.window.showErrorMessage(
-          `Failed to analyze codebase (Model: ${selectedModel}): ${error instanceof Error ? error.message : "Unknown error"}`,
+          `Failed to analyze codebase (Model: ${selectedModel}): ${errorMessage}`,
         );
       }
     },
   );
 }
 
-/**
- * Create analysis context from persistent analysis data
- */
-function createContextFromAnalysis(analysis: any): string {
-  const sections = [
+// ============================================================================
+// Section Generator Helpers (use TokenBudgetAllocator for intelligent limits)
+// ============================================================================
+
+function generateOverviewSection(analysis: CachedAnalysis): string {
+  return [
     `## Codebase Overview`,
-    `**Total Files:** ${analysis.summary.totalFiles}`,
-    `**Total Lines:** ${analysis.summary.totalLines}`,
-    `**Complexity:** ${analysis.summary.complexity}`,
-    `**Git Branch:** ${analysis.gitState.branch}`,
-    `**Last Analysis:** ${analysis.analysisMetadata.createdAt}`,
-    ``,
-    `## Frameworks & Technologies`,
-    analysis.frameworks.length > 0
-      ? analysis.frameworks.map((f: string) => `- ${f}`).join("\n")
-      : "No specific frameworks detected",
-    ``,
-    `## Dependencies`,
-    Object.keys(analysis.dependencies).length > 0
-      ? Object.entries(analysis.dependencies)
-          .slice(0, 20) // Limit to avoid overwhelming the context
-          .map(([name, version]) => `- ${name}: ${version}`)
-          .join("\n")
-      : "No dependencies found",
-    ``,
-    `## API Endpoints`,
-    analysis.apiEndpoints.length > 0
-      ? analysis.apiEndpoints
-          .slice(0, 15) // Limit endpoints
-          .map(
-            (endpoint: any) =>
-              `- ${endpoint.method} ${endpoint.path} (${endpoint.file})`,
-          )
-          .join("\n")
-      : "No API endpoints detected",
-    ``,
-    `## Data Models`,
-    analysis.dataModels.length > 0
-      ? analysis.dataModels
-          .slice(0, 10) // Limit models
-          .map(
-            (model: any) => `- ${model.name} (${model.type}) - ${model.file}`,
-          )
-          .join("\n")
-      : "No data models detected",
-    ``,
-    `## File Structure`,
-    analysis.files.length > 0
-      ? analysis.files
-          .slice(0, 30) // Limit files shown
-          .map(
-            (file: string, index: number) =>
-              `[[${index + 1}]](${file}) ${file}`,
-          )
-          .join("\n")
-      : "No files analyzed",
-    ``,
-    `## Language Distribution`,
-    Object.entries(analysis.summary.languageDistribution)
-      .map(([ext, count]) => `- ${ext}: ${count} files`)
-      .join("\n"),
+    `- **Total Files:** ${analysis.summary.totalFiles}`,
+    `- **Total Lines:** ${analysis.summary.totalLines}`,
+    `- **Complexity:** ${analysis.summary.complexity}`,
+    `- **Git Branch:** ${analysis.gitState?.branch || "unknown"}`,
+    `- **Last Analysis:** ${analysis.analysisMetadata?.createdAt || "unknown"}`,
+  ].join("\n");
+}
+
+function generateFrameworksSection(analysis: CachedAnalysis): string {
+  const lines = [`## Frameworks & Technologies`];
+  const frameworks = analysis.frameworks || [];
+  if (frameworks.length > 0) {
+    lines.push(frameworks.map((f: string) => `- ${f}`).join("\n"));
+  } else {
+    lines.push("No specific frameworks detected");
+  }
+  return lines.join("\n");
+}
+
+function generateLanguageSection(analysis: CachedAnalysis): string {
+  const lines = [`## Language Distribution`];
+  const langDist = analysis.summary?.languageDistribution || {};
+  const sortedLangs = Object.entries(langDist).sort(
+    (a, b) => (b[1] as number) - (a[1] as number),
+  );
+  lines.push(
+    sortedLangs.map(([ext, count]) => `- ${ext}: ${count} files`).join("\n"),
+  );
+  return lines.join("\n");
+}
+
+function generateDependenciesSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+  userQuestion?: string,
+): string {
+  const lines = [`## Key Dependencies`];
+  const deps = analysis.dependencies || {};
+  const depEntries = Object.entries(deps);
+
+  if (depEntries.length === 0) {
+    logger.debug("No dependencies found in analysis");
+    return lines.join("\n") + "\nNo dependencies found";
+  }
+
+  logger.debug(
+    `Processing ${depEntries.length} dependencies with budget allocator`,
+  );
+
+  // Use budget allocator for selection
+  const depItems: BudgetItem<DependencyData>[] = depEntries.map(
+    ([name, version]) => ({
+      data: { name, version: version as string },
+      size: `- ${name}: ${version}`.length + 1,
+      priority: scoreDependency(name, userQuestion),
+    }),
+  );
+
+  const selected = budget.selectWithinBudget<BudgetItem<DependencyData>>(
+    "dependencies",
+    depItems,
+    (item) => item.size,
+    (item) => item.priority ?? 1,
+  );
+
+  logger.debug(
+    `Selected ${selected.length}/${depEntries.length} dependencies within budget`,
+  );
+
+  if (selected.length > 0) {
+    lines.push(
+      selected
+        .map((item) => `- ${item.data.name}: ${item.data.version}`)
+        .join("\n"),
+    );
+  } else {
+    lines.push("No dependencies found");
+  }
+  return lines.join("\n");
+}
+
+export function scoreDependency(name: string, question?: string): number {
+  let score = 1;
+  const lowerName = name.toLowerCase();
+
+  // Normalize scoped packages: @scope/name → extract both scope and bare name
+  const unscopedName = lowerName.startsWith("@")
+    ? (lowerName.split("/").pop() ?? lowerName)
+    : lowerName;
+
+  // Tier 1: exact match on common framework packages (unscoped)
+  const CORE_FRAMEWORK_NAMES = new Set([
+    "react",
+    "react-dom",
+    "vue",
+    "svelte",
+    "next",
+    "nuxt",
+    "express",
+    "fastify",
+    "koa",
+    "hono",
+    "prisma",
+    "typeorm",
+    "mongoose",
+    "sequelize",
+    "drizzle-orm",
+    "typescript",
+    "webpack",
+    "vite",
+    "esbuild",
+  ]);
+
+  // Tier 2: scope-based detection (package scope indicates framework family)
+  const FRAMEWORK_SCOPES = new Set(["angular", "nestjs", "prisma", "trpc"]);
+
+  if (CORE_FRAMEWORK_NAMES.has(unscopedName)) {
+    score += 3;
+  } else if (lowerName.startsWith("@")) {
+    const scope = lowerName.slice(1).split("/")[0];
+    if (FRAMEWORK_SCOPES.has(scope)) score += 3;
+  }
+
+  // Question relevance
+  if (question) {
+    const questionLower = question.toLowerCase();
+    if (questionLower.includes(lowerName)) {
+      score += 5;
+    }
+  }
+
+  return score;
+}
+
+function generateEndpointsSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+  userQuestion?: string,
+): string {
+  const lines = [`## API Endpoints`];
+  const endpoints = analysis.apiEndpoints || [];
+
+  if (endpoints.length === 0) {
+    logger.debug("No API endpoints found in analysis");
+    return lines.join("\n") + "\nNo API endpoints detected";
+  }
+
+  logger.debug(
+    `Processing ${endpoints.length} API endpoints with budget allocator`,
+  );
+
+  // Use budget allocator for selection
+  const endpointItems: BudgetItem<EndpointData>[] = endpoints.map(
+    (ep: any) => ({
+      data: ep as EndpointData,
+      size:
+        `- **${ep.method}** \`${ep.path}\` → ${ep.file?.split("/").pop() || "unknown"}${ep.line ? `:${ep.line}` : ""}`
+          .length + 1,
+      priority: RelevanceScoring.scoreEndpoint(ep, userQuestion),
+    }),
+  );
+
+  const selected = budget.selectWithinBudget<BudgetItem<EndpointData>>(
+    "endpoints",
+    endpointItems,
+    (item) => item.size,
+    (item) => item.priority ?? 1,
+  );
+
+  if (selected.length === 0) {
+    logger.debug("No endpoints selected within budget");
+    return lines.join("\n") + "\nNo API endpoints detected";
+  }
+
+  logger.debug(
+    `Selected ${selected.length}/${endpoints.length} endpoints within budget`,
+  );
+
+  // Group by base path
+  const grouped = new Map<string, EndpointData[]>();
+  for (const item of selected) {
+    const ep = item.data;
+    const basePath = ep.path.split("/").slice(0, 3).join("/") || "/";
+    if (!grouped.has(basePath)) grouped.set(basePath, []);
+    grouped.get(basePath)!.push(ep);
+  }
+
+  for (const [basePath, eps] of grouped) {
+    lines.push(`\n### ${basePath}`);
+    for (const ep of eps) {
+      const fileName = ep.file?.split("/").pop() || "unknown";
+      lines.push(
+        `- **${ep.method}** \`${ep.path}\` → ${fileName}${ep.line ? `:${ep.line}` : ""}`,
+      );
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function generateModelsSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+  userQuestion?: string,
+): string {
+  const lines = [`## Data Models & Types`];
+  const models = analysis.dataModels || [];
+
+  if (models.length === 0) {
+    logger.debug("No data models found in analysis");
+    return lines.join("\n") + "\nNo data models detected";
+  }
+
+  logger.debug(`Processing ${models.length} data models with budget allocator`);
+
+  // Use budget allocator for selection
+  const modelItems: BudgetItem<ModelData>[] = models.map((model: any) => ({
+    data: model as ModelData,
+    size:
+      `- **${model.name}** (${model.file?.split("/").pop() || ""})`.length + 20,
+    priority: RelevanceScoring.scoreModel(model, userQuestion),
+  }));
+
+  const selected = budget.selectWithinBudget<BudgetItem<ModelData>>(
+    "models",
+    modelItems,
+    (item) => item.size,
+    (item) => item.priority ?? 1,
+  );
+
+  if (selected.length === 0) {
+    logger.debug("No models selected within budget");
+    return lines.join("\n") + "\nNo data models detected";
+  }
+
+  logger.debug(
+    `Selected ${selected.length}/${models.length} models within budget`,
+  );
+
+  // Group by type
+  const classes = selected.filter((m) => m.data.type === "class");
+  const interfaces = selected.filter(
+    (m) => m.data.type === "interface" || m.data.type === "type",
+  );
+  const components = selected.filter((m) => m.data.type === "react_component");
+  const functions = selected.filter((m) => m.data.type === "function");
+
+  if (classes.length > 0) {
+    lines.push(`\n### Classes (${classes.length})`);
+    for (const item of classes) {
+      const cls = item.data;
+      const fileName = cls.file?.split("/").pop() || "";
+      let detail = `- **${cls.name}**`;
+      if (cls.extends) detail += ` extends ${cls.extends}`;
+      if (cls.implements?.length)
+        detail += ` implements ${cls.implements.join(", ")}`;
+      detail += ` (${fileName})`;
+      if (cls.methods?.length)
+        detail += `\n  - Methods: ${cls.methods.slice(0, 5).join(", ")}${cls.methods.length > 5 ? "..." : ""}`;
+      lines.push(detail);
+    }
+  }
+
+  if (interfaces.length > 0) {
+    lines.push(`\n### Interfaces & Types (${interfaces.length})`);
+    for (const item of interfaces) {
+      const iface = item.data;
+      const fileName = iface.file?.split("/").pop() || "";
+      lines.push(`- **${iface.name}** (${fileName})`);
+    }
+  }
+
+  if (components.length > 0) {
+    lines.push(`\n### React Components (${components.length})`);
+    for (const item of components) {
+      const comp = item.data;
+      const fileName = comp.file?.split("/").pop() || "";
+      lines.push(`- **${comp.name}** (${fileName})`);
+    }
+  }
+
+  if (
+    functions.length > 0 &&
+    functions.filter((f) => f.data.isExported).length > 0
+  ) {
+    lines.push(`\n### Exported Functions`);
+    for (const item of functions.filter((f) => f.data.isExported)) {
+      const fn = item.data;
+      const fileName = fn.file?.split("/").pop() || "";
+      lines.push(`- **${fn.name}** (${fileName})`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function generateSnippetsSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+  userQuestion?: string,
+): string {
+  const codeSnippets: CodeSnippet[] = analysis.codeSnippets || [];
+  if (codeSnippets.length === 0) {
+    logger.debug("No code snippets found in analysis");
+    return "";
+  }
+
+  logger.debug(
+    `Processing ${codeSnippets.length} code snippets with budget allocator`,
+  );
+
+  const lines = [
+    `## Key Code Files`,
+    `_Showing important files for context._\n`,
   ];
 
+  // Use budget allocator for selection with file scoring
+  const snippetItems: BudgetItem<CodeSnippet>[] = codeSnippets.map(
+    (snippet) => ({
+      data: snippet,
+      size: `### ${getRelativePath(snippet.file)}\n\`\`\`${snippet.language}\n${snippet.content}\n\`\`\`\n`
+        .length,
+      priority: RelevanceScoring.scoreFile(snippet.file, {
+        question: userQuestion,
+      }),
+    }),
+  );
+
+  // Capture remaining budget BEFORE selectWithinBudget consumes it
+  const selected = budget.selectWithinBudget<BudgetItem<CodeSnippet>>(
+    "codeSnippets",
+    snippetItems,
+    (item) => item.size,
+    (item) => item.priority ?? 1,
+  );
+
+  if (selected.length === 0) {
+    logger.debug("No snippets selected within budget");
+    return "";
+  }
+
+  logger.debug(
+    `Selected ${selected.length}/${codeSnippets.length} code snippets within budget`,
+  );
+
+  // Compute per-snippet budget from remaining allocation AFTER selection,
+  // not from pre-captured total (which over-truncates when few are selected)
+  const remainingAfterSelection = budget.getRemaining("codeSnippets");
+  const totalSelectedSize = selected.reduce((sum, item) => sum + item.size, 0);
+  const perSnippetBudget = Math.max(
+    Math.floor((totalSelectedSize + remainingAfterSelection) / selected.length),
+    500, // minimum chars per snippet
+  );
+
+  for (const item of selected) {
+    const snippet = item.data;
+    const relativePath = getRelativePath(snippet.file);
+    lines.push(`### ${relativePath}`);
+    lines.push("```" + (snippet.language || "typescript"));
+
+    // Truncate if content exceeds per-snippet budget allocation
+    const maxContentLen = Math.max(perSnippetBudget - 50, 500); // Minimum 500 chars per snippet
+    if (snippet.content.length > maxContentLen) {
+      const truncatedLines = snippet.content
+        .substring(0, maxContentLen)
+        .split("\n");
+      lines.push(truncatedLines.join("\n"));
+      lines.push("// ... (truncated)");
+    } else {
+      lines.push(snippet.content);
+    }
+    lines.push("```");
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function generateRelationshipsSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const relationships = analysis.domainRelationships || [];
+  if (relationships.length === 0) {
+    logger.debug("No domain relationships found in analysis");
+    return "";
+  }
+
+  logger.debug(
+    `Processing ${relationships.length} domain relationships with budget allocator`,
+  );
+
+  const lines = [`## Domain Relationships`];
+  const relItems: BudgetItem<RelationshipData>[] = relationships.map(
+    (rel: any) => ({
+      data: rel as RelationshipData,
+      size:
+        `- **${rel.entity}** → ${rel.relatedEntities?.join(", ") || "none"}`
+          .length + 1,
+      priority: 1,
+    }),
+  );
+
+  const selected = budget.selectWithinBudget<BudgetItem<RelationshipData>>(
+    "relationships",
+    relItems,
+    (item) => item.size,
+    (item) => item.priority ?? 1,
+  );
+
+  logger.debug(
+    `Selected ${selected.length}/${relationships.length} relationships within budget`,
+  );
+
+  for (const item of selected) {
+    const rel = item.data;
+    lines.push(
+      `- **${rel.entity}** → ${rel.relatedEntities?.join(", ") || "none"}`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
+// ─── Phase 2: Architecture Section ───────────────────────────────
+
+function generateArchitectureSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const report = analysis.architectureReport;
+  if (!report || report.patterns.length === 0) return "";
+
+  const lines = [`## Architecture`];
+  lines.push(`**Project Type**: ${report.projectType}`);
+
+  if (report.entryPoints.length > 0) {
+    lines.push(
+      `**Entry Points**: ${report.entryPoints
+        .slice(0, 5)
+        .map((e) => getRelativePath(e))
+        .join(", ")}`,
+    );
+  }
+
+  lines.push("");
+  lines.push("**Detected Patterns**:");
+  for (const pattern of report.patterns.slice(0, 5)) {
+    const pct = Math.round(pattern.confidence * 100);
+    lines.push(`- **${pattern.name}** (${pct}% confidence)`);
+    for (const ind of pattern.indicators.slice(0, 3)) {
+      lines.push(`  - ${ind}`);
+    }
+  }
+
+  const text = lines.join("\n");
+  return budget.truncateToFit("architecture", text);
+}
+
+// ─── Phase 2: Call Graph Section ─────────────────────────────────
+
+function generateCallGraphSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const graph = analysis.callGraphSummary;
+  if (!graph || graph.nodeCount === 0) return "";
+
+  const lines = [`## Import Graph`];
+  lines.push(`**${graph.nodeCount} modules**, ${graph.edgeCount} import edges`);
+
+  if (graph.hotNodes.length > 0) {
+    lines.push("");
+    lines.push("**Most-imported modules** (dependency hubs):");
+    for (const node of graph.hotNodes.slice(0, 8)) {
+      lines.push(`- ${node}`);
+    }
+  }
+
+  if (graph.entryPoints.length > 0) {
+    lines.push("");
+    lines.push(
+      `**Entry points** (not imported by others): ${graph.entryPoints.slice(0, 8).join(", ")}`,
+    );
+  }
+
+  if (graph.circularDependencies.length > 0) {
+    lines.push("");
+    lines.push(
+      `**⚠ Circular dependencies** (${graph.circularDependencies.length}):`,
+    );
+    for (const cycle of graph.circularDependencies.slice(0, 3)) {
+      lines.push(`- ${cycle.join(" → ")}`);
+    }
+  }
+
+  const text = lines.join("\n");
+  return budget.truncateToFit("callGraph", text);
+}
+
+// ─── Phase 2: Middleware Section ─────────────────────────────────
+
+function generateMiddlewareSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const mw = analysis.middlewareSummary;
+  if (!mw || (mw.middleware.length === 0 && mw.authStrategies.length === 0)) {
+    return "";
+  }
+
+  const lines = [`## Middleware & Auth`];
+
+  if (mw.authStrategies.length > 0) {
+    lines.push(`**Auth strategies**: ${mw.authStrategies.join(", ")}`);
+  }
+
+  if (mw.errorHandlerCount > 0) {
+    const filesInfo =
+      mw.errorHandlerFiles && mw.errorHandlerFiles.length > 0
+        ? ` (${mw.errorHandlerFiles.join(", ")})`
+        : "";
+    lines.push(`**Error handlers**: ${mw.errorHandlerCount}${filesInfo}`);
+  }
+
+  if (mw.middleware.length > 0) {
+    lines.push("");
+    lines.push("**Middleware**:");
+    const displayed = mw.middleware.slice(0, 15);
+    for (const m of displayed) {
+      // m.file is already relative (worker's relativize() applied at serialization boundary)
+      const file = m.file ? ` (${m.file})` : "";
+      lines.push(`- \`${m.name}\` [${m.type}]${file}`);
+    }
+    if (mw.middleware.length > 15) {
+      lines.push(
+        `- ... and ${mw.middleware.length - 15} more (${mw.middleware.length} total)`,
+      );
+    }
+  }
+
+  const text = lines.join("\n");
+  return budget.truncateToFit("middleware", text);
+}
+
+function generateFileStructureSection(
+  analysis: CachedAnalysis,
+  budget: TokenBudgetAllocator,
+): string {
+  const files = analysis.files || [];
+  if (files.length === 0) {
+    logger.debug("No files found in analysis");
+    return `## Project Structure\nNo files analyzed`;
+  }
+
+  logger.debug(
+    `Processing ${files.length} files for project structure section`,
+  );
+
+  const lines = [`## Project Structure`];
+
+  // Group by directory
+  const byDir = new Map<string, string[]>();
+  for (const file of files) {
+    const dir = file.split("/").slice(0, -1).join("/") || ".";
+    const fileName = file.split("/").pop() || file;
+    if (!byDir.has(dir)) byDir.set(dir, []);
+    byDir.get(dir)!.push(fileName);
+  }
+
+  // Create items for budget selection
+  const dirItems: BudgetItem<DirectoryData>[] = Array.from(byDir.entries()).map(
+    ([dir, dirFiles]) => ({
+      data: { dir, files: dirFiles },
+      size:
+        `- **${dir.split("/").slice(-2).join("/")}/** (${dirFiles.length} files)`
+          .length + 1,
+      priority: dirFiles.length, // More files = higher priority
+    }),
+  );
+
+  const selected = budget.selectWithinBudget<BudgetItem<DirectoryData>>(
+    "fileList",
+    dirItems,
+    (item) => item.size,
+    (item) => item.priority ?? 1,
+  );
+
+  logger.debug(
+    `Selected ${selected.length}/${byDir.size} directories within budget`,
+  );
+
+  for (const item of selected) {
+    const shortDir =
+      item.data.dir.split("/").slice(-2).join("/") || item.data.dir;
+    lines.push(`- **${shortDir}/** (${item.data.files.length} files)`);
+    if (item.data.files.length <= 3) {
+      lines.push(`  - ${item.data.files.join(", ")}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Generate a focused-context section (Phase 3) that prepends high-relevance
+ * files and artifacts before the regular budget-managed sections.
+ */
+function generateFocusedContextSection(
+  focused: FocusedContext,
+  budget: TokenBudgetAllocator,
+): string {
+  const lines: string[] = [];
+
+  if (focused.fullCodeFiles.length > 0) {
+    lines.push("### Most Relevant Files (full code)");
+    for (const f of focused.fullCodeFiles) {
+      lines.push(`\n**${f.file}** (${f.language})`);
+      lines.push("```" + f.language);
+      lines.push(f.content);
+      lines.push("```");
+    }
+  }
+
+  if (focused.summaryFiles.length > 0) {
+    lines.push("\n### Related Files (summaries)");
+    for (const f of focused.summaryFiles) {
+      const label = f.summary || "source file";
+      lines.push(`- **${f.file}**: ${label}`);
+    }
+  }
+
+  if (focused.relevantEndpoints.length > 0) {
+    lines.push("\n### Relevant Endpoints");
+    for (const ep of focused.relevantEndpoints.slice(0, 10)) {
+      lines.push(
+        `- \`${ep.method} ${ep.path}\`${ep.file ? ` (${ep.file})` : ""}`,
+      );
+    }
+  }
+
+  if (focused.relevantModels.length > 0) {
+    lines.push("\n### Relevant Models");
+    for (const m of focused.relevantModels.slice(0, 10)) {
+      lines.push(`- \`${m.name}\` (${m.type})${m.file ? ` — ${m.file}` : ""}`);
+    }
+  }
+
+  if (focused.relatedDependencies.length > 0) {
+    lines.push("\n### Key Dependencies (high fan-in)");
+    for (const dep of focused.relatedDependencies) {
+      lines.push(`- ${dep}`);
+    }
+  }
+
+  const content = lines.join("\n");
+  if (!budget.hasAllocation("focusedContext")) {
+    // Defensive: budget wasn't configured for focused context.
+    // Truncate to a safe fallback to prevent context overflow.
+    logger.warn(
+      "generateFocusedContextSection: no focusedContext budget allocation; applying fallback truncation",
+    );
+    return content.slice(0, FOCUSED_CONTEXT_FALLBACK_CHARS);
+  }
+  return budget.truncateToFit("focusedContext", content);
+}
+
+/**
+ * Create rich analysis context from persistent analysis data
+ * Uses token budget allocation for optimal context utilization
+ *
+ * Phase 3: When userQuestion is provided, runs two-stage analysis:
+ *   Stage 1 — Score/rank files by question relevance (cached)
+ *   Stage 2 — Prepend focused context before budget-managed sections
+ */
+function createContextFromAnalysis(
+  analysis: CachedAnalysis,
+  userQuestion?: string,
+  totalBudgetChars: number = 32000,
+): string {
+  logger.debug(
+    `Creating context from analysis with ${totalBudgetChars} char budget`,
+  );
+
+  const budget = createAnalysisBudget(totalBudgetChars, {
+    withFocusedContext: !!userQuestion,
+  });
+
+  const sections: string[] = [];
+
+  // === PHASE 3: Question-focused context (prepended when question is available) ===
+  if (userQuestion) {
+    const qa = analyzeQuestionCached(userQuestion, analysis);
+    const focused = buildFocusedContext(analysis, qa);
+
+    if (focused.rankedFiles.length > 0) {
+      const focusedSection = generateFocusedContextSection(focused, budget);
+      if (focusedSection) {
+        sections.push("## Question-Focused Context");
+        sections.push(focusedSection);
+        sections.push("");
+      }
+
+      // Apply domain-signal boosts to relevant budget sections
+      for (const section of focused.boostedSections) {
+        const budgetKey = FOCUSED_SECTION_BUDGET_KEY[section];
+        if (budgetKey) {
+          budget.boost(budgetKey, DOMAIN_BOOST_MULTIPLIER);
+        }
+      }
+
+      logger.debug(
+        `Phase 3: ${focused.fullCodeFiles.length} full-code files, ` +
+          `${focused.summaryFiles.length} summary files, ` +
+          `${focused.relevantEndpoints.length} endpoints, ` +
+          `${focused.relevantModels.length} models, ` +
+          `boosted sections: [${focused.boostedSections.join(", ")}]`,
+      );
+    }
+  }
+
+  // === SECTION 1: Codebase Overview (always include) ===
+  sections.push(
+    budget.truncateToFit("overview", generateOverviewSection(analysis)),
+  );
+  sections.push("");
+
+  // === SECTION 2: Frameworks & Technologies ===
+  sections.push(
+    budget.truncateToFit("frameworks", generateFrameworksSection(analysis)),
+  );
+  sections.push("");
+
+  // === SECTION 3: Language Distribution ===
+  sections.push(
+    budget.truncateToFit("languages", generateLanguageSection(analysis)),
+  );
+  sections.push("");
+
+  // === SECTION 4: Dependencies (prioritized with budget) ===
+  sections.push(generateDependenciesSection(analysis, budget, userQuestion));
+  sections.push("");
+
+  // === SECTION 5: API Endpoints (using budget) ===
+  sections.push(generateEndpointsSection(analysis, budget, userQuestion));
+  sections.push("");
+
+  // === SECTION 6: Data Models (using budget) ===
+  sections.push(generateModelsSection(analysis, budget, userQuestion));
+  sections.push("");
+
+  // === SECTION 7: Code Snippets (using budget) ===
+  const snippetsSection = generateSnippetsSection(
+    analysis,
+    budget,
+    userQuestion,
+  );
+  if (snippetsSection) {
+    sections.push(snippetsSection);
+    sections.push("");
+  }
+
+  // === SECTION 8: Domain Relationships (using budget) ===
+  const relationshipsSection = generateRelationshipsSection(analysis, budget);
+  if (relationshipsSection) {
+    sections.push(relationshipsSection);
+    sections.push("");
+  }
+
+  // === SECTION 9: Architecture Patterns (Phase 2) ===
+  if (!budget.isExhausted()) {
+    const archSection = generateArchitectureSection(analysis, budget);
+    if (archSection) {
+      sections.push(archSection);
+      sections.push("");
+    }
+  }
+
+  // === SECTION 10: Import Graph (Phase 2) ===
+  if (!budget.isExhausted()) {
+    const callGraphSection = generateCallGraphSection(analysis, budget);
+    if (callGraphSection) {
+      sections.push(callGraphSection);
+      sections.push("");
+    }
+  }
+
+  // === SECTION 11: Middleware & Auth (Phase 2) ===
+  if (!budget.isExhausted()) {
+    const middlewareSection = generateMiddlewareSection(analysis, budget);
+    if (middlewareSection) {
+      sections.push(middlewareSection);
+      sections.push("");
+    }
+  }
+
+  // === SECTION 12: File Structure (using budget) ===
+  if (!budget.isExhausted()) {
+    sections.push(generateFileStructureSection(analysis, budget));
+  }
+
+  // Log budget summary
+  const budgetSummary = budget.getSummary();
+  logger.debug(
+    `Context generation complete. Budget usage: ${JSON.stringify(
+      budgetSummary.map((s) => ({
+        name: s.name,
+        used: s.used,
+        remaining: s.remaining,
+      })),
+    )}`,
+  );
+
   return sections.join("\n");
+}
+
+/**
+ * Get relative path from workspace root
+ * Uses VS Code workspace API when available, with marker-based fallback
+ */
+export function getRelativePath(fullPath: string): string {
+  if (!fullPath) return "unknown";
+
+  // 1. Best: VS Code workspace API with path.relative for cross-platform correctness
+  try {
+    const uri = vscode.Uri.file(fullPath);
+    const wsFolder = vscode.workspace.getWorkspaceFolder(uri);
+    if (wsFolder) {
+      const rel = path.relative(wsFolder.uri.fsPath, fullPath);
+      // Ensure we didn't escape the workspace (path.relative returns '../...' if so)
+      if (!rel.startsWith("..")) return rel;
+    }
+  } catch {
+    // Not in extension host context or workspace API unavailable
+  }
+
+  // 2. Fallback: find the deepest known project root marker and make relative from it
+  const ROOT_MARKERS = ["src", "lib", "app", "pages", "components"];
+  const normalized = fullPath.replace(/\\/g, "/");
+
+  // Skip node_modules paths — they are dependencies, not project code
+  if (normalized.includes("/node_modules/")) {
+    return path.basename(fullPath);
+  }
+
+  for (const marker of ROOT_MARKERS) {
+    // Use lastIndexOf for deepest match — avoids overly long paths in monorepos
+    // e.g. /workspace/src/packages/mylib/src/utils.ts → src/utils.ts
+    const idx = normalized.lastIndexOf(`/${marker}/`);
+    if (idx !== -1) {
+      return normalized.slice(idx + 1); // includes the marker dir: "src/controllers/..."
+    }
+  }
+
+  // 3. Last resort: basename only (safe — no absolute path leakage)
+  return path.basename(fullPath);
 }
