@@ -16,6 +16,8 @@ import {
 import { detectMiddleware } from "../services/analyzers/middleware-detector";
 import type {
   CodeSnippet,
+  EndpointData,
+  ModelData,
   AnalysisResult,
   WorkerInputData,
 } from "../interfaces/analysis.interface";
@@ -222,9 +224,7 @@ class CodebaseAnalysisTask {
           partialResult.callGraphSummary = {
             entryPoints: callGraph.entryPoints.slice(0, 20),
             hotNodes: callGraph.hotNodes,
-            circularDependencies: callGraph.circularDependencies
-              .slice(0, 10)
-              .map((c) => c.cycle),
+            circularDependencies: callGraph.circularDependencies.slice(0, 10),
             edgeCount: callGraph.edges.length,
             nodeCount: callGraph.nodes.size,
           };
@@ -251,6 +251,11 @@ class CodebaseAnalysisTask {
             file: m.file,
           })),
           authStrategies: mwReport.authFlows.map((f) => f.strategy),
+          authFlows: mwReport.authFlows.map((f) => ({
+            strategy: f.strategy,
+            indicators: f.indicators,
+            files: f.files,
+          })),
           errorHandlerCount: mwReport.errorHandlers.length,
         };
         this.logger.info(
@@ -295,15 +300,15 @@ class CodebaseAnalysisTask {
 
   private async analyzeFileContents(files: string[]): Promise<{
     codeSnippets: CodeSnippet[];
-    apiEndpoints: any[];
-    dataModels: any[];
+    apiEndpoints: EndpointData[];
+    dataModels: ModelData[];
     totalLines: number;
     languageDistribution: Record<string, number>;
     fileImports: FileImportData[];
   }> {
     const codeSnippets: CodeSnippet[] = [];
-    const apiEndpoints: any[] = [];
-    const dataModels: any[] = [];
+    const apiEndpoints: EndpointData[] = [];
+    const dataModels: ModelData[] = [];
     const fileImports: FileImportData[] = [];
     let totalLines = 0;
     const languageDistribution: Record<string, number> = {};

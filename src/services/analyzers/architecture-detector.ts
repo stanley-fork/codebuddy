@@ -91,6 +91,10 @@ const PROJECT_TYPE_INDICATORS: Record<
   "Library / SDK": {
     files: [/(?:^|[\\/])(?:src[\\/])?index\.(ts|js)$/i],
     frameworks: [],
+    /**
+     * Negative signal: only match if NO web-framework dependency is present.
+     * detectProjectType applies this check after scoring.
+     */
   },
   Microservices: {
     files: [/services?[\\/].*[\\/]src[\\/]/i, /packages?[\\/]/i],
@@ -128,14 +132,18 @@ function detectLayers(files: string[]): ArchitecturalLayer[] {
   const layers: ArchitecturalLayer[] = [];
 
   for (const [name, pattern] of Object.entries(LAYER_PATTERNS)) {
-    const matched = files.filter((f) => pattern.test(f));
+    const matched: string[] = [];
+    const dirs = new Set<string>();
+
+    for (const f of files) {
+      const m = f.match(pattern);
+      if (m) {
+        matched.push(f);
+        dirs.add(f.slice(0, (m.index ?? 0) + m[0].length));
+      }
+    }
+
     if (matched.length > 0) {
-      const dirs = new Set(
-        matched.map((f) => {
-          const match = f.match(pattern);
-          return match ? f.slice(0, (match.index ?? 0) + match[0].length) : f;
-        }),
-      );
       layers.push({
         name,
         directories: [...dirs],
@@ -270,7 +278,7 @@ function detectPatterns(
   if (eventIndicators.length >= 1) {
     patterns.push({
       name: "Event-driven",
-      confidence: 0.4 + eventIndicators.length * 0.25,
+      confidence: Math.min(0.4 + eventIndicators.length * 0.25, 0.95),
       indicators: eventIndicators,
     });
   }
@@ -304,6 +312,13 @@ function detectEntryPoints(files: string[]): string[] {
 function detectProjectType(files: string[], frameworks: string[]): string {
   const scores: Record<string, number> = {};
 
+  const frameworksLower = frameworks.map((f) => f.toLowerCase());
+  const WEB_FRAMEWORK_PATTERN =
+    /^(?:express|fastify|react|react-dom|vue|svelte|@angular\/core|next|nuxt|remix|sveltekit|flask|fastapi|django|gin|actix|spring|koa|hono)$/i;
+  const hasWebFramework = frameworksLower.some((f) =>
+    WEB_FRAMEWORK_PATTERN.test(f),
+  );
+
   for (const [projectType, indicators] of Object.entries(
     PROJECT_TYPE_INDICATORS,
   )) {
@@ -313,14 +328,21 @@ function detectProjectType(files: string[], frameworks: string[]): string {
       if (files.some((f) => pattern.test(f))) score += 1;
     }
 
-    const frameworksLower = frameworks.map((f) => f.toLowerCase());
     for (const fw of indicators.frameworks) {
       if (frameworksLower.includes(fw.toLowerCase())) score += 2;
+    }
+
+    // Library / SDK: only claim it when no web-framework dependency exists
+    if (projectType === "Library / SDK" && hasWebFramework) {
+      score = 0;
     }
 
     if (score > 0) scores[projectType] = score;
   }
 
-  const sorted = Object.entries(scores).sort(([, a], [, b]) => b - a);
+  // Stable sort: break ties alphabetically so result is deterministic
+  const sorted = Object.entries(scores).sort(
+    ([nameA, a], [nameB, b]) => b - a || nameA.localeCompare(nameB),
+  );
   return sorted.length > 0 ? sorted[0][0] : "General Application";
 }

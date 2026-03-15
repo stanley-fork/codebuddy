@@ -27,15 +27,11 @@ export interface CallGraphEdge {
   specifiers: string[]; // what is imported
 }
 
-export interface CircularDependency {
-  cycle: string[]; // file paths forming the cycle
-}
-
 export interface CallGraph {
   nodes: Map<string, CallGraphNode>;
   edges: CallGraphEdge[];
   entryPoints: string[];
-  circularDependencies: CircularDependency[];
+  circularDependencies: string[][]; // each inner array is one cycle path
   hotNodes: string[]; // most-imported files (fan-in hubs)
 }
 
@@ -119,6 +115,18 @@ export function buildCallGraph(
   return { nodes, edges, entryPoints, circularDependencies, hotNodes };
 }
 
+/**
+ * Release all data held by a CallGraph instance.
+ * Call when the graph is no longer needed to free memory on large codebases.
+ */
+export function disposeCallGraph(graph: CallGraph): void {
+  graph.nodes.clear();
+  graph.edges.length = 0;
+  graph.entryPoints.length = 0;
+  graph.circularDependencies.length = 0;
+  graph.hotNodes.length = 0;
+}
+
 // ─── Path Resolution ─────────────────────────────────────────────
 
 function normalizePath(filePath: string, workspacePath: string): string {
@@ -175,58 +183,76 @@ function resolveImportPath(
 
 // ─── Circular Dependency Detection ───────────────────────────────
 
+/**
+ * Iterative DFS to detect circular dependencies.
+ * Uses an explicit work-stack to avoid stack overflow on deep graphs.
+ */
 function detectCircularDependencies(
   nodes: Map<string, CallGraphNode>,
-): CircularDependency[] {
-  const cycles: CircularDependency[] = [];
+): string[][] {
+  const cycles: string[][] = [];
   const visited = new Set<string>();
-  const inStack = new Set<string>();
-  const stack: string[] = [];
+  const seenCycleKeys = new Set<string>();
 
-  // DFS over all nodes
-  for (const file of nodes.keys()) {
-    if (!visited.has(file)) {
-      dfs(file, nodes, visited, inStack, stack, cycles);
-    }
-  }
+  for (const startFile of nodes.keys()) {
+    if (visited.has(startFile)) continue;
 
-  return cycles;
-}
+    // Each frame: file, iterator over its deps, index in path
+    type Frame = {
+      file: string;
+      depIter: Iterator<string>;
+      pathIndex: number;
+    };
+    const path: string[] = [];
+    const pathSet = new Map<string, number>(); // file → index in path for O(1) lookup
+    const workStack: Frame[] = [];
 
-function dfs(
-  file: string,
-  nodes: Map<string, CallGraphNode>,
-  visited: Set<string>,
-  inStack: Set<string>,
-  stack: string[],
-  cycles: CircularDependency[],
-): void {
-  visited.add(file);
-  inStack.add(file);
-  stack.push(file);
+    const pushFrame = (file: string): void => {
+      const node = nodes.get(file);
+      const deps = node?.imports ?? [];
+      pathSet.set(file, path.length);
+      path.push(file);
+      visited.add(file);
+      workStack.push({
+        file,
+        depIter: deps[Symbol.iterator](),
+        pathIndex: path.length - 1,
+      });
+    };
 
-  const node = nodes.get(file);
-  if (node) {
-    for (const dep of node.imports) {
-      if (!visited.has(dep)) {
-        dfs(dep, nodes, visited, inStack, stack, cycles);
-      } else if (inStack.has(dep)) {
-        // Found a cycle — extract it
-        const cycleStart = stack.indexOf(dep);
-        if (cycleStart !== -1) {
-          const cycle = stack.slice(cycleStart).concat(dep);
-          // Dedupe — only add if we haven't seen this cycle
-          const key = [...cycle].sort().join("|");
-          if (!cycles.some((c) => [...c.cycle].sort().join("|") === key)) {
-            cycles.push({ cycle });
-          }
+    pushFrame(startFile);
+
+    while (workStack.length > 0) {
+      const frame = workStack[workStack.length - 1];
+      const { value: dep, done } = frame.depIter.next();
+
+      if (done) {
+        // Leaving this node — pop from path
+        pathSet.delete(frame.file);
+        path.length = frame.pathIndex; // truncate path
+        workStack.pop();
+        continue;
+      }
+
+      if (pathSet.has(dep)) {
+        // Back-edge → cycle found
+        const cycleStart = pathSet.get(dep)!;
+        const cycle = path.slice(cycleStart).concat(dep);
+        const key = [...cycle].sort().join("|");
+        if (!seenCycleKeys.has(key)) {
+          seenCycleKeys.add(key);
+          cycles.push(cycle);
         }
+        continue;
+      }
+
+      if (!visited.has(dep)) {
+        pushFrame(dep);
       }
     }
   }
 
-  stack.pop();
-  inStack.delete(file);
+  return cycles;
 }
 
 // ─── Hot Node Detection ──────────────────────────────────────────

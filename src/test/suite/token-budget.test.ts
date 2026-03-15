@@ -346,4 +346,19 @@ suite("createAnalysisBudget", () => {
       .reduce((sum, s) => sum + s.budget, 0);
     assert.ok(largeTotal > smallTotal);
   });
+
+  test("weights leave ~1.3% unallocated buffer", () => {
+    const budget = createAnalysisBudget();
+    const summary = budget.getSummary();
+    // effective budget = totalChars * 0.90 (safety margin)
+    // weights should sum to ≈0.987, leaving ~1.3% unallocated
+    const totalAllocated = summary.reduce((sum, s) => sum + s.budget, 0);
+    const effectiveBudget = 32000 * 0.9;
+    const unallocatedRatio = 1 - totalAllocated / effectiveBudget;
+    // Should be between 0.5% and 5% buffer
+    assert.ok(
+      unallocatedRatio > 0.005 && unallocatedRatio < 0.05,
+      `Unallocated ratio ${(unallocatedRatio * 100).toFixed(2)}% should be between 0.5% and 5%`,
+    );
+  });
 });

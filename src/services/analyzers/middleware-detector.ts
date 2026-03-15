@@ -88,9 +88,9 @@ const MIDDLEWARE_NAME_PATTERNS: Record<MiddlewareType, RegExp> = {
 const ERROR_HANDLER_PATTERN =
   /\(\s*(?:err|error)\s*,\s*(?:req|request)\s*,\s*(?:res|response)\s*,\s*(?:next)\s*\)/;
 
-// app.use / router.use patterns
+// app.use / router.use patterns — bounded quantifier to prevent ReDoS
 const MIDDLEWARE_USE_PATTERN =
-  /(?:app|router|server)\s*\.\s*use\s*\(\s*(?:['"`]([^'"`]+)['"`]\s*,\s*)?(.+?)\s*\)/g;
+  /(?:app|router|server)\.use\(\s*(?:['"`]([^'"`]{1,200})['"`]\s*,\s*)?([^(),]{1,80})/g;
 
 // NestJS decorators
 const NESTJS_GUARD_PATTERN = /@UseGuards\s*\(\s*([^)]+)\s*\)/g;
@@ -179,9 +179,8 @@ function detectExpressMiddleware(
   middleware: MiddlewareInfo[],
 ): void {
   const content = snippet.content;
-  const regex = new RegExp(MIDDLEWARE_USE_PATTERN.source, "g");
 
-  for (const match of content.matchAll(regex)) {
+  for (const match of content.matchAll(MIDDLEWARE_USE_PATTERN)) {
     const route = match[1] || undefined;
     const handler = match[2]?.trim();
     if (!handler) continue;

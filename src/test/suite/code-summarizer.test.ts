@@ -213,4 +213,54 @@ suite("Code Summarizer", () => {
       assert.strictEqual(result.summaries[0].summary.length, 200);
     });
   });
+
+  suite("configurable TTL", () => {
+    test("cache expires after custom TTL", async () => {
+      let callCount = 0;
+      const mockLLM: SummarizeFunction = async () => {
+        callCount++;
+        return JSON.stringify([
+          { file: "app.ts", summary: "Summary." },
+        ]);
+      };
+
+      // Use a TTL of 1ms so it expires immediately
+      const summarizer = new CodeSummarizer(mockLLM, 1);
+      const snippet = makeSnippet({});
+
+      await summarizer.summarize([snippet]);
+      assert.strictEqual(callCount, 1);
+
+      // Wait for TTL to expire
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const result = await summarizer.summarize([snippet]);
+      assert.strictEqual(callCount, 2);
+      assert.strictEqual(result.cached, 0);
+      assert.strictEqual(result.generated, 1);
+    });
+  });
+
+  suite("basename collision", () => {
+    test("handles files with same basename in different directories", async () => {
+      const mockLLM: SummarizeFunction = async () =>
+        JSON.stringify([
+          { file: "src/index.ts", summary: "Main entry." },
+          { file: "test/index.ts", summary: "Test entry." },
+        ]);
+
+      const summarizer = new CodeSummarizer(mockLLM);
+      const result = await summarizer.summarize([
+        makeSnippet({ file: "/workspace/src/index.ts", content: "export const main = 1;" }),
+        makeSnippet({ file: "/workspace/test/index.ts", content: "import { main } from '../src';" }),
+      ]);
+
+      assert.strictEqual(result.summaries.length, 2);
+      // Each should map to its correct file
+      const srcSummary = result.summaries.find((s) => s.file.includes("src/"));
+      const testSummary = result.summaries.find((s) => s.file.includes("test/"));
+      assert.ok(srcSummary);
+      assert.ok(testSummary);
+    });
+  });
 });
