@@ -93,6 +93,47 @@ export interface AnalysisMetadata {
 }
 
 /**
+ * Architectural pattern detected in the codebase
+ */
+export interface ArchitecturalPatternData {
+  name: string;
+  confidence: number;
+  indicators: string[];
+}
+
+/**
+ * Architecture report summary for serialization into AnalysisResult/CachedAnalysis.
+ * Subset of the full ArchitectureReport (omits layerMap which is internal-only).
+ */
+export interface ArchitectureReportSummary {
+  patterns: ArchitecturalPatternData[];
+  entryPoints: string[];
+  projectType: string;
+}
+
+/**
+ * Call graph summary for LLM context
+ */
+export interface CallGraphSummary {
+  entryPoints: string[];
+  hotNodes: string[];
+  circularDependencies: string[][];
+  edgeCount: number;
+  nodeCount: number;
+}
+
+/**
+ * Middleware/auth detection summary for LLM context
+ */
+export interface MiddlewareSummary {
+  middleware: { name: string; type: string; file: string }[];
+  authStrategies: string[];
+  authFlows: { strategy: string; indicators: string[]; files: string[] }[];
+  errorHandlerCount: number;
+  errorHandlerFiles: string[];
+}
+
+/**
  * Complete analysis result from the worker
  */
 export interface AnalysisResult {
@@ -105,6 +146,11 @@ export interface AnalysisResult {
   domainRelationships: RelationshipData[];
   codeSnippets: CodeSnippet[];
   summary: AnalysisSummary;
+
+  // Phase 2 fields
+  architectureReport?: ArchitectureReportSummary;
+  callGraphSummary?: CallGraphSummary;
+  middlewareSummary?: MiddlewareSummary;
 }
 
 /**
@@ -126,6 +172,11 @@ export interface CachedAnalysis {
   codeSnippets?: CodeSnippet[];
   gitState?: GitState;
   analysisMetadata?: AnalysisMetadata;
+
+  // Phase 2 fields
+  architectureReport?: ArchitectureReportSummary;
+  callGraphSummary?: CallGraphSummary;
+  middlewareSummary?: MiddlewareSummary;
 }
 
 /**
