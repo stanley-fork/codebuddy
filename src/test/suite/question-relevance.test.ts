@@ -186,6 +186,19 @@ suite("Question Relevance Analyzer", () => {
       assert.strictEqual(score, 5);
     });
 
+    test("caps content scan at MAX_SCORE_SCAN_CHARS to avoid main-thread blocking", () => {
+      // Place keyword at position 9000 (beyond the 8000-char scan cap)
+      const content = "x".repeat(9000) + "secretkeyword";
+      const score = scoreFile("unrelated.ts", ["secretkeyword"], content, undefined);
+      // Keyword is beyond scan window — should NOT be found
+      assert.strictEqual(score, 0, "keyword beyond scan cap should not score");
+
+      // Place keyword within scan window
+      const content2 = "secretkeyword" + "x".repeat(9000);
+      const score2 = scoreFile("unrelated.ts", ["secretkeyword"], content2, undefined);
+      assert.strictEqual(score2, 1, "keyword within scan cap should score");
+    });
+
     test("adds entry point bonus from call graph", () => {
       const callGraph: CallGraphSummary = {
         entryPoints: ["src/index.ts"],
@@ -343,6 +356,22 @@ suite("Question Relevance Analyzer", () => {
       assert.ok(focused.fullCodeFiles.length <= TOP_FULL_CODE_FILES);
     });
 
+    test("summary fallback uses path-derived language for no-snippet files", () => {
+      // database.ts is in files[] but has no snippet
+      const analysis = makeAnalysis();
+      const qa = analyzeQuestion("Where is the database configuration?", analysis);
+      const focused = buildFocusedContext(analysis, qa);
+
+      const dbSummary = focused.summaryFiles.find((f) => f.file.includes("database"));
+      if (dbSummary) {
+        // Should contain the inferred language and file path, not just "source file"
+        assert.ok(
+          dbSummary.summary.includes("typescript") || dbSummary.summary.includes("database"),
+          `summary should include language or path info, got: "${dbSummary.summary}"`,
+        );
+      }
+    });
+
     test("backfills full-code tier when top-scoring files lack snippets", () => {
       // Files in file list only (no snippet) should fall to summary,
       // while lower-scoring files WITH snippets fill the full-code tier
@@ -442,6 +471,25 @@ suite("Question Relevance Analyzer", () => {
 
       assert.notStrictEqual(qa1, qa2);
       assert.notDeepStrictEqual(qa1.keywords, qa2.keywords);
+    });
+
+    test("returns cached result for case-variant question (normalization)", () => {
+      const cache = new QuestionAnalysisCache();
+      const analysis = makeAnalysis();
+      const qa1 = analyzeQuestionCached("How does auth work?", analysis, 1000, cache);
+      const qa2 = analyzeQuestionCached("how does auth work?", analysis, 2000, cache);
+
+      // Normalization makes these the same cache key
+      assert.strictEqual(qa1, qa2, "case-variant questions should hit cache");
+    });
+
+    test("returns cached result for whitespace-variant question (normalization)", () => {
+      const cache = new QuestionAnalysisCache();
+      const analysis = makeAnalysis();
+      const qa1 = analyzeQuestionCached("How does auth work?", analysis, 1000, cache);
+      const qa2 = analyzeQuestionCached("  How  does  auth  work?  ", analysis, 2000, cache);
+
+      assert.strictEqual(qa1, qa2, "whitespace-variant questions should hit cache");
     });
 
     test("returns fresh result when analysis changes (different workspace)", () => {
@@ -554,6 +602,16 @@ suite("Question Relevance Analyzer", () => {
 
       assert.strictEqual(qa1, qa2, "should return cached result from injected cache");
       assert.strictEqual(cache.size, 1);
+    });
+
+    test("clearQuestionCache clears an injected cache instance", () => {
+      const cache = new QuestionAnalysisCache();
+      const analysis = makeAnalysis();
+      analyzeQuestionCached("test query", analysis, 1000, cache);
+      assert.strictEqual(cache.size, 1);
+
+      clearQuestionCache(cache);
+      assert.strictEqual(cache.size, 0, "injected cache should be cleared");
     });
   });
 });

@@ -30,6 +30,12 @@ export interface BudgetAllocation {
   used: number;
 }
 
+/** Fallback char limit when focusedContext budget key is absent */
+export const FOCUSED_CONTEXT_FALLBACK_CHARS = 4_000;
+
+/** Standard boost multiplier applied to domain-signal sections */
+export const DOMAIN_BOOST_MULTIPLIER = 1.5;
+
 /**
  * Allocates and manages a token budget for context generation
  */
@@ -218,7 +224,7 @@ export class TokenBudgetAllocator {
    * Each donor category retains at least MIN_ALLOCATION_CHARS.
    */
   private static readonly MIN_ALLOCATION_CHARS = 200;
-  private static readonly MAX_BOOST_MULTIPLIER = 2.0;
+  static readonly MAX_BOOST_MULTIPLIER = 2.0;
 
   boost(name: string, multiplier: number): void {
     const allocation = this.allocations.get(name);
@@ -281,8 +287,9 @@ export function createAnalysisBudget(
   const focusedWeight = withFocusedContext ? 0.2 : 0;
 
   // Phase 2 splits architecture allocation into architecture + callGraph + middleware
-  // Code snippets reduced from 0.468 to 0.40 (or 0.20+0.20 with focused context)
-  // because code tokenizes at ~2 chars/token vs 3.5 for prose
+  // Base weights sum: 0.025+0.019+0.013+0.05+0.022+0.022+0.4+0.125+0.125+0.062+0.062+0.062 = 0.987
+  // With focusedContext: codeSnippets→0.2 + focusedContext→0.2 → sum stays 0.987
+  // Remaining ~1.3% is unallocated safety buffer absorbed by allocate() clamping
   const weights: [string, number, number][] = [
     ["overview", 0.025, 10],
     ["frameworks", 0.019, 9],

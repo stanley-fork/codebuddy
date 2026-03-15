@@ -3,6 +3,8 @@ import {
   TokenBudgetAllocator,
   CHARS_PER_TOKEN,
   createAnalysisBudget,
+  FOCUSED_CONTEXT_FALLBACK_CHARS,
+  DOMAIN_BOOST_MULTIPLIER,
 } from "../../services/analyzers/token-budget";
 
 suite("TokenBudgetAllocator", () => {
@@ -455,5 +457,30 @@ suite("TokenBudgetAllocator.hasAllocation", () => {
 
     assert.strictEqual(budget.hasAllocation("overview"), true);
     assert.strictEqual(budget.hasAllocation("nonexistent"), false);
+  });
+});
+
+suite("Budget constants", () => {
+  test("FOCUSED_CONTEXT_FALLBACK_CHARS is a positive number", () => {
+    assert.ok(FOCUSED_CONTEXT_FALLBACK_CHARS > 0);
+    assert.strictEqual(typeof FOCUSED_CONTEXT_FALLBACK_CHARS, "number");
+  });
+
+  test("DOMAIN_BOOST_MULTIPLIER does not exceed MAX_BOOST_MULTIPLIER", () => {
+    assert.ok(
+      DOMAIN_BOOST_MULTIPLIER <= TokenBudgetAllocator.MAX_BOOST_MULTIPLIER,
+      `DOMAIN_BOOST_MULTIPLIER (${DOMAIN_BOOST_MULTIPLIER}) exceeds MAX_BOOST_MULTIPLIER (${TokenBudgetAllocator.MAX_BOOST_MULTIPLIER})`,
+    );
+  });
+
+  test("createAnalysisBudget weight sum stays within expected bounds", () => {
+    const budget = createAnalysisBudget(32000);
+    const summary = budget.getSummary();
+    const allocated = summary.reduce((sum, s) => sum + s.budget, 0);
+    // getTotalRemaining() = totalBudget - sum(used); since used=0, it equals totalBudget
+    const totalBudget = budget.getTotalRemaining();
+    const ratio = allocated / totalBudget;
+    // Weight sum is ~0.987 → ratio should be close to that
+    assert.ok(ratio > 0.95 && ratio < 1.0, `allocation ratio ${ratio.toFixed(3)} should be 0.95-1.0`);
   });
 });

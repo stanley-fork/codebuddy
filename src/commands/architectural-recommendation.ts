@@ -17,6 +17,8 @@ import {
   TokenBudgetAllocator,
   createAnalysisBudget,
   RelevanceScoring,
+  FOCUSED_CONTEXT_FALLBACK_CHARS,
+  DOMAIN_BOOST_MULTIPLIER,
 } from "../services/analyzers/token-budget";
 import type {
   CodeSnippet,
@@ -1058,7 +1060,7 @@ function generateFocusedContextSection(
     logger.warn(
       "generateFocusedContextSection: no focusedContext budget allocation; applying fallback truncation",
     );
-    return content.slice(0, 4000);
+    return content.slice(0, FOCUSED_CONTEXT_FALLBACK_CHARS);
   }
   return budget.truncateToFit("focusedContext", content);
 }
@@ -1100,11 +1102,10 @@ function createContextFromAnalysis(
       }
 
       // Apply domain-signal boosts to relevant budget sections
-      const BOOST_MULTIPLIER = 1.5;
       for (const section of focused.boostedSections) {
         const budgetKey = FOCUSED_SECTION_BUDGET_KEY[section];
         if (budgetKey) {
-          budget.boost(budgetKey, BOOST_MULTIPLIER);
+          budget.boost(budgetKey, DOMAIN_BOOST_MULTIPLIER);
         }
       }
 
