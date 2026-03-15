@@ -247,7 +247,7 @@ export function extractKeywords(question: string): string[] {
   // Capture path-like tokens: must start with a letter, contain / or .,
   // and the segment after the separator must also start with a letter.
   // Cap matches at 120 chars to prevent greedy suffix consumption.
-  const pathLike = /[a-zA-Z][a-zA-Z0-9_\-]*[./][a-zA-Z][a-zA-Z0-9_./-]*/g;
+  const pathLike = /[a-zA-Z][a-zA-Z0-9_-]*[./][a-zA-Z][a-zA-Z0-9_./-]*/g;
   const pathTokens = (q.match(pathLike) ?? []).map((t) =>
     (t.length > 120 ? t.slice(0, 120) : t).toLowerCase(),
   );
