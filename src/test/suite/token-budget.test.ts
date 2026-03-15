@@ -361,4 +361,69 @@ suite("createAnalysisBudget", () => {
       `Unallocated ratio ${(unallocatedRatio * 100).toFixed(2)}% should be between 0.5% and 2.5%`,
     );
   });
+
+  test("withFocusedContext adds focusedContext key and splits codeSnippets", () => {
+    const budget = createAnalysisBudget(32000, true);
+    const summary = budget.getSummary();
+    const focused = summary.find((s) => s.name === "focusedContext");
+    const snippets = summary.find((s) => s.name === "codeSnippets");
+    assert.ok(focused, "should have focusedContext allocation");
+    assert.ok(snippets, "should have codeSnippets allocation");
+    // Both should be roughly equal (0.20 each of effective)
+    assert.ok(
+      Math.abs(focused!.budget - snippets!.budget) < 100,
+      "focusedContext and codeSnippets should be roughly equal",
+    );
+    assert.strictEqual(summary.length, 13, "should have 13 categories with focused context");
+  });
+
+  test("withFocusedContext=false has no focusedContext key", () => {
+    const budget = createAnalysisBudget(32000, false);
+    const summary = budget.getSummary();
+    const focused = summary.find((s) => s.name === "focusedContext");
+    assert.strictEqual(focused, undefined);
+    assert.strictEqual(summary.length, 12);
+  });
+});
+
+suite("TokenBudgetAllocator.boost", () => {
+  test("increases target budget and shrinks others proportionally", () => {
+    const budget = new TokenBudgetAllocator(10000);
+    budget.allocate("a", 2000, 5);
+    budget.allocate("b", 2000, 5);
+    budget.allocate("c", 2000, 5);
+
+    budget.boost("a", 1.5);
+
+    const summary = budget.getSummary();
+    const a = summary.find((s) => s.name === "a")!;
+    const b = summary.find((s) => s.name === "b")!;
+    const c = summary.find((s) => s.name === "c")!;
+
+    assert.strictEqual(a.budget, 3000); // 2000 + floor(2000 * 0.5)
+    assert.strictEqual(b.budget, 1500); // 2000 - floor(1000 / 2)
+    assert.strictEqual(c.budget, 1500);
+  });
+
+  test("does nothing for multiplier <= 1", () => {
+    const budget = new TokenBudgetAllocator(10000);
+    budget.allocate("a", 2000, 5);
+    budget.allocate("b", 2000, 5);
+
+    budget.boost("a", 1.0);
+    budget.boost("a", 0.5);
+
+    const a = budget.getSummary().find((s) => s.name === "a")!;
+    assert.strictEqual(a.budget, 2000);
+  });
+
+  test("does nothing for unknown key", () => {
+    const budget = new TokenBudgetAllocator(10000);
+    budget.allocate("a", 2000, 5);
+
+    budget.boost("nonexistent", 2.0);
+
+    const a = budget.getSummary().find((s) => s.name === "a")!;
+    assert.strictEqual(a.budget, 2000);
+  });
 });

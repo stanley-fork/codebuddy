@@ -92,13 +92,24 @@ function makeAnalysis(overrides: Partial<CachedAnalysis> = {}): CachedAnalysis {
   };
 }
 
+function makeCallGraph(overrides: Partial<CallGraphSummary> = {}): CallGraphSummary {
+  return {
+    entryPoints: ["src/index.ts"],
+    hotNodes: ["src/utils/logger.ts", "src/services/shared.service.ts"],
+    circularDependencies: [],
+    edgeCount: 12,
+    nodeCount: 10,
+    ...overrides,
+  };
+}
+
 suite("Question Relevance Analyzer", () => {
   setup(() => {
     clearQuestionCache();
   });
 
   suite("extractKeywords", () => {
-    test("removes stop words and short tokens", () => {
+    test("removes stop words and short single-char tokens", () => {
       const keywords = extractKeywords("How is the authentication handled in this project?");
       assert.ok(!keywords.includes("how"));
       assert.ok(!keywords.includes("is"));
@@ -107,6 +118,21 @@ suite("Question Relevance Analyzer", () => {
       assert.ok(keywords.includes("authentication"));
       assert.ok(keywords.includes("handled"));
       assert.ok(keywords.includes("project"));
+    });
+
+    test("decomposes camelCase identifiers", () => {
+      const keywords = extractKeywords("How does getUserById work?");
+      assert.ok(keywords.includes("get"), "should decompose camelCase: get");
+      assert.ok(keywords.includes("user"), "should decompose camelCase: user");
+      assert.ok(keywords.includes("id"), "should decompose camelCase: id");
+      // "by" is a stop word, so it's filtered out — this is expected
+      assert.ok(!keywords.includes("by"), "'by' is a stop word and should be removed");
+    });
+
+    test("preserves two-letter acronyms", () => {
+      const keywords = extractKeywords("Where is the db config and UI?");
+      assert.ok(keywords.includes("db"), "should keep 2-letter token 'db'");
+      assert.ok(keywords.includes("ui"), "should keep 2-letter token 'ui'");
     });
 
     test("deduplicates tokens", () => {
@@ -246,7 +272,7 @@ suite("Question Relevance Analyzer", () => {
       // JWT file should be in full-code tier
       const jwtFile = focused.fullCodeFiles.find((f) => f.file.includes("jwt"));
       assert.ok(jwtFile, "JWT file should be in full-code tier");
-      assert.ok(jwtFile!.content.includes("jsonwebtoken"));
+      assert.ok(jwtFile.content.includes("jsonwebtoken"));
     });
 
     test("returns summary-tier files after full-code tier", () => {
@@ -296,6 +322,42 @@ suite("Question Relevance Analyzer", () => {
       // May have zero or minimal matches
       assert.ok(focused.fullCodeFiles.length <= TOP_FULL_CODE_FILES);
     });
+
+    test("backfills full-code tier when top-scoring files lack snippets", () => {
+      // Files in file list only (no snippet) should fall to summary,
+      // while lower-scoring files WITH snippets fill the full-code tier
+      const analysis = makeAnalysis({
+        files: [
+          "/workspace/src/no-snippet-1.ts",
+          "/workspace/src/no-snippet-2.ts",
+          ...makeAnalysis().files,
+        ],
+      });
+      const qa = analyzeQuestion("How does the user service work?", analysis);
+      const focused = buildFocusedContext(analysis, qa);
+
+      // Full-code tier should be filled from files that HAVE snippets
+      for (const f of focused.fullCodeFiles) {
+        assert.ok(f.content.length > 0, `full-code file ${f.file} should have content`);
+      }
+    });
+
+    test("relatedDependencies excludes already-ranked files", () => {
+      const cg = makeCallGraph({
+        hotNodes: ["src/auth/jwt.service.ts", "src/services/shared.service.ts"],
+      });
+      const analysis = makeAnalysis({ callGraphSummary: cg });
+      const qa = analyzeQuestion("How does JWT work?", analysis);
+      const focused = buildFocusedContext(analysis, qa);
+
+      // jwt.service.ts is a top-ranked file, so it should NOT be in relatedDependencies
+      const hasJwt = focused.relatedDependencies.some((d) => d.includes("jwt"));
+      assert.ok(!hasJwt, "already-ranked file should not appear in relatedDependencies");
+
+      // shared.service.ts is NOT ranked but IS a hot node → should appear
+      const hasShared = focused.relatedDependencies.some((d) => d.includes("shared"));
+      assert.ok(hasShared, "non-ranked hot node should appear in relatedDependencies");
+    });
   });
 
   suite("analyzeQuestionCached", () => {
@@ -325,6 +387,43 @@ suite("Question Relevance Analyzer", () => {
 
       assert.notStrictEqual(qa1, qa2);
       assert.notDeepStrictEqual(qa1.keywords, qa2.keywords);
+    });
+
+    test("returns fresh result when analysis changes (different workspace)", () => {
+      const analysis1 = makeAnalysis();
+      const analysis2 = makeAnalysis({
+        files: ["/other/workspace/file.ts"],
+        summary: { totalFiles: 1, totalLines: 50, languageDistribution: { typescript: 1 }, complexity: "low" },
+      });
+
+      const qa1 = analyzeQuestionCached("How does auth work?", analysis1, 1000);
+      const qa2 = analyzeQuestionCached("How does auth work?", analysis2, 1000);
+
+      // Same question, different analysis → different results
+      assert.notStrictEqual(qa1, qa2);
+    });
+  });
+
+  suite("scoreEndpoint edge cases", () => {
+    test("returns 0 for endpoint with undefined path", () => {
+      const ep = { method: "GET", path: undefined as unknown as string };
+      const score = scoreEndpoint(ep, ["test"]);
+      assert.strictEqual(score, 0);
+    });
+  });
+
+  suite("scoreFile Windows paths", () => {
+    test("normalizes backslashes in callGraph entries", () => {
+      const callGraph: CallGraphSummary = {
+        entryPoints: ["src\\index.ts"],
+        hotNodes: ["src\\utils\\logger.ts"],
+        circularDependencies: [],
+        edgeCount: 5,
+        nodeCount: 10,
+      };
+      // Forward-slash file path should still match backslash call graph entries
+      const score = scoreFile("/workspace/src/index.ts", [], undefined, callGraph);
+      assert.strictEqual(score, 2, "entry point with backslashes should match");
     });
   });
 });
