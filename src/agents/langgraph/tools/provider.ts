@@ -47,6 +47,7 @@ import {
   DebugGetStateTool,
   DebugGetVariablesTool,
 } from "./debugger";
+import { LangChainArchitectureTool } from "./architecture";
 
 const logger = Logger.initialize("ToolProvider", {
   minLevel: LogLevel.DEBUG,
@@ -203,6 +204,12 @@ class DebugControlToolFactory implements IToolFactory {
   }
 }
 
+class ArchitectureToolFactory implements IToolFactory {
+  createTool(): StructuredTool<any> {
+    return new LangChainArchitectureTool();
+  }
+}
+
 class MCPToolFactory implements IToolFactory {
   constructor(
     private readonly mcpService: MCPService,
@@ -356,6 +363,19 @@ const TOOL_ROLE_MAPPING: Record<string, string[]> = {
     "ripgrep_search",
     "get_diagnostics",
   ],
+  "architecture-expert": [
+    "get_architecture_knowledge",
+    "search",
+    "read",
+    "structure",
+    "analyze",
+    "think",
+    "ripgrep_search",
+    "search_symbols",
+    "list_files",
+    "search_vector_db",
+    "manage_core_memory",
+  ],
 };
 
 export class ToolProvider {
@@ -394,6 +414,7 @@ export class ToolProvider {
       new DebugGetVariablesToolFactory(),
       new DebugEvaluateToolFactory(),
       new DebugControlToolFactory(),
+      new ArchitectureToolFactory(),
     ];
 
     // Deduplicate tools during initialization
