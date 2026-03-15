@@ -57,6 +57,8 @@ const ENTRY_POINT_PATTERNS = [
   // Level 1: one prefix segment (myapp/src/index.ts, service/src/main.ts)
   /^[^\/]+[\/](?:src[\/])?(?:index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs|java|php)$/i,
   // Level 2: two prefix segments — covers monorepo layouts (packages/api/src/index.ts)
+  // Intentionally broad: matches any two path segments, not just packages/ or apps/.
+  // Deeper paths (3+ segments before src/) are excluded to avoid vendor/build artifacts.
   /^[^\/]+[\/][^\/]+[\/](?:src[\/])?(?:index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs|java|php)$/i,
   // Bootstrap/startup variants (levels 0-2)
   /^(?:[^\/]+[\/]){0,2}(?:src[\/])?(?:bootstrap|startup|entry)\.(ts|js|py|go)$/i,
@@ -97,7 +99,7 @@ const PROJECT_TYPE_INDICATORS: Record<
     frameworks: ["commander", "yargs", "clap", "cobra"],
   },
   "Library / SDK": {
-    files: [/(?:^|[\\/])(?:src[\\/])?index\.(ts|js)$/i],
+    files: [/(?:^|[\\/])(?:src[\\/])?index\.(?:ts|js)$/i],
     frameworks: [],
   },
   Microservices: {
@@ -342,9 +344,15 @@ function detectProjectType(files: string[], frameworks: string[]): string {
       if (frameworkSet.has(fw.toLowerCase())) score += 2;
     }
 
-    // Library / SDK: only claim it when no web-framework dependency exists
-    if (projectType === "Library / SDK" && hasWebFramework) {
-      score = 0;
+    // Library / SDK: only claim it when no web-framework and no app-like structure
+    if (projectType === "Library / SDK") {
+      if (hasWebFramework) {
+        score = 0;
+      } else if (
+        files.some((f) => /(?:routes?|controllers?|pages?)[\\/]/i.test(f))
+      ) {
+        score = 0;
+      }
     }
 
     if (score > 0) scores[projectType] = score;

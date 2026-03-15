@@ -163,9 +163,9 @@ function resolveImportPath(
   const base = path.posix.join(dir, importSource);
   const normalized = path.posix.normalize(base);
 
-  // Paths escaping workspace root normalize to ../... which won't be in knownFiles
-  if (normalized.startsWith("../") || normalized.startsWith("..\\")) {
-    return null;
+  // path.posix.normalize always uses forward slashes; only "../" check needed
+  if (normalized.startsWith("../")) {
+    return null; // import escapes workspace root
   }
 
   // Try exact match first
@@ -221,6 +221,13 @@ function canonicalizeCycle(cycle: string[]): string {
 /**
  * Iterative DFS to detect circular dependencies.
  * Uses an explicit work-stack to avoid stack overflow on deep graphs.
+ *
+ * Two-set coloring scheme (equivalent to white/gray/black):
+ *  - `visited` = gray ∪ black (entered but may not be fully explored)
+ *  - `cyclePathSet` = gray only (currently on the DFS path)
+ * A node in `visited` but NOT in `cyclePathSet` is fully explored (black):
+ * all its descendants have been processed and any cycles through it were
+ * already detected. Skipping it from another DFS start is safe.
  */
 function detectCircularDependencies(
   nodes: Map<string, CallGraphNode>,

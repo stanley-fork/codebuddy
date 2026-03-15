@@ -1,6 +1,7 @@
 import * as assert from "assert";
 import {
   CodeSummarizer,
+  InMemorySummaryCache,
   type SummarizeFunction,
   type FileSummary,
 } from "../../services/analyzers/code-summarizer";
@@ -228,15 +229,21 @@ suite("Code Summarizer", () => {
         ]);
       };
 
-      // Use a TTL of 1ms so it expires immediately
-      const summarizer = new CodeSummarizer(mockLLM, 1);
+      // Use injectable clock for deterministic TTL testing
+      let fakeNow = 1000;
+      const summarizer = new CodeSummarizer(
+        mockLLM,
+        100, // 100ms TTL
+        new InMemorySummaryCache(),
+        () => fakeNow,
+      );
       const snippet = makeSnippet({});
 
       await summarizer.summarize([snippet]);
       assert.strictEqual(callCount, 1);
 
-      // Wait for TTL to expire
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      // Advance clock past TTL
+      fakeNow = 1200;
 
       const result = await summarizer.summarize([snippet]);
       assert.strictEqual(callCount, 2);
