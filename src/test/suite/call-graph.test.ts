@@ -72,6 +72,21 @@ suite("Call Graph Builder", () => {
       assert.strictEqual(graph.edges.length, 0);
     });
 
+    test("ignores imports that escape the workspace root", () => {
+      const graph = buildCallGraph(
+        [
+          makeImportData({
+            file: `${WS}/src/a.ts`,
+            imports: [
+              { source: "../../../outside", specifiers: ["x"], isDefault: false },
+            ],
+          }),
+        ],
+        WS,
+      );
+      assert.strictEqual(graph.edges.length, 0);
+    });
+
     test("resolves imports with index files", () => {
       const graph = buildCallGraph(
         [
@@ -163,6 +178,32 @@ suite("Call Graph Builder", () => {
         WS,
       );
       assert.strictEqual(graph.circularDependencies.length, 0);
+    });
+
+    test("deduplicates rotated 3-node cycles", () => {
+      // A→B→C→A — should report exactly 1 cycle regardless of traversal start
+      const graph = buildCallGraph(
+        [
+          makeImportData({
+            file: `${WS}/src/a.ts`,
+            imports: [{ source: "./b", specifiers: ["x"], isDefault: false }],
+          }),
+          makeImportData({
+            file: `${WS}/src/b.ts`,
+            imports: [{ source: "./c", specifiers: ["x"], isDefault: false }],
+          }),
+          makeImportData({
+            file: `${WS}/src/c.ts`,
+            imports: [{ source: "./a", specifiers: ["x"], isDefault: false }],
+          }),
+        ],
+        WS,
+      );
+      assert.strictEqual(
+        graph.circularDependencies.length,
+        1,
+        "Rotated 3-node cycle should be reported exactly once",
+      );
     });
   });
 

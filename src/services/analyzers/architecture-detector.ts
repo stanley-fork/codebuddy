@@ -52,9 +52,14 @@ const LAYER_PATTERNS: Record<string, RegExp> = {
 };
 
 const ENTRY_POINT_PATTERNS = [
-  // Matches: index.ts, src/index.ts, myapp/src/index.ts — but NOT a/b/c/src/index.ts
-  /^(?:[^\/]+[\/])?(?:src[\/])?(?:index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs|java|php)$/i,
-  /^(?:[^\/]+[\/])?(?:src[\/])?(?:bootstrap|startup|entry)\.(ts|js|py|go)$/i,
+  // Level 0: root entry (index.ts, src/index.ts)
+  /^(?:src[\/])?(?:index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs|java|php)$/i,
+  // Level 1: one prefix segment (myapp/src/index.ts, service/src/main.ts)
+  /^[^\/]+[\/](?:src[\/])?(?:index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs|java|php)$/i,
+  // Level 2: two prefix segments — covers monorepo layouts (packages/api/src/index.ts)
+  /^[^\/]+[\/][^\/]+[\/](?:src[\/])?(?:index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs|java|php)$/i,
+  // Bootstrap/startup variants (levels 0-2)
+  /^(?:[^\/]+[\/]){0,2}(?:src[\/])?(?:bootstrap|startup|entry)\.(ts|js|py|go)$/i,
   // Django manage.py — always at root
   /^manage\.py$/i,
   // Go cmd pattern: cmd/<name>/main.go — exactly 3 segments
@@ -315,9 +320,14 @@ function detectProjectType(files: string[], frameworks: string[]): string {
   const frameworkSet = new Set(frameworks.map((f) => f.toLowerCase()));
   const WEB_FRAMEWORK_PATTERN =
     /^(?:express|fastify|react|react-dom|vue|svelte|@angular\/core|next|nuxt|remix|sveltekit|flask|fastapi|django|gin|actix|spring|koa|hono)$/i;
-  const hasWebFramework = [...frameworkSet].some((f) =>
-    WEB_FRAMEWORK_PATTERN.test(f),
-  );
+  // Iterate Set directly instead of spreading to an array
+  let hasWebFramework = false;
+  for (const f of frameworkSet) {
+    if (WEB_FRAMEWORK_PATTERN.test(f)) {
+      hasWebFramework = true;
+      break;
+    }
+  }
 
   for (const [projectType, indicators] of Object.entries(
     PROJECT_TYPE_INDICATORS,

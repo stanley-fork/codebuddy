@@ -11,6 +11,7 @@ import { WorkerLogger } from "../infrastructure/logger/worker-logger";
 import { detectArchitecture } from "../services/analyzers/architecture-detector";
 import {
   buildCallGraph,
+  disposeCallGraph,
   type FileImportData,
 } from "../services/analyzers/call-graph";
 import { detectMiddleware } from "../services/analyzers/middleware-detector";
@@ -221,16 +222,21 @@ class CodebaseAnalysisTask {
             analysisResults.fileImports,
             data.workspacePath,
           );
-          partialResult.callGraphSummary = {
-            entryPoints: callGraph.entryPoints.slice(0, 20),
-            hotNodes: callGraph.hotNodes,
-            circularDependencies: callGraph.circularDependencies.slice(0, 10),
-            edgeCount: callGraph.edges.length,
-            nodeCount: callGraph.nodes.size,
-          };
-          this.logger.info(
-            `Call graph: ${callGraph.nodes.size} nodes, ${callGraph.edges.length} edges, ${callGraph.circularDependencies.length} cycles`,
-          );
+          try {
+            partialResult.callGraphSummary = {
+              entryPoints: callGraph.entryPoints.slice(0, 20),
+              hotNodes: callGraph.hotNodes,
+              circularDependencies: callGraph.circularDependencies.slice(0, 10),
+              edgeCount: callGraph.edges.length,
+              nodeCount: callGraph.nodes.size,
+            };
+            this.logger.info(
+              `Call graph: ${callGraph.nodes.size} nodes, ${callGraph.edges.length} edges, ${callGraph.circularDependencies.length} cycles`,
+            );
+          } finally {
+            // Explicitly release node arrays and Map to reduce GC pressure in worker
+            disposeCallGraph(callGraph);
+          }
         }
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -244,17 +250,25 @@ class CodebaseAnalysisTask {
           analysisResults.codeSnippets,
           analysisResults.dataModels,
         );
+
+        // Relativize file paths at serialization boundary to avoid
+        // leaking absolute filesystem paths into LLM context
+        const relativize = (fp: string): string =>
+          fp.startsWith(data.workspacePath)
+            ? fp.slice(data.workspacePath.length).replace(/^[\\/]/, "")
+            : path.basename(fp);
+
         partialResult.middlewareSummary = {
           middleware: mwReport.middleware.slice(0, 30).map((m) => ({
             name: m.name,
             type: m.type,
-            file: m.file,
+            file: relativize(m.file),
           })),
           authStrategies: mwReport.authFlows.map((f) => f.strategy),
           authFlows: mwReport.authFlows.map((f) => ({
             strategy: f.strategy,
             indicators: f.indicators,
-            files: f.files,
+            files: f.files.map(relativize),
           })),
           errorHandlerCount: mwReport.errorHandlers.length,
         };

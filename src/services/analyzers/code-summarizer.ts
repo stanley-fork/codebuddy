@@ -99,20 +99,20 @@ export class CodeSummarizer {
     // Batch LLM calls
     for (let i = 0; i < needsSummarization.length; i += MAX_BATCH_SIZE) {
       const batch = needsSummarization.slice(i, i + MAX_BATCH_SIZE);
-      const { summaries: batchSummaries, usedFallback } =
+      const { summaries: batchSummaries, fallbackFiles } =
         await this.summarizeBatch(batch);
 
       for (const summary of batchSummaries) {
         result.summaries.push(summary);
         this.putInCache(summary);
-        if (usedFallback) {
+        if (fallbackFiles.has(summary.file)) {
           result.fallback++;
         } else {
           result.generated++;
         }
       }
 
-      // Count files that didn't get a summary at all (partial JSON parse failures)
+      // Count files that didn't get a summary at all
       const batchFiles = new Set(batch.map((s) => s.file));
       const summarizedFiles = new Set(batchSummaries.map((s) => s.file));
       for (const file of batchFiles) {
@@ -127,20 +127,36 @@ export class CodeSummarizer {
 
   /**
    * Summarize a batch of files in a single LLM call.
+   * Returns per-file fallback tracking so the caller can distinguish
+   * LLM-generated summaries from heuristic fallbacks.
    */
   private async summarizeBatch(
     snippets: CodeSnippet[],
-  ): Promise<{ summaries: FileSummary[]; usedFallback: boolean }> {
+  ): Promise<{ summaries: FileSummary[]; fallbackFiles: Set<string> }> {
     const prompt = this.buildBatchPrompt(snippets);
 
     try {
       const response = await this.summarizeFn(prompt);
-      return {
-        summaries: this.parseBatchResponse(response, snippets),
-        usedFallback: false,
-      };
+      const parsed = this.parseBatchResponse(response, snippets);
+
+      // Any snippet that didn't parse cleanly gets a fallback
+      const parsedFiles = new Set(parsed.map((s) => s.file));
+      const fallbackFiles = new Set<string>();
+      const fallbackSummaries = snippets
+        .filter((s) => !parsedFiles.has(s.file))
+        .map((s) => {
+          fallbackFiles.add(s.file);
+          return {
+            file: s.file,
+            summary: generateFallbackSummary(s),
+            contentHash: hashContent(s.content),
+            language: s.language,
+          };
+        });
+      return { summaries: [...parsed, ...fallbackSummaries], fallbackFiles };
     } catch {
-      // Fallback: generate simple heuristic summaries
+      // Full batch fallback: generate simple heuristic summaries
+      const fallbackFiles = new Set(snippets.map((s) => s.file));
       return {
         summaries: snippets.map((s) => ({
           file: s.file,
@@ -148,7 +164,7 @@ export class CodeSummarizer {
           contentHash: hashContent(s.content),
           language: s.language,
         })),
-        usedFallback: true,
+        fallbackFiles,
       };
     }
   }
@@ -282,13 +298,13 @@ function generateFallbackSummary(snippet: CodeSnippet): string {
   const basename = snippet.file.split(/[\\/]/).pop() ?? snippet.file;
   const parts: string[] = [];
 
-  // Check for exports
+  // Check for exports (supports Unicode identifiers via \p{L})
   const exportMatches = content.match(
-    /export\s+(?:default\s+)?(?:class|function|const|interface)\s+(\w+)/g,
+    /export\s+(?:default\s+)?(?:class|function|const|interface)\s+([\p{L}\p{N}_]+)/gu,
   );
   if (exportMatches && exportMatches.length > 0) {
     const names = exportMatches
-      .map((m) => m.match(/(\w+)$/)?.[1])
+      .map((m) => m.match(/([\p{L}\p{N}_]+)$/u)?.[1])
       .filter(Boolean)
       .slice(0, 3);
     parts.push(`Exports: ${names.join(", ")}`);
@@ -312,18 +328,18 @@ function generateFallbackSummary(snippet: CodeSnippet): string {
 
 /**
  * Parse a single file summary from unstructured LLM response using plain string search.
- * Avoids dynamic RegExp construction to eliminate ReDoS risk.
+ * Uses indexOf for case-insensitive search — no RegExp construction, no ReDoS risk.
  */
 function parseFallbackLine(response: string, basename: string): string | null {
   if (!basename || basename.length > 255) return null;
 
-  // Case-insensitive search using regex on the original string.
-  // basename is our own filename (not LLM output), so regex is safe after escaping.
-  const escaped = basename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const idx = response.search(new RegExp(escaped, "i"));
+  // Normalize to lowercase for case-insensitive comparison
+  const needle = basename.toLowerCase();
+  const haystack = response.toLowerCase();
+  const idx = haystack.indexOf(needle);
   if (idx === -1) return null;
 
-  // Find the delimiter after the filename
+  // Find the delimiter after the filename in the ORIGINAL string
   const after = response.slice(idx + basename.length).trimStart();
   const delimMatch = after.match(/^[:—\-]\s*(.+)/);
   return delimMatch ? delimMatch[1].trim().slice(0, 200) : null;

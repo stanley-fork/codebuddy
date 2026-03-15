@@ -1039,28 +1039,36 @@ function createContextFromAnalysis(
   }
 
   // === SECTION 9: Architecture Patterns (Phase 2) ===
-  const archSection = generateArchitectureSection(analysis, budget);
-  if (archSection) {
-    sections.push(archSection);
-    sections.push("");
+  if (!budget.isExhausted()) {
+    const archSection = generateArchitectureSection(analysis, budget);
+    if (archSection) {
+      sections.push(archSection);
+      sections.push("");
+    }
   }
 
   // === SECTION 10: Import Graph (Phase 2) ===
-  const callGraphSection = generateCallGraphSection(analysis, budget);
-  if (callGraphSection) {
-    sections.push(callGraphSection);
-    sections.push("");
+  if (!budget.isExhausted()) {
+    const callGraphSection = generateCallGraphSection(analysis, budget);
+    if (callGraphSection) {
+      sections.push(callGraphSection);
+      sections.push("");
+    }
   }
 
   // === SECTION 11: Middleware & Auth (Phase 2) ===
-  const middlewareSection = generateMiddlewareSection(analysis, budget);
-  if (middlewareSection) {
-    sections.push(middlewareSection);
-    sections.push("");
+  if (!budget.isExhausted()) {
+    const middlewareSection = generateMiddlewareSection(analysis, budget);
+    if (middlewareSection) {
+      sections.push(middlewareSection);
+      sections.push("");
+    }
   }
 
   // === SECTION 12: File Structure (using budget) ===
-  sections.push(generateFileStructureSection(analysis, budget));
+  if (!budget.isExhausted()) {
+    sections.push(generateFileStructureSection(analysis, budget));
+  }
 
   // Log budget summary
   const budgetSummary = budget.getSummary();

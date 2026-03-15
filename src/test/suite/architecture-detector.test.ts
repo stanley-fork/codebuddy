@@ -175,12 +175,26 @@ suite("Architecture Detector", () => {
       const result = detectArchitecture(
         makeAnalysis({
           files: [
-            "vendor/somelib/src/index.ts",
-            "a/b/c/src/main.js",
+            "vendor/somelib/deep/src/index.ts",
+            "a/b/c/d/src/main.js",
           ],
         }),
       );
       assert.strictEqual(result.entryPoints.length, 0);
+    });
+
+    test("detects monorepo sub-package entry points", () => {
+      const result = detectArchitecture(
+        makeAnalysis({
+          files: [
+            "packages/api/src/index.ts",
+            "apps/web/src/main.tsx",
+          ],
+        }),
+      );
+      assert.ok(result.entryPoints.length >= 2);
+      assert.ok(result.entryPoints.some((e) => e.includes("packages/api/src/index.ts")));
+      assert.ok(result.entryPoints.some((e) => e.includes("apps/web/src/main.tsx")));
     });
   });
 

@@ -350,10 +350,10 @@ suite("createAnalysisBudget", () => {
   test("weights leave ~1.3% unallocated buffer", () => {
     const budget = createAnalysisBudget();
     const summary = budget.getSummary();
-    // effective budget = totalChars * 0.90 (safety margin)
-    // weights should sum to ≈0.987, leaving ~1.3% unallocated
+    // Derive effective budget from the allocator itself to avoid
+    // hardcoding default values that might drift
+    const effectiveBudget = new TokenBudgetAllocator().getTotalRemaining();
     const totalAllocated = summary.reduce((sum, s) => sum + s.budget, 0);
-    const effectiveBudget = 32000 * 0.9;
     const unallocatedRatio = 1 - totalAllocated / effectiveBudget;
     // Weights sum ≈ 0.987 → ~1.3% unallocated. Tighten range to catch drift.
     assert.ok(
