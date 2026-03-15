@@ -8,6 +8,7 @@ import {
   buildFocusedContext,
   analyzeQuestionCached,
   clearQuestionCache,
+  QuestionAnalysisCache,
   TOP_FULL_CODE_FILES,
   TOP_SUMMARY_FILES,
   type QuestionAnalysis,
@@ -388,7 +389,7 @@ suite("Question Relevance Analyzer", () => {
             language: "typescript",
             summary: "Big file.",
           },
-          ...makeAnalysis().codeSnippets!.slice(1),
+          ...(makeAnalysis().codeSnippets ?? []).slice(1),
         ],
       });
       const qa = analyzeQuestion("How does JWT authentication work?", analysis);
@@ -478,6 +479,81 @@ suite("Question Relevance Analyzer", () => {
       // Forward-slash file path should still match backslash call graph entries
       const score = scoreFile("src/index.ts", [], undefined, callGraph);
       assert.strictEqual(score, 2, "entry point with backslashes should match");
+    });
+  });
+
+  suite("scoreModel edge cases", () => {
+    test("returns 0 for empty keywords", () => {
+      const score = scoreModel(
+        { name: "User", type: "interface", properties: ["id"] },
+        [],
+      );
+      assert.strictEqual(score, 0);
+    });
+  });
+
+  suite("QuestionAnalysisCache", () => {
+    test("get returns undefined for expired entries", () => {
+      const cache = new QuestionAnalysisCache(100, 1000); // 1s TTL
+      const entry = {
+        question: "test",
+        analysisFP: "fp",
+        qa: { keywords: ["test"], relevantSections: [], fileScores: new Map() },
+        ts: 0,
+      };
+      cache.set("key", entry, 0);
+      assert.ok(cache.get("key", 500), "should find entry within TTL");
+      assert.strictEqual(cache.get("key", 1500), undefined, "should expire after TTL");
+    });
+
+    test("LRU evicts oldest entry when at capacity", () => {
+      const cache = new QuestionAnalysisCache(2, 60000);
+      const mkEntry = (q: string, ts: number) => ({
+        question: q,
+        analysisFP: "fp",
+        qa: { keywords: [q], relevantSections: [], fileScores: new Map() },
+        ts,
+      });
+      cache.set("a", mkEntry("a", 100), 100);
+      cache.set("b", mkEntry("b", 200), 200);
+      // At capacity; inserting c should evict a (oldest by insertion order)
+      cache.set("c", mkEntry("c", 300), 300);
+
+      assert.strictEqual(cache.size, 2);
+      assert.strictEqual(cache.get("a", 300), undefined, "oldest should be evicted");
+      assert.ok(cache.get("b", 300), "b should remain");
+      assert.ok(cache.get("c", 300), "c should remain");
+    });
+
+    test("periodic eviction sweeps stale entries regardless of size", () => {
+      const cache = new QuestionAnalysisCache(100, 60000); // 60s TTL
+      const mkEntry = (q: string, ts: number) => ({
+        question: q,
+        analysisFP: "fp",
+        qa: { keywords: [q], relevantSections: [], fileScores: new Map() },
+        ts,
+      });
+      cache.set("old", mkEntry("old", 0), 0);
+      cache.set("recent", mkEntry("recent", 65000), 65000);
+
+      // Trigger periodic sweep: time > EVICTION_INTERVAL_MS (60s) after last sweep (0)
+      // "old" was written at ts=0, now=70000 → 70s > 60s TTL → stale
+      // "recent" was written at ts=65000, now=70000 → 5s < 60s TTL → fresh
+      cache.set("new", mkEntry("new", 70000), 70000);
+
+      assert.strictEqual(cache.get("old", 70000), undefined, "stale entry should be swept");
+      assert.ok(cache.get("recent", 70000), "recent entry should survive sweep");
+      assert.ok(cache.get("new", 70000), "new entry should exist");
+    });
+
+    test("injectable cache isolates test state", () => {
+      const cache = new QuestionAnalysisCache();
+      const analysis = makeAnalysis();
+      const qa1 = analyzeQuestionCached("test query", analysis, 1000, cache);
+      const qa2 = analyzeQuestionCached("test query", analysis, 2000, cache);
+
+      assert.strictEqual(qa1, qa2, "should return cached result from injected cache");
+      assert.strictEqual(cache.size, 1);
     });
   });
 });
