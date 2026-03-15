@@ -327,17 +327,41 @@ const TYPE_PRIORITY: Record<string, number> = {
   "Library / SDK": 1,
 };
 
+/** Module-level Set for O(1) web framework membership test. */
+const WEB_FRAMEWORK_NAMES = new Set([
+  "express",
+  "fastify",
+  "react",
+  "react-dom",
+  "vue",
+  "@vue/core",
+  "svelte",
+  "@angular/core",
+  "next",
+  "nuxt",
+  "remix",
+  "sveltekit",
+  "flask",
+  "fastapi",
+  "django",
+  "gin",
+  "actix-web",
+  "actix",
+  "spring",
+  "koa",
+  "hono",
+  "@hono/node-server",
+]);
+
 function detectProjectType(files: string[], frameworks: string[]): string {
   const scores: Record<string, number> = {};
 
   // Build lookup set once — O(n) instead of O(n²) repeated .includes()
   const frameworkSet = new Set(frameworks.map((f) => f.toLowerCase()));
-  const WEB_FRAMEWORK_PATTERN =
-    /^(?:express|fastify|react|react-dom|vue|svelte|@angular\/core|next|nuxt|remix|sveltekit|flask|fastapi|django|gin|actix|spring|koa|hono)$/i;
-  // Iterate Set directly instead of spreading to an array
+  // O(1) lookup instead of regex per framework; extended with common variants
   let hasWebFramework = false;
   for (const f of frameworkSet) {
-    if (WEB_FRAMEWORK_PATTERN.test(f)) {
+    if (WEB_FRAMEWORK_NAMES.has(f)) {
       hasWebFramework = true;
       break;
     }

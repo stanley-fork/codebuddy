@@ -910,7 +910,8 @@ function generateMiddlewareSection(
     lines.push("**Middleware**:");
     const displayed = mw.middleware.slice(0, 15);
     for (const m of displayed) {
-      const file = m.file ? ` (${getRelativePath(m.file)})` : "";
+      // m.file is already relative (worker's relativize() applied at serialization boundary)
+      const file = m.file ? ` (${m.file})` : "";
       lines.push(`- \`${m.name}\` [${m.type}]${file}`);
     }
     if (mw.middleware.length > 15) {
