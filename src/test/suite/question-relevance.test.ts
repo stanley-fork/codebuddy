@@ -538,6 +538,31 @@ suite("Question Relevance Analyzer", () => {
       );
       assert.strictEqual(score, 0);
     });
+
+    test("handles properties that are objects instead of strings", () => {
+      // Worker may produce {name, type} objects in properties array
+      const model = {
+        name: "Order",
+        type: "class",
+        properties: [
+          { name: "userId", type: "string" },
+          { name: "total", type: "number" },
+        ] as unknown as string[],
+      };
+      const score = scoreModel(model, ["userid"]);
+      assert.ok(score > 0, "should score object-shaped properties by name");
+    });
+
+    test("skips null/undefined entries in members array", () => {
+      const model = {
+        name: "Config",
+        type: "interface",
+        properties: [null, undefined, "host"] as unknown as string[],
+      };
+      // Should not throw
+      const score = scoreModel(model, ["host"]);
+      assert.ok(score > 0);
+    });
   });
 
   suite("QuestionAnalysisCache", () => {
