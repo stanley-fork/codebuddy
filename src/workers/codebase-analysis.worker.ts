@@ -225,21 +225,21 @@ class CodebaseAnalysisTask {
           );
           // Release import data — the call graph now owns the topology
           analysisResults.fileImports.length = 0;
-          try {
-            partialResult.callGraphSummary = {
-              entryPoints: callGraph.entryPoints.slice(0, 20),
-              hotNodes: callGraph.hotNodes,
-              circularDependencies: callGraph.circularDependencies.slice(0, 10),
-              edgeCount: callGraph.edges.length,
-              nodeCount: callGraph.nodes.size,
-            };
-            this.logger.info(
-              `Call graph: ${callGraph.nodes.size} nodes, ${callGraph.edges.length} edges, ${callGraph.circularDependencies.length} cycles`,
-            );
-          } finally {
-            // Explicitly release node arrays and Map to reduce GC pressure in worker
-            disposeCallGraph(callGraph);
-          }
+
+          // Extract summary values BEFORE disposing — disposeCallGraph zeroes the arrays
+          partialResult.callGraphSummary = {
+            entryPoints: callGraph.entryPoints.slice(0, 20),
+            hotNodes: [...callGraph.hotNodes],
+            circularDependencies: callGraph.circularDependencies.slice(0, 10),
+            edgeCount: callGraph.edges.length,
+            nodeCount: callGraph.nodes.size,
+          };
+          this.logger.info(
+            `Call graph: ${callGraph.nodes.size} nodes, ${callGraph.edges.length} edges, ${callGraph.circularDependencies.length} cycles`,
+          );
+
+          // Explicitly release node arrays and Map to reduce GC pressure in worker
+          disposeCallGraph(callGraph);
         }
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -381,16 +381,12 @@ class CodebaseAnalysisTask {
                 imports: fileAnalysis.treeSitterAnalysis.imports || [],
                 exports: fileAnalysis.treeSitterAnalysis.exports || [],
               });
-            } else if (fileImports.length === MAX_IMPORT_FILES_FOR_CALL_GRAPH) {
-              this.logger.warn(
-                `Import collection capped at ${MAX_IMPORT_FILES_FOR_CALL_GRAPH} files; call graph may be incomplete`,
-              );
-              // Push one more so next iteration skips the warn branch
-              fileImports.push({
-                file,
-                imports: fileAnalysis.treeSitterAnalysis.imports || [],
-                exports: fileAnalysis.treeSitterAnalysis.exports || [],
-              });
+              if (fileImports.length === MAX_IMPORT_FILES_FOR_CALL_GRAPH) {
+                this.logger.warn(
+                  `Import collection capped at ${MAX_IMPORT_FILES_FOR_CALL_GRAPH} files; ` +
+                    `call graph may be incomplete for large codebases`,
+                );
+              }
             }
           }
         } else {

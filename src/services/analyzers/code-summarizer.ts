@@ -264,8 +264,10 @@ export class CodeSummarizer {
             s.file === itemNormalized ||
             s.file.replace(/\\/g, "/").endsWith("/" + itemNormalized),
         );
+        // Short path fallback — only use if unambiguous (single candidate)
         const candidates = byShortPath.get(itemNormalized) ?? [];
-        const snippet = exactMatch ?? candidates[0];
+        const snippet =
+          exactMatch ?? (candidates.length === 1 ? candidates[0] : undefined);
 
         if (snippet) {
           results.push({
@@ -357,16 +359,16 @@ function generateFallbackSummary(snippet: CodeSnippet): string {
   const basename = snippet.file.split(/[\\/]/).pop() ?? snippet.file;
   const parts: string[] = [];
 
-  // Check for exports (supports Unicode identifiers via \p{L})
-  // Requires ES2018+ (Node 10+) for Unicode property escapes with /u flag
-  const exportMatches = content.match(
-    /export\s+(?:default\s+)?(?:class|function|const|interface)\s+([\p{L}\p{N}_]+)/gu,
-  );
-  if (exportMatches && exportMatches.length > 0) {
-    const names = exportMatches
-      .map((m) => m.match(/([\p{L}\p{N}_]+)$/u)?.[1])
-      .filter(Boolean)
-      .slice(0, 3);
+  // Check for exports using \w (ASCII identifiers cover 99% of real-world code).
+  // Uses exec loop to avoid creating the full match array — stops at 3 names.
+  const exportRe =
+    /export\s+(?:default\s+)?(?:class|function|const|interface)\s+(\w+)/g;
+  const names: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = exportRe.exec(content)) !== null && names.length < 3) {
+    names.push(m[1]);
+  }
+  if (names.length > 0) {
     parts.push(`Exports: ${names.join(", ")}`);
   }
 

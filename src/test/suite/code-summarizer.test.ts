@@ -293,6 +293,7 @@ suite("Code Summarizer", () => {
       assert.ok(matched);
       assert.strictEqual(matched.file, "/workspace/b/index.ts");
     });
+
   });
 
   suite("shortFilePath", () => {

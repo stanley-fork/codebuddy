@@ -46,6 +46,10 @@ export interface MiddlewareReport {
 
 // ─── Constants ───────────────────────────────────────────────────
 
+// Auth-related patterns appear near the top of files (imports, decorators, middleware setup).
+// Scanning beyond this limit adds cost with negligible detection benefit.
+const MAX_SNIPPET_SCAN_CHARS = 5000;
+
 const AUTH_PATTERNS: Record<
   string,
   { filePatterns: RegExp[]; contentPatterns: RegExp[] }
@@ -280,9 +284,13 @@ function detectAuthStrategies(
       }
     }
 
-    // Check snippet content
+    // Check snippet content (bounded to MAX_SNIPPET_SCAN_CHARS)
     for (const snippet of snippets) {
-      if (patterns.contentPatterns.some((p) => p.test(snippet.content))) {
+      const content =
+        snippet.content.length > MAX_SNIPPET_SCAN_CHARS
+          ? snippet.content.slice(0, MAX_SNIPPET_SCAN_CHARS)
+          : snippet.content;
+      if (patterns.contentPatterns.some((p) => p.test(content))) {
         indicators.push(`Code pattern in ${snippet.file.split(/[\\/]/).pop()}`);
         authFileSet.add(snippet.file);
       }
