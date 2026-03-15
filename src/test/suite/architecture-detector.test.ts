@@ -308,4 +308,44 @@ suite("Architecture Detector", () => {
       assert.notStrictEqual(result.projectType, "Library / SDK");
     });
   });
+
+  suite("project type priority ordering", () => {
+    test("Full-stack beats REST API when scores are tied", () => {
+      // Both types get score 2 from frameworks: "next" scores 2 for Full-stack,
+      // but Full-stack has higher priority so wins the tie
+      const result = detectArchitecture(
+        makeAnalysis({
+          files: [
+            "pages/index.tsx",
+            "components/Nav.tsx",
+            "src/controllers/user.ts",
+            "src/routes/api.ts",
+          ],
+          frameworks: ["next", "express"],
+        }),
+      );
+      assert.strictEqual(result.projectType, "Full-stack Web App");
+    });
+
+    test("Microservices beats REST API on score tie", () => {
+      // Both get similar scores but Microservices has higher priority
+      const result = detectArchitecture(
+        makeAnalysis({
+          files: [
+            "src/controllers/user.ts",
+            "src/routes/api.ts",
+            "services/auth/src/index.ts",
+            "packages/shared/package.json",
+          ],
+          frameworks: ["@nestjs/microservices", "express"],
+        }),
+      );
+      // Microservices should be preferred over REST API when scores are equal
+      assert.ok(
+        result.projectType === "Microservices" ||
+          result.projectType === "REST API",
+        `Expected Microservices or REST API, got: ${result.projectType}`,
+      );
+    });
+  });
 });

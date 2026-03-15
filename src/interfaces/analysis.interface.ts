@@ -130,6 +130,7 @@ export interface MiddlewareSummary {
   authStrategies: string[];
   authFlows: { strategy: string; indicators: string[]; files: string[] }[];
   errorHandlerCount: number;
+  errorHandlerFiles: string[];
 }
 
 /**

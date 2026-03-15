@@ -223,7 +223,8 @@ export function createAnalysisBudget(
   const budget = new TokenBudgetAllocator(totalChars);
   const effective = budget.getTotalRemaining(); // after safety margin
 
-  // Proportional weights (sum ≈ 0.987, ~1.3% unallocated buffer)
+  // Proportional weights applied to the *effective* budget (total minus safety margin),
+  // not the raw total. Sum ≈ 0.987, leaving ~1.3% unallocated buffer.
   // Phase 2 splits architecture allocation into architecture + callGraph + middleware
   // Code snippets reduced from 0.468 to 0.40 because code tokenizes
   // at ~2 chars/token vs 3.5 for prose, so same char budget = more tokens

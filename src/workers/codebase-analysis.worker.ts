@@ -33,6 +33,7 @@ export { extractTomlSection };
 const MAX_SNIPPETS = 30;
 const MAX_SNIPPET_LINES = 75;
 const MAX_SNIPPET_CHARS = 3000;
+const MAX_IMPORT_FILES_FOR_CALL_GRAPH = 2000;
 
 // Important file patterns for code snippet collection
 // Defined at module level to avoid re-instantiation on each call
@@ -273,6 +274,9 @@ class CodebaseAnalysisTask {
             files: f.files.map(relativize),
           })),
           errorHandlerCount: mwReport.errorHandlers.length,
+          errorHandlerFiles: mwReport.errorHandlers
+            .slice(0, 5)
+            .map((e) => relativize(e.file)),
         };
         this.logger.info(
           `Middleware: ${mwReport.middleware.length} detected, ${mwReport.authFlows.length} auth strategies`,
@@ -371,11 +375,23 @@ class CodebaseAnalysisTask {
             fileAnalysis.treeSitterAnalysis.imports ||
             fileAnalysis.treeSitterAnalysis.exports
           ) {
-            fileImports.push({
-              file,
-              imports: fileAnalysis.treeSitterAnalysis.imports || [],
-              exports: fileAnalysis.treeSitterAnalysis.exports || [],
-            });
+            if (fileImports.length < MAX_IMPORT_FILES_FOR_CALL_GRAPH) {
+              fileImports.push({
+                file,
+                imports: fileAnalysis.treeSitterAnalysis.imports || [],
+                exports: fileAnalysis.treeSitterAnalysis.exports || [],
+              });
+            } else if (fileImports.length === MAX_IMPORT_FILES_FOR_CALL_GRAPH) {
+              this.logger.warn(
+                `Import collection capped at ${MAX_IMPORT_FILES_FOR_CALL_GRAPH} files; call graph may be incomplete`,
+              );
+              // Push one more so next iteration skips the warn branch
+              fileImports.push({
+                file,
+                imports: fileAnalysis.treeSitterAnalysis.imports || [],
+                exports: fileAnalysis.treeSitterAnalysis.exports || [],
+              });
+            }
           }
         } else {
           // Fallback: collect regex-extracted endpoints and models

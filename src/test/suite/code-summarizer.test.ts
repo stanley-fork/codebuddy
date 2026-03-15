@@ -2,6 +2,7 @@ import * as assert from "assert";
 import {
   CodeSummarizer,
   InMemorySummaryCache,
+  shortFilePath,
   type SummarizeFunction,
   type FileSummary,
 } from "../../services/analyzers/code-summarizer";
@@ -272,6 +273,44 @@ suite("Code Summarizer", () => {
       const testSummary = result.summaries.find((s) => s.file.includes("test/"));
       assert.ok(srcSummary);
       assert.ok(testSummary);
+    });
+
+    test("suffix match requires leading slash to prevent partial path collision", async () => {
+      // If LLM returns "b/index.ts", it should NOT match "ab/index.ts"
+      const mockLLM: SummarizeFunction = async () =>
+        JSON.stringify([
+          { file: "b/index.ts", summary: "Module B." },
+        ]);
+
+      const summarizer = new CodeSummarizer(mockLLM);
+      const result = await summarizer.summarize([
+        makeSnippet({ file: "/workspace/ab/index.ts", content: "export const ab = 1;" }),
+        makeSnippet({ file: "/workspace/b/index.ts", content: "export const b = 1;" }),
+      ]);
+
+      // "b/index.ts" should match /workspace/b/index.ts, not /workspace/ab/index.ts
+      const matched = result.summaries.find((s) => s.summary === "Module B.");
+      assert.ok(matched);
+      assert.strictEqual(matched.file, "/workspace/b/index.ts");
+    });
+  });
+
+  suite("shortFilePath", () => {
+    test("returns last two segments for normal paths", () => {
+      assert.strictEqual(shortFilePath("/workspace/src/app.ts"), "src/app.ts");
+      assert.strictEqual(shortFilePath("a/b/c/d.ts"), "c/d.ts");
+    });
+
+    test("normalizes backslashes", () => {
+      assert.strictEqual(shortFilePath("src\\utils\\helper.ts"), "utils/helper.ts");
+    });
+
+    test("returns filename for single-segment paths", () => {
+      assert.strictEqual(shortFilePath("app.ts"), "app.ts");
+    });
+
+    test("returns last two segments for two-segment paths", () => {
+      assert.strictEqual(shortFilePath("src/app.ts"), "src/app.ts");
     });
   });
 });
