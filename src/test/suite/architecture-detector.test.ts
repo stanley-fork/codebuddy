@@ -170,6 +170,18 @@ suite("Architecture Detector", () => {
       assert.ok(result.entryPoints.some((e) => e.includes("index.ts")));
       assert.ok(result.entryPoints.some((e) => e.includes("main.go")));
     });
+
+    test("does not match deeply nested vendor files as entry points", () => {
+      const result = detectArchitecture(
+        makeAnalysis({
+          files: [
+            "vendor/somelib/src/index.ts",
+            "a/b/c/src/main.js",
+          ],
+        }),
+      );
+      assert.strictEqual(result.entryPoints.length, 0);
+    });
   });
 
   suite("project type", () => {

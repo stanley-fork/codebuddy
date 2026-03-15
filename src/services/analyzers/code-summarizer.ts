@@ -26,6 +26,7 @@ export interface SummarizeBatchResult {
   cached: number;
   generated: number;
   failed: number;
+  fallback: number;
 }
 
 /**
@@ -78,6 +79,7 @@ export class CodeSummarizer {
       cached: 0,
       generated: 0,
       failed: 0,
+      fallback: 0,
     };
 
     const needsSummarization: CodeSnippet[] = [];
@@ -97,15 +99,20 @@ export class CodeSummarizer {
     // Batch LLM calls
     for (let i = 0; i < needsSummarization.length; i += MAX_BATCH_SIZE) {
       const batch = needsSummarization.slice(i, i + MAX_BATCH_SIZE);
-      const batchSummaries = await this.summarizeBatch(batch);
+      const { summaries: batchSummaries, usedFallback } =
+        await this.summarizeBatch(batch);
 
       for (const summary of batchSummaries) {
         result.summaries.push(summary);
         this.putInCache(summary);
-        result.generated++;
+        if (usedFallback) {
+          result.fallback++;
+        } else {
+          result.generated++;
+        }
       }
 
-      // Count failures
+      // Count files that didn't get a summary at all (partial JSON parse failures)
       const batchFiles = new Set(batch.map((s) => s.file));
       const summarizedFiles = new Set(batchSummaries.map((s) => s.file));
       for (const file of batchFiles) {
@@ -123,20 +130,26 @@ export class CodeSummarizer {
    */
   private async summarizeBatch(
     snippets: CodeSnippet[],
-  ): Promise<FileSummary[]> {
+  ): Promise<{ summaries: FileSummary[]; usedFallback: boolean }> {
     const prompt = this.buildBatchPrompt(snippets);
 
     try {
       const response = await this.summarizeFn(prompt);
-      return this.parseBatchResponse(response, snippets);
+      return {
+        summaries: this.parseBatchResponse(response, snippets),
+        usedFallback: false,
+      };
     } catch {
       // Fallback: generate simple heuristic summaries
-      return snippets.map((s) => ({
-        file: s.file,
-        summary: generateFallbackSummary(s),
-        contentHash: hashContent(s.content),
-        language: s.language,
-      }));
+      return {
+        summaries: snippets.map((s) => ({
+          file: s.file,
+          summary: generateFallbackSummary(s),
+          contentHash: hashContent(s.content),
+          language: s.language,
+        })),
+        usedFallback: true,
+      };
     }
   }
 
@@ -258,7 +271,7 @@ export class CodeSummarizer {
 // ─── Utilities ───────────────────────────────────────────────────
 
 function hashContent(content: string): string {
-  return crypto.createHash("md5").update(content).digest("hex").slice(0, 12);
+  return crypto.createHash("sha256").update(content).digest("hex").slice(0, 12);
 }
 
 /**
@@ -302,9 +315,12 @@ function generateFallbackSummary(snippet: CodeSnippet): string {
  * Avoids dynamic RegExp construction to eliminate ReDoS risk.
  */
 function parseFallbackLine(response: string, basename: string): string | null {
-  const lower = response.toLowerCase();
-  const target = basename.toLowerCase();
-  const idx = lower.indexOf(target);
+  if (!basename || basename.length > 255) return null;
+
+  // Case-insensitive search using regex on the original string.
+  // basename is our own filename (not LLM output), so regex is safe after escaping.
+  const escaped = basename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const idx = response.search(new RegExp(escaped, "i"));
   if (idx === -1) return null;
 
   // Find the delimiter after the filename

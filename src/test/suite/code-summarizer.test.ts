@@ -31,6 +31,7 @@ suite("Code Summarizer", () => {
       assert.strictEqual(result.generated, 1);
       assert.strictEqual(result.cached, 0);
       assert.strictEqual(result.failed, 0);
+      assert.strictEqual(result.fallback, 0);
     });
 
     test("handles multiple files in batch", async () => {
@@ -174,6 +175,9 @@ suite("Code Summarizer", () => {
         result.summaries[0].summary.includes("Export") ||
           result.summaries[0].summary.includes("app.ts"),
       );
+      // Should be counted as fallback, not generated
+      assert.strictEqual(result.fallback, 1);
+      assert.strictEqual(result.generated, 0);
     });
 
     test("uses line-by-line fallback when JSON parse fails", async () => {

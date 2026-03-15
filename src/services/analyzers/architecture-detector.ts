@@ -52,10 +52,13 @@ const LAYER_PATTERNS: Record<string, RegExp> = {
 };
 
 const ENTRY_POINT_PATTERNS = [
-  /(?:^|[\\/])(?:src[\\/])?(?:index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs|java|php)$/i,
-  /(?:^|[\\/])(?:src[\\/])?(?:bootstrap|startup|entry)\.(ts|js|py|go)$/i,
-  /(?:^|[\\/])manage\.py$/i,
-  /(?:^|[\\/])cmd[\\/].*[\\/]main\.go$/i,
+  // Matches: index.ts, src/index.ts, myapp/src/index.ts — but NOT a/b/c/src/index.ts
+  /^(?:[^\/]+[\/])?(?:src[\/])?(?:index|main|app|server)\.(ts|js|tsx|jsx|py|go|rs|java|php)$/i,
+  /^(?:[^\/]+[\/])?(?:src[\/])?(?:bootstrap|startup|entry)\.(ts|js|py|go)$/i,
+  // Django manage.py — always at root
+  /^manage\.py$/i,
+  // Go cmd pattern: cmd/<name>/main.go — exactly 3 segments
+  /^cmd[\/][^\/]+[\/]main\.go$/i,
 ];
 
 const PROJECT_TYPE_INDICATORS: Record<
@@ -91,10 +94,6 @@ const PROJECT_TYPE_INDICATORS: Record<
   "Library / SDK": {
     files: [/(?:^|[\\/])(?:src[\\/])?index\.(ts|js)$/i],
     frameworks: [],
-    /**
-     * Negative signal: only match if NO web-framework dependency is present.
-     * detectProjectType applies this check after scoring.
-     */
   },
   Microservices: {
     files: [/services?[\\/].*[\\/]src[\\/]/i, /packages?[\\/]/i],
@@ -312,10 +311,11 @@ function detectEntryPoints(files: string[]): string[] {
 function detectProjectType(files: string[], frameworks: string[]): string {
   const scores: Record<string, number> = {};
 
-  const frameworksLower = frameworks.map((f) => f.toLowerCase());
+  // Build lookup set once — O(n) instead of O(n²) repeated .includes()
+  const frameworkSet = new Set(frameworks.map((f) => f.toLowerCase()));
   const WEB_FRAMEWORK_PATTERN =
     /^(?:express|fastify|react|react-dom|vue|svelte|@angular\/core|next|nuxt|remix|sveltekit|flask|fastapi|django|gin|actix|spring|koa|hono)$/i;
-  const hasWebFramework = frameworksLower.some((f) =>
+  const hasWebFramework = [...frameworkSet].some((f) =>
     WEB_FRAMEWORK_PATTERN.test(f),
   );
 
@@ -329,7 +329,7 @@ function detectProjectType(files: string[], frameworks: string[]): string {
     }
 
     for (const fw of indicators.frameworks) {
-      if (frameworksLower.includes(fw.toLowerCase())) score += 2;
+      if (frameworkSet.has(fw.toLowerCase())) score += 2;
     }
 
     // Library / SDK: only claim it when no web-framework dependency exists
