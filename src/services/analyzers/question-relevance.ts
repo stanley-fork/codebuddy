@@ -377,7 +377,11 @@ export function scoreModel(model: ModelData, keywords: string[]): number {
   let memberHits = 0;
 
   memberScan: for (const m of members) {
-    const lowerMember = m.toLowerCase();
+    // Guard: properties may arrive as {name, type} objects from the worker
+    if (!m) continue;
+    const raw = typeof m === "string" ? m : (m as { name?: string }).name;
+    if (!raw) continue;
+    const lowerMember = raw.toLowerCase();
     for (const kw of keywords) {
       if (lowerMember.includes(kw)) {
         memberHits++;
