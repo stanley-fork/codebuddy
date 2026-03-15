@@ -1019,7 +1019,9 @@ function generateFocusedContextSection(
   if (focused.relevantEndpoints.length > 0) {
     lines.push("\n### Relevant Endpoints");
     for (const ep of focused.relevantEndpoints.slice(0, 10)) {
-      lines.push(`- \`${ep.method} ${ep.path}\`${ep.file ? ` (${ep.file})` : ""}`);
+      lines.push(
+        `- \`${ep.method} ${ep.path}\`${ep.file ? ` (${ep.file})` : ""}`,
+      );
     }
   }
 
@@ -1076,10 +1078,10 @@ function createContextFromAnalysis(
       }
       logger.debug(
         `Phase 3: ${focused.fullCodeFiles.length} full-code files, ` +
-        `${focused.summaryFiles.length} summary files, ` +
-        `${focused.relevantEndpoints.length} endpoints, ` +
-        `${focused.relevantModels.length} models, ` +
-        `boosted sections: [${focused.boostedSections.join(", ")}]`,
+          `${focused.summaryFiles.length} summary files, ` +
+          `${focused.relevantEndpoints.length} endpoints, ` +
+          `${focused.relevantModels.length} models, ` +
+          `boosted sections: [${focused.boostedSections.join(", ")}]`,
       );
     }
   }

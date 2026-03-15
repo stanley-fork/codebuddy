@@ -29,19 +29,106 @@ export const TOP_SUMMARY_FILES = 7;
 
 /** Stop words excluded from keyword extraction */
 const STOP_WORDS = new Set([
-  "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-  "have", "has", "had", "do", "does", "did", "will", "would", "could",
-  "should", "may", "might", "shall", "can", "need", "must",
-  "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us",
-  "them", "my", "your", "his", "its", "our", "their",
-  "this", "that", "these", "those", "what", "which", "who", "whom",
-  "how", "where", "when", "why",
-  "and", "but", "or", "nor", "not", "so", "yet", "for", "with",
-  "about", "between", "through", "during", "before", "after",
-  "in", "on", "at", "to", "from", "of", "by", "up", "out",
-  "if", "then", "else", "than", "too", "very", "just",
-  "all", "each", "every", "both", "few", "more", "most", "other",
-  "some", "such", "no", "only", "same",
+  "the",
+  "a",
+  "an",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "do",
+  "does",
+  "did",
+  "will",
+  "would",
+  "could",
+  "should",
+  "may",
+  "might",
+  "shall",
+  "can",
+  "need",
+  "must",
+  "i",
+  "you",
+  "he",
+  "she",
+  "it",
+  "we",
+  "they",
+  "me",
+  "him",
+  "her",
+  "us",
+  "them",
+  "my",
+  "your",
+  "his",
+  "its",
+  "our",
+  "their",
+  "this",
+  "that",
+  "these",
+  "those",
+  "what",
+  "which",
+  "who",
+  "whom",
+  "how",
+  "where",
+  "when",
+  "why",
+  "and",
+  "but",
+  "or",
+  "nor",
+  "not",
+  "so",
+  "yet",
+  "for",
+  "with",
+  "about",
+  "between",
+  "through",
+  "during",
+  "before",
+  "after",
+  "in",
+  "on",
+  "at",
+  "to",
+  "from",
+  "of",
+  "by",
+  "up",
+  "out",
+  "if",
+  "then",
+  "else",
+  "than",
+  "too",
+  "very",
+  "just",
+  "all",
+  "each",
+  "every",
+  "both",
+  "few",
+  "more",
+  "most",
+  "other",
+  "some",
+  "such",
+  "no",
+  "only",
+  "same",
 ]);
 
 /**
@@ -194,10 +281,18 @@ export function scoreFile(
   // Call graph bonuses
   if (callGraph) {
     const normalizedPath = filePath.replace(/\\/g, "/");
-    if (callGraph.entryPoints.some((ep) => normalizedPath.endsWith(ep) || ep.endsWith(normalizedPath))) {
+    if (
+      callGraph.entryPoints.some(
+        (ep) => normalizedPath.endsWith(ep) || ep.endsWith(normalizedPath),
+      )
+    ) {
       score += 2;
     }
-    if (callGraph.hotNodes.some((hn) => normalizedPath.endsWith(hn) || hn.endsWith(normalizedPath))) {
+    if (
+      callGraph.hotNodes.some(
+        (hn) => normalizedPath.endsWith(hn) || hn.endsWith(normalizedPath),
+      )
+    ) {
       score += 2;
     }
   }
@@ -293,7 +388,12 @@ export function analyzeQuestion(
   // Also score files that appear in the file list but have no snippet
   for (const file of analysis.files) {
     if (!fileScores.has(file)) {
-      const score = scoreFile(file, keywords, undefined, analysis.callGraphSummary);
+      const score = scoreFile(
+        file,
+        keywords,
+        undefined,
+        analysis.callGraphSummary,
+      );
       if (score > 0) {
         fileScores.set(file, score);
       }
