@@ -8,7 +8,7 @@
   },
   "publisher": "fiatinnovations",
   "description": "%description%",
-  "version": "4.1.9",
+  "version": "4.1.12",
   "engines": {
     "vscode": "^1.78.0"
   },
@@ -48,7 +48,7 @@
   ],
   "homepage": "https://github.com/olasunkanmi-SE/codebuddy#readme",
   "l10n": "./l10n",
-  "main": "./dist/extension.js",
+  "main": "./out/extension.js",
   "contributes": {
     "views": {
       "codeBuddy-view-container": [
@@ -292,6 +292,11 @@
         "category": "CodeBuddy"
       },
       {
+        "command": "codebuddy.clearInlineReviewComments",
+        "title": "%commands.clearInlineReviewComments%",
+        "category": "CodeBuddy"
+      },
+      {
         "command": "codebuddy.applyComposerSession",
         "title": "%commands.applyComposerSession%",
         "category": "CodeBuddy"
@@ -380,7 +385,7 @@
         {
           "id": "codeBuddy-view-container",
           "title": "CodeBuddy",
-          "icon": "$(chat-editor-label-icon)"
+          "icon": "images/codebuddylogo.svg"
         }
       ]
     },
@@ -655,6 +660,32 @@
             "type": "boolean",
             "default": false,
             "description": "%config.requireDiffApproval%"
+          },
+          "codebuddy.review.inlineComments": {
+            "type": "boolean",
+            "default": true,
+            "description": "%config.reviewInlineComments%"
+          },
+          "codebuddy.agent.maxEventCount": {
+            "type": "number",
+            "default": 2000,
+            "minimum": 500,
+            "maximum": 10000,
+            "description": "%config.agentMaxEventCount%"
+          },
+          "codebuddy.agent.maxToolInvocations": {
+            "type": "number",
+            "default": 400,
+            "minimum": 50,
+            "maximum": 2000,
+            "description": "%config.agentMaxToolInvocations%"
+          },
+          "codebuddy.agent.maxDurationMinutes": {
+            "type": "number",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 60,
+            "description": "%config.agentMaxDurationMinutes%"
           },
           "codebuddy.completion.enabled": {
             "type": "boolean",
@@ -976,6 +1007,46 @@
             "minimum": 5000,
             "maximum": 600000,
             "description": "Timeout in milliseconds for test execution (default: 120000 = 2 minutes)."
+          },
+          "codebuddy.telemetry.persistTraces": {
+            "type": "boolean",
+            "default": true,
+            "description": "Persist agent telemetry traces to disk so they survive across VS Code sessions."
+          },
+          "codebuddy.telemetry.retentionDays": {
+            "type": "number",
+            "default": 7,
+            "minimum": 1,
+            "maximum": 90,
+            "description": "Number of days to retain persisted telemetry traces before auto-pruning."
+          },
+          "codebuddy.telemetry.otlpEndpoint": {
+            "type": "string",
+            "default": "",
+            "description": "Optional OTLP HTTP endpoint for exporting traces to an external backend (e.g. LangFuse, LangSmith, Jaeger). Leave empty to disable."
+          },
+          "codebuddy.failover.enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Automatically switch to a fallback LLM provider when the primary fails (rate limit, timeout, auth error)."
+          },
+          "codebuddy.failover.providers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "Anthropic",
+                "OpenAI",
+                "Gemini",
+                "Groq",
+                "Deepseek",
+                "Qwen",
+                "GLM",
+                "Local"
+              ]
+            },
+            "default": [],
+            "markdownDescription": "Ordered list of fallback providers to try when the primary fails. Leave empty to auto-detect from configured API keys."
           }
         }
       }
@@ -1045,7 +1116,7 @@
     "@vscode/ripgrep": "^1.17.0",
     "apache-arrow": "18.1.0",
     "axios": "^1.7.9",
-    "deepagents": "^1.1.1",
+    "deepagents": "^1.8.2",
     "dompurify": "^3.2.6",
     "dotenv": "^16.1.4",
     "fast-levenshtein": "^3.0.0",

@@ -6,6 +6,8 @@ CodeBuddy is a multi-agent AI software engineer that operates inside VS Code. It
 
 It supports several AI providers (cloud and local), diverse built-in tools, pre-configured external connectors, and a Model Context Protocol gateway for unlimited extensibility. It ships with scheduled automations, a built-in tech news reader, persistent agent memory, and full internationalization in 7 languages.
 
+![Nerq Trust Score](https://nerq.ai/badge/olasunkanmi-SE/codebuddy)
+
 ---
 
 ## Table of Contents

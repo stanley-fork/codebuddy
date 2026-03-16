@@ -3,52 +3,20 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { Worker } from "worker_threads";
 import { Logger } from "../infrastructure/logger/logger";
+import type {
+  WorkerMessage,
+  CodebaseAnalysisWorkerData,
+  CodeSnippet,
+  AnalysisResult,
+} from "../interfaces/analysis.interface";
 
-/**
- * Message types for communication
- */
-export interface WorkerMessage {
-  type:
-    | "ANALYZE_CODEBASE"
-    | "ANALYSIS_COMPLETE"
-    | "ANALYSIS_ERROR"
-    | "ANALYSIS_PROGRESS"
-    | "LOG";
-  payload?: any;
-  error?: string;
-  progress?: {
-    current: number;
-    total: number;
-    message: string;
-  };
-  level?: string;
-  message?: string;
-  data?: any;
-}
-
-export interface CodebaseAnalysisWorkerData {
-  workspacePath: string;
-  filePatterns: string[];
-  excludePatterns: string[];
-  maxFiles: number;
-}
-
-export interface AnalysisResult {
-  frameworks: string[];
-  dependencies: Record<string, string>;
-  files: string[];
-  apiEndpoints: any[];
-  dataModels: any[];
-  databaseSchema: any;
-  domainRelationships: any[];
-  fileContents: Map<string, string>;
-  summary: {
-    totalFiles: number;
-    totalLines: number;
-    languageDistribution: Record<string, number>;
-    complexity: "low" | "medium" | "high";
-  };
-}
+// Re-export for backward compatibility
+export type {
+  WorkerMessage,
+  CodebaseAnalysisWorkerData,
+  CodeSnippet,
+  AnalysisResult,
+};
 
 export class CodebaseAnalysisWorker {
   private readonly logger: Logger;
@@ -172,7 +140,7 @@ export class CodebaseAnalysisWorker {
         }
         break;
       case "ANALYSIS_PROGRESS":
-        if (this.onProgressCallback && message.progress) {
+        if (this.onProgressCallback) {
           this.onProgressCallback(message.progress);
         }
         break;
