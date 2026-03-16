@@ -501,13 +501,33 @@ export class SkillHandler implements WebviewMessageHandler {
       let cancelled = false;
 
       for (const field of skill.config) {
+        // For secrets: check if value exists but never pre-fill - show masked placeholder only
+        let existingValue = "";
+        let placeholderText = field.placeholder || `Enter ${field.label}`;
+
+        if (field.type === "secret") {
+          // Check if secret exists in SecretStorage
+          const storedSecret = await this.getSkillService().getSecret(
+            skillId,
+            field.name,
+          );
+          if (storedSecret) {
+            // Show last 4 chars only as hint that value exists
+            placeholderText = `••••••••${storedSecret.slice(-4)} (leave blank to keep current)`;
+          }
+          // Never pre-fill secrets - existingValue stays empty
+        } else {
+          existingValue =
+            skill.state.configValues?.[field.name]?.toString() || "";
+        }
+
         const value = await vscode.window.showInputBox({
           title: `Configure ${skill.displayName}`,
           prompt: field.label,
-          placeHolder: field.placeholder,
+          placeHolder: placeholderText,
           password: field.type === "secret",
           ignoreFocusOut: true,
-          value: skill.state.configValues?.[field.name]?.toString() || "",
+          value: existingValue,
         });
 
         if (value === undefined) {
@@ -516,9 +536,29 @@ export class SkillHandler implements WebviewMessageHandler {
         }
 
         if (field.required && !value) {
+          // For secrets, check if there's an existing stored value
+          if (field.type === "secret") {
+            const storedSecret = await this.getSkillService().getSecret(
+              skillId,
+              field.name,
+            );
+            if (!storedSecret) {
+              vscode.window.showWarningMessage(`${field.label} is required`);
+              cancelled = true;
+              break;
+            }
+            // Existing secret is kept - don't add to newConfig
+            continue;
+          }
           vscode.window.showWarningMessage(`${field.label} is required`);
           cancelled = true;
           break;
+        }
+
+        // For secrets: only include in config if user provided a new value
+        if (field.type === "secret" && !value) {
+          // User left blank - keep existing secret (don't include in newConfig)
+          continue;
         }
 
         newConfig[field.name] = value;

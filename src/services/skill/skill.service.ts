@@ -75,6 +75,7 @@ export class SkillService {
   private readonly installer: SkillInstaller;
   private skillStates: Map<string, SkillState> = new Map();
   private initialized = false;
+  private initializationError: Error | null = null;
 
   private constructor(extensionPath: string) {
     this.logger = Logger.initialize("SkillService", {
@@ -144,9 +145,30 @@ export class SkillService {
   }
 
   /**
+   * Mark the service as having failed initialization
+   * Call this when initialization fails to enable graceful degradation
+   */
+  public markInitializationFailed(error: Error): void {
+    this.initializationError = error;
+    this.logger.error(
+      "SkillService initialization marked as failed:",
+      error.message,
+    );
+  }
+
+  /**
    * Get all skills with their current states
    */
   public async getSkills(): Promise<Skill[]> {
+    // Show initialization error warning on first access (then clear to avoid spam)
+    if (this.initializationError) {
+      const errorMessage = this.initializationError.message;
+      this.initializationError = null; // Clear after showing once
+      vscode.window.showWarningMessage(
+        `Skills initialization failed: ${errorMessage}. Some skills may not be available.`,
+      );
+    }
+
     const definitions = this.registry.getAllSkills();
 
     const skills: Skill[] = await Promise.all(
@@ -352,10 +374,11 @@ export class SkillService {
 
   /**
    * Configure a skill with user-provided values
+   * Secrets are stored separately in VS Code's SecretStorage and never persist to disk.
    */
   public async configureSkill(
     skillId: string,
-    config: Record<string, string | number | boolean>,
+    rawConfig: Record<string, string | number | boolean>,
   ): Promise<{ success: boolean; error?: string }> {
     const skill = this.registry.getSkill(skillId);
     if (!skill) {
@@ -365,29 +388,36 @@ export class SkillService {
       };
     }
 
-    // Store config values (secrets should be stored in VS Code's secret storage)
+    // Identify secret fields upfront to avoid storing them in configValues
+    const secretFields = new Set(
+      (skill.config ?? [])
+        .filter((f) => f.type === "secret")
+        .map((f) => f.name),
+    );
+
+    // 1. Separate secrets from public config BEFORE any persistence
+    const publicConfig: Record<string, string | number | boolean> = {};
+    const secretsToStore: Array<[string, string]> = [];
+
+    for (const [key, value] of Object.entries(rawConfig)) {
+      if (secretFields.has(key) && value) {
+        secretsToStore.push([key, String(value)]);
+      } else {
+        publicConfig[key] = value;
+      }
+    }
+
+    // 2. Store secrets in SecretStorage FIRST (before any disk write)
+    for (const [key, value] of secretsToStore) {
+      await this.storeSecret(skillId, key, value);
+    }
+
+    // 3. Only then persist public config (secrets never touch disk)
     const state = this.skillStates.get(skillId) ?? { ...DEFAULT_SKILL_STATE };
-    state.configValues = config;
+    state.configValues = publicConfig;
     state.configured = true;
     this.skillStates.set(skillId, state);
-
     await this.saveSkillStates();
-
-    // Handle secret storage separately
-    if (skill.config) {
-      for (const field of skill.config) {
-        if (field.type === "secret" && config[field.name]) {
-          await this.storeSecret(
-            skillId,
-            field.name,
-            String(config[field.name]),
-          );
-          // Remove secrets from regular config
-          delete state.configValues[field.name];
-        }
-      }
-      await this.saveSkillStates();
-    }
 
     this.logger.log(LogLevel.INFO, `Skill configured: ${skillId}`);
 
@@ -823,6 +853,23 @@ export class SkillService {
       return "";
     }
 
+    // Batch all async operations in parallel to avoid N+1 pattern
+    const [envVarsResults, configStatusResults] = await Promise.all([
+      Promise.all(
+        enabledSkills.map(
+          async (s) => [s.name, await this.getSkillEnvVars(s.name)] as const,
+        ),
+      ),
+      Promise.all(
+        enabledSkills.map(
+          async (s) => [s.name, await this.isSkillConfigured(s.name)] as const,
+        ),
+      ),
+    ]);
+
+    const envVarsMap = new Map(envVarsResults);
+    const configStatusMap = new Map(configStatusResults);
+
     let prompt = `\n\n## 🛠️ Available Skills\nYou have access to the following skills via their respective CLI commands. You can use them by running the commands described in their documentation using the 'RunCommand' tool.\n\n`;
     prompt += `**Note**: API keys and credentials configured for these skills are automatically injected as environment variables when running commands.\n\n`;
     prompt += `**Environments**: Each skill can have multiple environments (e.g., LOCAL, QA, PROD) with different credentials. The active environment is shown below.\n\n`;
@@ -833,10 +880,13 @@ export class SkillService {
       const activeEnv = this.getActiveEnvironment(skill.name);
       const environments = this.getEnvironments(skill.name);
 
-      // Check if skill has env vars configured
-      const envVars = await this.getSkillEnvVars(skill.name);
+      // Use pre-fetched env vars and config status
+      const envVars = envVarsMap.get(skill.name) ?? {};
       const hasEnvVars = Object.keys(envVars).length > 0;
-      const configStatus = await this.isSkillConfigured(skill.name);
+      const configStatus = configStatusMap.get(skill.name) ?? {
+        configured: false,
+        missing: [],
+      };
 
       prompt += `### Skill: ${skill.displayName}\n${skill.description}\n`;
 

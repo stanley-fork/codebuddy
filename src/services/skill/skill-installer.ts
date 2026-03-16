@@ -211,9 +211,14 @@ export class SkillInstaller {
   /**
    * Validate a command before execution
    * Checks for potentially dangerous patterns using a categorized risk approach
+   * @param allowSudo - If true, allows sudo for package manager installs (shown in terminal for user review)
    * @returns Error message if invalid, null if valid
    */
-  private validateCommand(command: string, context: string): string | null {
+  private validateCommand(
+    command: string,
+    context: string,
+    allowSudo = false,
+  ): string | null {
     // Reject empty commands
     if (!command || command.trim().length === 0) {
       return "Empty command";
@@ -264,9 +269,18 @@ export class SkillInstaller {
 
     // HIGH-RISK: Patterns that are outright forbidden - always blocked
     // These represent clear security violations with no legitimate use in install/setup
-    const highRiskPatterns: Array<{ pattern: RegExp; description: string }> = [
-      // Privilege escalation
-      { pattern: /sudo\s+/i, description: "sudo privilege escalation" },
+    // Note: sudo is conditionally allowed for install commands (displayed in terminal for user review)
+    const highRiskPatterns: Array<{
+      pattern: RegExp;
+      description: string;
+      skippable?: boolean;
+    }> = [
+      // Privilege escalation - sudo allowed for install contexts only
+      {
+        pattern: /sudo\s+/i,
+        description: "sudo privilege escalation",
+        skippable: allowSudo,
+      },
       { pattern: /su\s+-/i, description: "su user switching" },
       { pattern: /chmod\s+777/i, description: "chmod 777 permission change" },
       { pattern: /chown\s+root/i, description: "chown to root" },
@@ -281,7 +295,8 @@ export class SkillInstaller {
       { pattern: /\x00/, description: "null byte injection" },
     ];
 
-    for (const { pattern, description } of highRiskPatterns) {
+    for (const { pattern, description, skippable } of highRiskPatterns) {
+      if (skippable) continue; // Skip this check if allowed in context
       if (pattern.test(command)) {
         this.logger.warn(
           `Forbidden command pattern detected in ${context}: ${description}`,
@@ -753,10 +768,11 @@ export class SkillInstaller {
     command: string,
     displayName: string,
   ): Promise<InstallResult> {
-    // Validate command before execution
+    // Validate command before execution (allow sudo for install commands displayed to user)
     const validationError = this.validateCommand(
       command,
       `install:${displayName}`,
+      true, // allowSudo: install commands run in terminal with user visibility
     );
     if (validationError) {
       this.logger.error(

@@ -208,8 +208,14 @@ export async function activate(context: vscode.ExtensionContext) {
     SkillService.setExtensionPath(context.extensionPath);
     const skillService = SkillService.getInstance();
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    skillService.initialize(workspacePath).catch((err) => {
-      logger.warn("Failed to initialize SkillService:", err);
+
+    // Defer initialization to not block extension activation
+    // Errors are tracked and shown to user on first skills interaction
+    setImmediate(() => {
+      skillService.initialize(workspacePath).catch((err) => {
+        logger.error("Failed to initialize SkillService:", err);
+        skillService.markInitializationFailed(err as Error);
+      });
     });
 
     // Initialize .codebuddyignore file exclusion service
