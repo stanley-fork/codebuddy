@@ -87,6 +87,8 @@ export class SkillService {
   // Debounce timer for saveSkillStates
   private saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly SAVE_DEBOUNCE_MS = 500; // 500ms debounce
+  // Rate limiting: track in-flight operations to prevent duplicate enable/install
+  private inFlightOperations: Set<string> = new Set();
 
   private constructor(extensionPath: string, secrets: vscode.SecretStorage) {
     this.logger = Logger.initialize("SkillService", {
@@ -218,16 +220,33 @@ export class SkillService {
   }
 
   /**
+   * Get initialization state for UI consumers.
+   * Error persists so repeated calls always reflect the true state.
+   */
+  public getInitializationState(): {
+    initialized: boolean;
+    error: string | null;
+  } {
+    return {
+      initialized: this.initialized,
+      error: this.initializationError?.message ?? null,
+    };
+  }
+
+  /**
    * Get all skills with their current states
    */
   public async getSkills(): Promise<Skill[]> {
-    // Show initialization error warning on first access (then clear to avoid spam)
+    // Log warning if called while initialization failed, but don't clear the error
     if (this.initializationError) {
-      const errorMessage = this.initializationError.message;
-      this.initializationError = null; // Clear after showing once
-      vscode.window.showWarningMessage(
-        `Skills initialization failed: ${errorMessage}. Some skills may not be available.`,
+      this.logger.warn(
+        "getSkills() called while initialization failed:",
+        this.initializationError.message,
       );
+    }
+
+    if (!this.initialized) {
+      return [];
     }
 
     const definitions = this.registry.getAllSkills();
@@ -307,6 +326,24 @@ export class SkillService {
   public async enableSkill(
     skillId: string,
     scope: "workspace" | "global" = "workspace",
+  ): Promise<EnableSkillResult> {
+    // Rate limit: prevent duplicate enable operations from rapid clicks
+    const opKey = `enable:${skillId}`;
+    if (this.inFlightOperations.has(opKey)) {
+      return { success: false, error: "Operation already in progress" };
+    }
+    this.inFlightOperations.add(opKey);
+
+    try {
+      return await this.doEnableSkill(skillId, scope);
+    } finally {
+      this.inFlightOperations.delete(opKey);
+    }
+  }
+
+  private async doEnableSkill(
+    skillId: string,
+    scope: "workspace" | "global",
   ): Promise<EnableSkillResult> {
     const skill = this.registry.getSkill(skillId);
     if (!skill) {
@@ -404,21 +441,32 @@ export class SkillService {
    * Install a skill's CLI dependencies
    */
   public async installDependencies(skillId: string): Promise<InstallResult> {
-    const skill = this.registry.getSkill(skillId);
-    if (!skill) {
-      return {
-        success: false,
-        error: `Skill not found: ${skillId}`,
-      };
+    // Rate limit: prevent duplicate install operations from rapid clicks
+    const opKey = `install:${skillId}`;
+    if (this.inFlightOperations.has(opKey)) {
+      return { success: false, error: "Installation already in progress" };
     }
+    this.inFlightOperations.add(opKey);
 
-    if (!skill.dependencies) {
-      return {
-        success: true,
-      };
+    try {
+      const skill = this.registry.getSkill(skillId);
+      if (!skill) {
+        return {
+          success: false,
+          error: `Skill not found: ${skillId}`,
+        };
+      }
+
+      if (!skill.dependencies) {
+        return {
+          success: true,
+        };
+      }
+
+      return await this.installer.install(skill);
+    } finally {
+      this.inFlightOperations.delete(opKey);
     }
-
-    return this.installer.install(skill);
   }
 
   /**
@@ -607,48 +655,46 @@ export class SkillService {
     }
   }
 
-  // Shared promise for debounced saves - all callers await the same save
+  // Debounce state for saves - single gate promise pattern
   private pendingSavePromise: Promise<void> | null = null;
-  private pendingSaveResolvers: Array<() => void> = [];
+  private pendingSaveResolve: (() => void) | null = null;
 
   /**
    * Save skill states to VS Code configuration (debounced)
-   * All callers awaiting during debounce window will resolve when save completes.
+   * All callers awaiting during debounce window resolve when the write completes.
    */
   private saveSkillStates(): Promise<void> {
-    // Clear any existing timer
+    // Clear any pending timer — we'll reschedule
     if (this.saveDebounceTimer) {
       clearTimeout(this.saveDebounceTimer);
+      this.saveDebounceTimer = null;
     }
 
-    // Create or reuse the shared promise
+    // Create a single shared gate promise if not already pending
     if (!this.pendingSavePromise) {
       this.pendingSavePromise = new Promise<void>((resolve) => {
-        this.pendingSaveResolvers.push(resolve);
-      });
-    } else {
-      // Add this caller to the list of resolvers for the existing promise
-      this.pendingSavePromise = this.pendingSavePromise.then(() => {});
-      return new Promise<void>((resolve) => {
-        this.pendingSaveResolvers.push(resolve);
+        this.pendingSaveResolve = resolve;
       });
     }
 
-    const promise = this.pendingSavePromise;
-
+    // Schedule the actual write
     this.saveDebounceTimer = setTimeout(async () => {
       this.saveDebounceTimer = null;
+      const resolve = this.pendingSaveResolve!;
+      // Reset BEFORE await so new saves during write create a fresh promise
       this.pendingSavePromise = null;
+      this.pendingSaveResolve = null;
+
       try {
         await this.doSaveSkillStates();
+      } catch (err) {
+        this.logger.error("Failed to save skill states:", err);
       } finally {
-        // Resolve all waiting callers
-        const resolvers = this.pendingSaveResolvers.splice(0);
-        resolvers.forEach((r) => r());
+        resolve(); // All awaiting callers unblocked simultaneously
       }
     }, this.SAVE_DEBOUNCE_MS);
 
-    return promise;
+    return this.pendingSavePromise;
   }
 
   /**
@@ -946,21 +992,25 @@ export class SkillService {
       return { configured: false, missing: [] };
     }
 
-    const missing: string[] = [];
-
-    if (skill.config) {
-      for (const field of skill.config) {
-        if (field.required) {
-          const hasSecret = await this.getSecret(skillId, field.name);
-          const state = this.skillStates.get(skillId);
-          const hasConfig = state?.configValues?.[field.name];
-
-          if (!hasSecret && !hasConfig) {
-            missing.push(field.name);
-          }
-        }
-      }
+    const requiredFields = (skill.config ?? []).filter((f) => f.required);
+    if (requiredFields.length === 0) {
+      return { configured: true, missing: [] };
     }
+
+    const state = this.skillStates.get(skillId);
+
+    // Batch all secret lookups in parallel instead of sequential awaits
+    const secretChecks = await Promise.all(
+      requiredFields.map(async (field) => ({
+        name: field.name,
+        hasSecret: !!(await this.getSecret(skillId, field.name)),
+        hasConfig: !!state?.configValues?.[field.name],
+      })),
+    );
+
+    const missing = secretChecks
+      .filter(({ hasSecret, hasConfig }) => !hasSecret && !hasConfig)
+      .map(({ name }) => name);
 
     return {
       configured: missing.length === 0,
