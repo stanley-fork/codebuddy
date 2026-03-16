@@ -3,116 +3,300 @@ import * as fs from "fs";
 import * as path from "path";
 import { AnalyzerFactory } from "../services/analyzers/analyzer-factory";
 import { AnalysisResult as FileAnalysisResult } from "../services/analyzers/index";
+import {
+  TreeSitterAnalyzer,
+  TreeSitterAnalysisResult,
+} from "../services/analyzers/tree-sitter-analyzer";
+import { WorkerLogger } from "../infrastructure/logger/worker-logger";
+import { detectArchitecture } from "../services/analyzers/architecture-detector";
+import {
+  buildCallGraph,
+  disposeCallGraph,
+  type FileImportData,
+} from "../services/analyzers/call-graph";
+import { detectMiddleware } from "../services/analyzers/middleware-detector";
+import type {
+  CodeSnippet,
+  EndpointData,
+  ModelData,
+  AnalysisResult,
+  WorkerInputData,
+} from "../interfaces/analysis.interface";
 
-// Types matching the ones in the service, but adapted for Worker context
-export interface WorkerInputData {
-  workspacePath: string;
-  files: string[];
-}
+// Re-export for backward compatibility
+export type { CodeSnippet, AnalysisResult, WorkerInputData };
 
-export interface AnalysisResult {
-  frameworks: string[];
-  dependencies: Record<string, string>;
-  files: string[];
-  apiEndpoints: any[];
-  dataModels: any[];
-  databaseSchema: any;
-  domainRelationships: any[];
-  fileContents: Map<string, string>;
-  summary: {
-    totalFiles: number;
-    totalLines: number;
-    languageDistribution: Record<string, number>;
-    complexity: "low" | "medium" | "high";
-  };
-}
+// Export pure utility functions for testing
+export { extractTomlSection };
 
-class WorkerLogger {
-  debug(msg: string, data?: any) {
-    this.log("DEBUG", msg, data);
-  }
-  info(msg: string, data?: any) {
-    this.log("INFO", msg, data);
-  }
-  warn(msg: string, data?: any) {
-    this.log("WARN", msg, data);
-  }
-  error(msg: string, data?: any) {
-    this.log("ERROR", msg, data);
-  }
+// Module-level constants for memory bounds
+const MAX_SNIPPETS = 30;
+const MAX_SNIPPET_LINES = 75;
+const MAX_SNIPPET_CHARS = 3000;
+const MAX_IMPORT_FILES_FOR_CALL_GRAPH = 2000;
 
-  private log(level: string, message: string, data?: any) {
-    if (parentPort) {
-      parentPort.postMessage({ type: "LOG", level, message, data });
+// Important file patterns for code snippet collection
+// Defined at module level to avoid re-instantiation on each call
+// Uses [^\\/]* instead of .* to prevent catastrophic backtracking on adversarial paths
+const IMPORTANT_FILE_PATTERNS = [
+  // Entry points (must be in project source, not node_modules)
+  /(?:^|[\\/])src[\\/][^\\/]*index\.(ts|js|tsx|jsx)$/i,
+  /(?:^|[\\/])(?:src|lib|app)[\\/][^\\/]*main\.(ts|js|py|go|rs|java|php)$/i,
+  /(?:^|[\\/])(?:src|lib|app)[\\/][^\\/]*app\.(ts|js|tsx|jsx|py)$/i,
+  /(?:^|[\\/])(?:src|lib|app)[\\/][^\\/]*server\.(ts|js)$/i,
+  /(?:^|[\\/])(?:src|lib|app)[\\/][^\\/]*routes?\.(ts|js)$/i,
+  // Controllers, services, etc. - only in project dirs
+  /(?:^|[\\/])(?:src|lib|app)[\\/](?:[^\\/]+[\\/])*controllers?[\\/]/i,
+  /(?:^|[\\/])(?:src|lib|app)[\\/](?:[^\\/]+[\\/])*services?[\\/]/i,
+  /(?:^|[\\/])(?:src|lib|app)[\\/](?:[^\\/]+[\\/])*handlers?[\\/]/i,
+  /(?:^|[\\/])(?:src|lib|app)[\\/](?:[^\\/]+[\\/])*models?[\\/]/i,
+  /(?:^|[\\/])(?:src|lib|app)[\\/](?:[^\\/]+[\\/])*schemas?[\\/]/i,
+  // README files (root only, not from dependencies)
+  /(?:^|[\\/])readme\.(md|txt|rst)?$/i,
+  // Manifest files (root only)
+  /(?:^|[\\/])package\.json$/i,
+  /(?:^|[\\/])tsconfig\.json$/i,
+  /(?:^|[\\/])pyproject\.toml$/i,
+  /(?:^|[\\/])setup\.py$/i,
+  /(?:^|[\\/])requirements\.txt$/i,
+  /(?:^|[\\/])Pipfile$/i,
+  /(?:^|[\\/])go\.mod$/i,
+  /(?:^|[\\/])Cargo\.toml$/i,
+  /(?:^|[\\/])pom\.xml$/i,
+  /(?:^|[\\/])build\.gradle$/i,
+  /(?:^|[\\/])composer\.json$/i,
+];
+
+/**
+ * Safely extract lines from a TOML section without full comment stripping.
+ * Uses line-by-line state machine to avoid breaking URLs and quoted values containing '#'.
+ */
+function extractTomlSection(content: string, sectionName: string): string[] {
+  const lines = content.split("\n");
+  const result: string[] = [];
+  let inSection = false;
+  // Escape all regex special characters in section name
+  const escapedName = sectionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sectionHeader = new RegExp(`^\\[${escapedName}\\]\\s*(?:#.*)?$`);
+  // Match [header] but NOT [[array-table]] — array tables use double brackets
+  const regularHeader = /^\[[^[]/;
+  const arrayTableHeader = /^\[\[/;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (sectionHeader.test(trimmed)) {
+      inSection = true;
+      continue;
+    }
+
+    if (inSection) {
+      // Stop at next regular section or array-of-tables section
+      if (regularHeader.test(trimmed) || arrayTableHeader.test(trimmed)) {
+        break;
+      }
+      // Skip pure comment lines but include all other lines
+      if (trimmed && !trimmed.startsWith("#")) {
+        result.push(line);
+      }
     }
   }
+  return result;
+}
+
+/**
+ * Strip XML comments from content
+ */
+function stripXmlComments(content: string): string {
+  return content.replace(/<!--[\s\S]*?-->/g, "");
 }
 
 class CodebaseAnalysisTask {
-  private readonly logger = new WorkerLogger();
+  private readonly logger = WorkerLogger.initialize("CodebaseAnalysisWorker");
   private readonly analyzerFactory = new AnalyzerFactory();
+  private treeSitterAnalyzer: TreeSitterAnalyzer | null = null;
   private isCancelled = false;
 
   async performAnalysis(data: WorkerInputData): Promise<AnalysisResult> {
     this.reportProgress(0, 100, "Starting codebase analysis...");
 
-    const files = data.files;
-    this.reportProgress(10, 100, `Found ${files.length} files to analyze...`);
+    // Initialize Tree-sitter analyzer
+    if (data.grammarsPath) {
+      this.treeSitterAnalyzer = new TreeSitterAnalyzer(
+        data.grammarsPath,
+        this.logger,
+      );
+      try {
+        await this.treeSitterAnalyzer.initialize();
+        this.logger.info("Tree-sitter analyzer initialized");
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Failed to initialize Tree-sitter, falling back to regex: ${errorMessage}`,
+        );
+        this.treeSitterAnalyzer = null;
+      }
+    }
 
-    this.checkCancellation();
+    try {
+      const files = data.files;
+      this.reportProgress(10, 100, `Found ${files.length} files to analyze...`);
 
-    // Step 2: Analyze dependencies
-    const dependencies = await this.analyzeDependencies(data.workspacePath);
-    this.reportProgress(20, 100, "Analyzing dependencies...");
+      this.checkCancellation();
 
-    // Step 3: Detect frameworks
-    const frameworks = await this.detectFrameworks(files, dependencies);
-    this.reportProgress(30, 100, "Detecting frameworks...");
+      // Step 2: Analyze dependencies
+      const dependencies = await this.analyzeDependencies(data.workspacePath);
+      this.reportProgress(20, 100, "Analyzing dependencies...");
 
-    // Step 4: Analyze file contents
-    const analysisResults = await this.analyzeFileContents(files);
+      // Step 3: Detect frameworks
+      const frameworks = await this.detectFrameworks(files, dependencies);
+      this.reportProgress(30, 100, "Detecting frameworks...");
 
-    this.reportProgress(80, 100, "Analyzing database schema...");
+      // Step 4: Analyze file contents
+      const analysisResults = await this.analyzeFileContents(files);
 
-    // Step 5: Analyze database schema
-    const databaseSchema = await this.analyzeDatabaseSchema(
-      files,
-      analysisResults.fileContents,
-    );
+      this.reportProgress(80, 100, "Analyzing database schema...");
 
-    this.reportProgress(90, 100, "Building domain relationships...");
+      // Step 5: Analyze database schema (reads its own files to avoid accumulating all content in memory)
+      const databaseSchema = await this.analyzeDatabaseSchema(files);
 
-    // Step 6: Build domain relationships
-    const domainRelationships = this.buildDomainRelationships(
-      analysisResults.dataModels,
-      analysisResults.apiEndpoints,
-    );
+      this.reportProgress(90, 100, "Building domain relationships...");
 
-    // Step 7: Calculate complexity
-    const complexity = this.calculateComplexity(
-      files.length,
-      analysisResults.totalLines,
-      Object.keys(dependencies).length,
-    );
+      // Step 6: Build domain relationships
+      const domainRelationships = this.buildDomainRelationships(
+        analysisResults.dataModels,
+        analysisResults.apiEndpoints,
+      );
 
-    this.reportProgress(100, 100, "Analysis complete!");
+      // Step 7: Calculate complexity
+      const complexity = this.calculateComplexity(
+        files.length,
+        analysisResults.totalLines,
+        Object.keys(dependencies).length,
+      );
 
-    return {
-      frameworks,
-      dependencies,
-      files,
-      apiEndpoints: analysisResults.apiEndpoints,
-      dataModels: analysisResults.dataModels,
-      databaseSchema,
-      domainRelationships,
-      fileContents: analysisResults.fileContents,
-      summary: {
-        totalFiles: files.length,
-        totalLines: analysisResults.totalLines,
-        languageDistribution: analysisResults.languageDistribution,
-        complexity,
-      },
-    };
+      // Step 8: Phase 2 — Architecture detection, call graph, middleware
+      this.reportProgress(95, 100, "Detecting architecture patterns...");
+
+      const partialResult: AnalysisResult = {
+        frameworks,
+        dependencies,
+        files,
+        apiEndpoints: analysisResults.apiEndpoints,
+        dataModels: analysisResults.dataModels,
+        databaseSchema,
+        domainRelationships,
+        codeSnippets: analysisResults.codeSnippets,
+        summary: {
+          totalFiles: files.length,
+          totalLines: analysisResults.totalLines,
+          languageDistribution: analysisResults.languageDistribution,
+          complexity,
+        },
+      };
+
+      // Architecture detection (pure, no I/O)
+      try {
+        const archReport = detectArchitecture(partialResult);
+        partialResult.architectureReport = {
+          patterns: archReport.patterns.map((p) => ({
+            name: p.name,
+            confidence: p.confidence,
+            indicators: p.indicators,
+          })),
+          entryPoints: archReport.entryPoints,
+          projectType: archReport.projectType,
+        };
+        this.logger.info(
+          `Architecture: ${archReport.projectType}, ${archReport.patterns.length} patterns detected`,
+        );
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Architecture detection failed: ${msg}`);
+      }
+
+      // Call graph (from collected imports)
+      try {
+        if (analysisResults.fileImports.length > 0) {
+          const callGraph = buildCallGraph(
+            analysisResults.fileImports,
+            data.workspacePath,
+          );
+          // Release import data — the call graph now owns the topology
+          analysisResults.fileImports.length = 0;
+
+          // Extract summary values BEFORE disposing — disposeCallGraph zeroes the arrays
+          partialResult.callGraphSummary = {
+            entryPoints: callGraph.entryPoints.slice(0, 20),
+            hotNodes: [...callGraph.hotNodes],
+            circularDependencies: callGraph.circularDependencies.slice(0, 10),
+            edgeCount: callGraph.edges.length,
+            nodeCount: callGraph.nodes.size,
+          };
+          this.logger.info(
+            `Call graph: ${callGraph.nodes.size} nodes, ${callGraph.edges.length} edges, ${callGraph.circularDependencies.length} cycles`,
+          );
+
+          // Explicitly release node arrays and Map to reduce GC pressure in worker
+          disposeCallGraph(callGraph);
+        }
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Call graph build failed: ${msg}`);
+      }
+
+      // Middleware detection (from files + snippets)
+      try {
+        const mwReport = detectMiddleware(
+          files,
+          analysisResults.codeSnippets,
+          analysisResults.dataModels,
+        );
+
+        // Relativize file paths at serialization boundary to avoid
+        // leaking absolute filesystem paths into LLM context
+        const relativize = (fp: string): string =>
+          fp.startsWith(data.workspacePath)
+            ? fp.slice(data.workspacePath.length).replace(/^[\\/]/, "")
+            : path.basename(fp);
+
+        partialResult.middlewareSummary = {
+          middleware: mwReport.middleware.slice(0, 30).map((m) => ({
+            name: m.name,
+            type: m.type,
+            file: relativize(m.file),
+          })),
+          authStrategies: mwReport.authFlows.map((f) => f.strategy),
+          authFlows: mwReport.authFlows.map((f) => ({
+            strategy: f.strategy,
+            indicators: f.indicators,
+            files: f.files.map(relativize),
+          })),
+          errorHandlerCount: mwReport.errorHandlers.length,
+          errorHandlerFiles: mwReport.errorHandlers
+            .slice(0, 5)
+            .map((e) => relativize(e.file)),
+        };
+        this.logger.info(
+          `Middleware: ${mwReport.middleware.length} detected, ${mwReport.authFlows.length} auth strategies`,
+        );
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Middleware detection failed: ${msg}`);
+      }
+
+      this.reportProgress(100, 100, "Analysis complete!");
+
+      return partialResult;
+    } finally {
+      // Dispose Tree-sitter analyzer to release WASM memory
+      if (this.treeSitterAnalyzer) {
+        this.treeSitterAnalyzer.dispose();
+        this.treeSitterAnalyzer = null;
+        this.logger.debug("Tree-sitter analyzer disposed");
+      }
+    }
   }
 
   cancel() {
@@ -135,17 +319,22 @@ class CodebaseAnalysisTask {
   }
 
   private async analyzeFileContents(files: string[]): Promise<{
-    fileContents: Map<string, string>;
-    apiEndpoints: any[];
-    dataModels: any[];
+    codeSnippets: CodeSnippet[];
+    apiEndpoints: EndpointData[];
+    dataModels: ModelData[];
     totalLines: number;
     languageDistribution: Record<string, number>;
+    fileImports: FileImportData[];
   }> {
-    const fileContents = new Map<string, string>();
-    const apiEndpoints: any[] = [];
-    const dataModels: any[] = [];
+    const codeSnippets: CodeSnippet[] = [];
+    const apiEndpoints: EndpointData[] = [];
+    const dataModels: ModelData[] = [];
+    const fileImports: FileImportData[] = [];
     let totalLines = 0;
     const languageDistribution: Record<string, number> = {};
+
+    // Track important files for code snippets
+    // Uses module-level IMPORTANT_FILE_PATTERNS constant
 
     for (let i = 0; i < files.length; i++) {
       this.checkCancellation();
@@ -165,37 +354,204 @@ class CodebaseAnalysisTask {
       try {
         const fileAnalysis = await this.analyzeSingleFile(file);
 
-        fileContents.set(file, fileAnalysis.content);
         totalLines += fileAnalysis.lines;
 
         // Update language distribution
         const ext = path.extname(file).toLowerCase();
         languageDistribution[ext] = (languageDistribution[ext] || 0) + 1;
 
-        // Collect endpoints and models from legacy analysis
-        apiEndpoints.push(...fileAnalysis.endpoints);
-        dataModels.push(...fileAnalysis.models);
-
-        // Process structured analysis results
-        if (fileAnalysis.analysis) {
-          this.processStructuredAnalysis(
-            fileAnalysis.analysis,
+        // Process analysis results - prefer Tree-sitter, fallback to regex
+        if (fileAnalysis.treeSitterAnalysis) {
+          // Tree-sitter provided accurate results
+          this.processTreeSitterAnalysis(
+            fileAnalysis.treeSitterAnalysis,
             file,
             dataModels,
+            apiEndpoints,
           );
+
+          // Collect import data for call graph (Phase 2)
+          if (
+            fileAnalysis.treeSitterAnalysis.imports ||
+            fileAnalysis.treeSitterAnalysis.exports
+          ) {
+            if (fileImports.length < MAX_IMPORT_FILES_FOR_CALL_GRAPH) {
+              fileImports.push({
+                file,
+                imports: fileAnalysis.treeSitterAnalysis.imports || [],
+                exports: fileAnalysis.treeSitterAnalysis.exports || [],
+              });
+              if (fileImports.length === MAX_IMPORT_FILES_FOR_CALL_GRAPH) {
+                this.logger.warn(
+                  `Import collection capped at ${MAX_IMPORT_FILES_FOR_CALL_GRAPH} files; ` +
+                    `call graph may be incomplete for large codebases`,
+                );
+              }
+            }
+          }
+        } else {
+          // Fallback: collect regex-extracted endpoints and models
+          if (fileAnalysis.endpoints.length > 0) {
+            apiEndpoints.push(...fileAnalysis.endpoints);
+          }
+          if (fileAnalysis.models.length > 0) {
+            dataModels.push(...fileAnalysis.models);
+          }
+          // Process structured analysis for additional model info
+          if (fileAnalysis.analysis) {
+            this.processStructuredAnalysis(
+              fileAnalysis.analysis,
+              file,
+              dataModels,
+            );
+          }
         }
-      } catch (error: any) {
-        this.logger.warn(`Failed to analyze file ${file}:`, error);
+
+        // Collect code snippets for important files (bounded collection)
+        // node_modules/vendor already excluded by file list filtering,
+        // but patterns already require src/lib/app prefix so they won't match
+        if (
+          codeSnippets.length < MAX_SNIPPETS &&
+          fileAnalysis.content.length > 0 &&
+          IMPORTANT_FILE_PATTERNS.some((p) => p.test(file))
+        ) {
+          const language = this.getLanguageFromExt(ext);
+          // Truncate at collection time to bound memory usage
+          const truncatedContent =
+            fileAnalysis.content.length > MAX_SNIPPET_CHARS
+              ? this.truncateContent(fileAnalysis.content, MAX_SNIPPET_LINES)
+              : fileAnalysis.content;
+
+          codeSnippets.push({
+            file,
+            content: truncatedContent,
+            language,
+          });
+        }
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to analyze file ${file}: ${errorMessage}`);
       }
     }
 
+    // Log analysis summary
+    this.logger.info(
+      `File analysis complete: ${files.length} files, ${apiEndpoints.length} endpoints, ${dataModels.length} models, ${codeSnippets.length} code snippets`,
+    );
+
     return {
-      fileContents,
+      codeSnippets,
       apiEndpoints,
       dataModels,
       totalLines,
       languageDistribution,
+      fileImports,
     };
+  }
+
+  /**
+   * Get language identifier from file extension
+   */
+  private getLanguageFromExt(ext: string): string {
+    const extMap: Record<string, string> = {
+      ".ts": "typescript",
+      ".tsx": "typescript",
+      ".js": "javascript",
+      ".jsx": "javascript",
+      ".py": "python",
+      ".java": "java",
+      ".go": "go",
+      ".rs": "rust",
+      ".php": "php",
+    };
+    return extMap[ext] || "plaintext";
+  }
+
+  /**
+   * Truncate content to first N lines
+   */
+  private truncateContent(content: string, maxLines: number): string {
+    const lines = content.split("\n");
+    if (lines.length <= maxLines) return content;
+    return lines.slice(0, maxLines).join("\n") + "\n// ... (truncated)";
+  }
+
+  /**
+   * Process Tree-sitter analysis results
+   */
+  private processTreeSitterAnalysis(
+    analysis: TreeSitterAnalysisResult,
+    filePath: string,
+    dataModels: any[],
+    apiEndpoints: any[],
+  ): void {
+    const fileName = path.basename(filePath);
+    let extractedCount = 0;
+
+    // Extract classes as data models
+    if (analysis.classes) {
+      for (const classInfo of analysis.classes) {
+        dataModels.push({
+          name: classInfo.name,
+          type: classInfo.type,
+          file: filePath,
+          properties: classInfo.properties || [],
+          methods: classInfo.methods?.map((m) => m.name) || [],
+          extends: classInfo.extends,
+          implements: classInfo.implements || [],
+          startLine: classInfo.startLine,
+        });
+        extractedCount++;
+      }
+    }
+
+    // Extract React components
+    if (analysis.components) {
+      for (const component of analysis.components) {
+        dataModels.push({
+          name: component.name,
+          type: "react_component",
+          file: filePath,
+          startLine: component.startLine,
+        });
+        extractedCount++;
+      }
+    }
+
+    // Extract API endpoints from Tree-sitter analysis
+    if (analysis.endpoints) {
+      for (const endpoint of analysis.endpoints) {
+        apiEndpoints.push({
+          method: endpoint.method,
+          path: endpoint.path,
+          file: endpoint.file,
+          line: endpoint.line,
+        });
+      }
+    }
+
+    // Extract functions as potential utilities
+    if (analysis.functions) {
+      for (const func of analysis.functions) {
+        if (func.isExported) {
+          dataModels.push({
+            name: func.name,
+            type: "function",
+            file: filePath,
+            isExported: true,
+            startLine: func.startLine,
+          });
+          extractedCount++;
+        }
+      }
+    }
+
+    if (extractedCount > 0) {
+      this.logger.debug(
+        `Tree-sitter extracted ${extractedCount} models and ${analysis.endpoints?.length || 0} endpoints from ${fileName}`,
+      );
+    }
   }
 
   private async analyzeSingleFile(filePath: string): Promise<{
@@ -204,45 +560,71 @@ class CodebaseAnalysisTask {
     endpoints: any[];
     models: any[];
     analysis?: FileAnalysisResult;
+    treeSitterAnalysis?: TreeSitterAnalysisResult;
   }> {
     try {
       const content = await fs.promises.readFile(filePath, "utf-8");
       const lines = content.split("\n").length;
 
-      // Use analyzer factory for structured analysis
-      let analysis: FileAnalysisResult | undefined;
-      try {
-        const analyzer = this.analyzerFactory.getAnalyzer(filePath);
-        if (analyzer) {
-          analysis = analyzer.analyze(content, filePath);
+      // Try Tree-sitter analysis first (more accurate)
+      let treeSitterAnalysis: TreeSitterAnalysisResult | undefined;
+      if (this.treeSitterAnalyzer?.canAnalyze(filePath)) {
+        try {
+          treeSitterAnalysis = await this.treeSitterAnalyzer.analyze(
+            content,
+            filePath,
+          );
+        } catch (error: unknown) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Tree-sitter analysis failed for ${filePath}, falling back to regex: ${errorMessage}`,
+          );
         }
-      } catch (error: any) {
-        this.logger.warn(
-          `Failed to run structured analysis on ${filePath}:`,
-          error,
-        );
+      }
+
+      // Fallback to regex-based analyzer factory
+      let analysis: FileAnalysisResult | undefined;
+      if (!treeSitterAnalysis) {
+        try {
+          const analyzer = this.analyzerFactory.getAnalyzer(filePath);
+          if (analyzer) {
+            analysis = analyzer.analyze(content, filePath);
+          }
+        } catch (error: unknown) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Failed to run structured analysis on ${filePath}: ${errorMessage}`,
+          );
+        }
       }
 
       // Extract API endpoints and data models with error handling
+      // (regex-based fallback for endpoints not caught by Tree-sitter)
       let endpoints: any[] = [];
       let models: any[] = [];
 
-      try {
-        endpoints = this.extractApiEndpoints(filePath, content);
-      } catch (error: any) {
-        this.logger.warn(
-          `Failed to extract API endpoints from ${filePath}:`,
-          error,
-        );
-      }
+      if (!treeSitterAnalysis) {
+        try {
+          endpoints = this.extractApiEndpoints(filePath, content);
+        } catch (error: unknown) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Failed to extract API endpoints from ${filePath}: ${errorMessage}`,
+          );
+        }
 
-      try {
-        models = this.extractDataModels(filePath, content);
-      } catch (error: any) {
-        this.logger.warn(
-          `Failed to extract data models from ${filePath}:`,
-          error,
-        );
+        try {
+          models = this.extractDataModels(filePath, content);
+        } catch (error: unknown) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Failed to extract data models from ${filePath}: ${errorMessage}`,
+          );
+        }
       }
 
       return {
@@ -251,13 +633,12 @@ class CodebaseAnalysisTask {
         endpoints,
         models,
         analysis,
+        treeSitterAnalysis,
       };
-    } catch (error: any) {
-      // simplified error handling for worker
-      if (error instanceof Error) {
-        // ... keep logic if needed or simplify ...
-      }
-      throw new Error(`Failed to analyze file ${filePath}`);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to analyze file ${filePath}: ${errorMessage}`);
     }
   }
 
@@ -341,7 +722,7 @@ class CodebaseAnalysisTask {
   ): Promise<Record<string, string>> {
     const dependencies: Record<string, string> = {};
 
-    // Analyze package.json
+    // === JavaScript/TypeScript: package.json ===
     const packageJsonPath = path.join(workspacePath, "package.json");
     if (fs.existsSync(packageJsonPath)) {
       try {
@@ -350,27 +731,222 @@ class CodebaseAnalysisTask {
         );
         Object.assign(dependencies, packageJson.dependencies || {});
         Object.assign(dependencies, packageJson.devDependencies || {});
-      } catch (error: any) {
-        this.logger.warn("Failed to analyze package.json:", error);
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to analyze package.json: ${errorMessage}`);
       }
     }
 
-    // Analyze requirements.txt (Python)
+    // === Python: requirements.txt ===
     const requirementsPath = path.join(workspacePath, "requirements.txt");
     if (fs.existsSync(requirementsPath)) {
       try {
         const content = await fs.promises.readFile(requirementsPath, "utf-8");
         const lines = content
           .split("\n")
-          .filter((line) => line.trim() && !line.startsWith("#"));
+          .filter(
+            (line) =>
+              line.trim() && !line.startsWith("#") && !line.startsWith("-"),
+          );
         for (const line of lines) {
-          const [name, version] = line.split("==");
-          if (name && version) {
-            dependencies[name.trim()] = version.trim();
+          // Handle various formats: pkg==1.0, pkg>=1.0, pkg~=1.0, pkg[extra]>=1.0
+          const match = line.match(
+            /^([a-zA-Z0-9_-]+)(?:\[.*?\])?(?:([=<>~!]+)(.+))?/,
+          );
+          if (match) {
+            const name = match[1].trim();
+            const version = match[3]?.trim() || "*";
+            dependencies[name] = version;
           }
         }
-      } catch (error: any) {
-        this.logger.warn("Failed to analyze requirements.txt:", error);
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to analyze requirements.txt: ${errorMessage}`);
+      }
+    }
+
+    // === Python: pyproject.toml ===
+    const pyprojectPath = path.join(workspacePath, "pyproject.toml");
+    if (fs.existsSync(pyprojectPath)) {
+      try {
+        const rawContent = await fs.promises.readFile(pyprojectPath, "utf-8");
+        // Use section extraction instead of full comment stripping to avoid breaking URLs/hashes
+        const depsLines = extractTomlSection(
+          rawContent,
+          "project.dependencies",
+        );
+        for (const line of depsLines) {
+          const match = line.match(
+            /["']([a-zA-Z0-9_-]+)(?:\[.*?\])?(?:([=<>~!]+)(.+?))?["']/,
+          );
+          if (match) {
+            dependencies[match[1]] = match[3]?.trim() || "*";
+          }
+        }
+        // Also check [tool.poetry.dependencies] for Poetry projects
+        const poetryLines = extractTomlSection(
+          rawContent,
+          "tool.poetry.dependencies",
+        );
+        for (const line of poetryLines) {
+          const match = line.match(
+            /^([a-zA-Z0-9_-]+)\s*=\s*["']?([^"'\n]+)["']?/,
+          );
+          if (match && match[1] !== "python") {
+            dependencies[match[1]] = match[2].trim();
+          }
+        }
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to analyze pyproject.toml: ${errorMessage}`);
+      }
+    }
+
+    // === Go: go.mod ===
+    const goModPath = path.join(workspacePath, "go.mod");
+    if (fs.existsSync(goModPath)) {
+      try {
+        const content = await fs.promises.readFile(goModPath, "utf-8");
+        // Extract module name for logging context (not stored in dependencies to avoid polluting framework detection)
+        const moduleMatch = content.match(/^module\s+(.+)$/m);
+        if (moduleMatch) {
+          this.logger.debug(`Go module detected: ${moduleMatch[1].trim()}`);
+        }
+        // Extract require statements
+        const requireBlock = content.match(/require\s*\(([\s\S]*?)\)/);
+        if (requireBlock) {
+          const lines = requireBlock[1].split("\n");
+          for (const line of lines) {
+            const match = line.match(/^\s*([^\s]+)\s+v?([^\s/]+)/);
+            if (match) {
+              dependencies[match[1]] = match[2];
+            }
+          }
+        }
+        // Also handle single-line requires
+        const singleRequires = content.matchAll(
+          /^require\s+([^\s]+)\s+v?([^\s]+)$/gm,
+        );
+        for (const match of singleRequires) {
+          dependencies[match[1]] = match[2];
+        }
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to analyze go.mod: ${errorMessage}`);
+      }
+    }
+
+    // === Rust: Cargo.toml ===
+    const cargoPath = path.join(workspacePath, "Cargo.toml");
+    if (fs.existsSync(cargoPath)) {
+      try {
+        const rawContent = await fs.promises.readFile(cargoPath, "utf-8");
+        // Use section extraction instead of full comment stripping
+        const depsLines = extractTomlSection(rawContent, "dependencies");
+        for (const line of depsLines) {
+          // Handle: pkg = "1.0" or pkg = { version = "1.0", ... }
+          const simpleMatch = line.match(
+            /^([a-zA-Z0-9_-]+)\s*=\s*["']([^"']+)["']/,
+          );
+          const complexMatch = line.match(
+            /^([a-zA-Z0-9_-]+)\s*=\s*\{.*version\s*=\s*["']([^"']+)["']/,
+          );
+          if (simpleMatch) {
+            dependencies[simpleMatch[1]] = simpleMatch[2];
+          } else if (complexMatch) {
+            dependencies[complexMatch[1]] = complexMatch[2];
+          }
+        }
+        // Also check [dev-dependencies]
+        const devDepsLines = extractTomlSection(rawContent, "dev-dependencies");
+        for (const line of devDepsLines) {
+          const simpleMatch = line.match(
+            /^([a-zA-Z0-9_-]+)\s*=\s*["']([^"']+)["']/,
+          );
+          if (simpleMatch) {
+            dependencies[simpleMatch[1]] = simpleMatch[2];
+          }
+        }
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to analyze Cargo.toml: ${errorMessage}`);
+      }
+    }
+
+    // === Java: pom.xml (Maven) ===
+    const pomPath = path.join(workspacePath, "pom.xml");
+    if (fs.existsSync(pomPath)) {
+      try {
+        const rawContent = await fs.promises.readFile(pomPath, "utf-8");
+        // Strip XML comments before parsing
+        const content = stripXmlComments(rawContent);
+        // Two-pass extraction to prevent cross-block matching with greedy regex
+        const blockRegex = /<dependency>([\s\S]*?)<\/dependency>/g;
+        for (const blockMatch of content.matchAll(blockRegex)) {
+          const block = blockMatch[1];
+          const groupId = block
+            .match(/<groupId>([^<]+)<\/groupId>/)?.[1]
+            ?.trim();
+          const artifactId = block
+            .match(/<artifactId>([^<]+)<\/artifactId>/)?.[1]
+            ?.trim();
+          const version = block
+            .match(/<version>([^<]+)<\/version>/)?.[1]
+            ?.trim();
+          if (groupId && artifactId) {
+            dependencies[`${groupId}:${artifactId}`] = version || "*";
+          }
+        }
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to analyze pom.xml: ${errorMessage}`);
+      }
+    }
+
+    // === Java: build.gradle (Gradle) ===
+    const gradlePath = path.join(workspacePath, "build.gradle");
+    if (fs.existsSync(gradlePath)) {
+      try {
+        const content = await fs.promises.readFile(gradlePath, "utf-8");
+        // Extract implementation/compile dependencies
+        const depMatches = content.matchAll(
+          /(?:implementation|compile|api|testImplementation)\s*[("']([^"'()]+)[)"']/g,
+        );
+        for (const match of depMatches) {
+          const dep = match[1];
+          // Parse group:artifact:version format
+          const parts = dep.split(":");
+          if (parts.length >= 2) {
+            const name = `${parts[0]}:${parts[1]}`;
+            dependencies[name] = parts[2] || "*";
+          }
+        }
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to analyze build.gradle: ${errorMessage}`);
+      }
+    }
+
+    // === PHP: composer.json ===
+    const composerPath = path.join(workspacePath, "composer.json");
+    if (fs.existsSync(composerPath)) {
+      try {
+        const composer = JSON.parse(
+          await fs.promises.readFile(composerPath, "utf-8"),
+        );
+        Object.assign(dependencies, composer.require || {});
+        Object.assign(dependencies, composer["require-dev"] || {});
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to analyze composer.json: ${errorMessage}`);
       }
     }
 
@@ -382,38 +958,186 @@ class CodebaseAnalysisTask {
     dependencies: Record<string, string>,
   ): Promise<string[]> {
     const frameworks: Set<string> = new Set();
-    const frameworkMap: Record<string, string> = {
+
+    // JavaScript/TypeScript frameworks
+    const jsFrameworks: Record<string, string> = {
       react: "React",
       vue: "Vue.js",
-      angular: "Angular",
+      "@angular/core": "Angular",
       svelte: "Svelte",
       next: "Next.js",
       nuxt: "Nuxt.js",
       express: "Express.js",
       fastify: "Fastify",
-      nestjs: "NestJS",
-      django: "Django",
-      flask: "Flask",
-      spring: "Spring Boot",
-      laravel: "Laravel",
-      symfony: "Symfony",
+      "@nestjs/core": "NestJS",
+      hono: "Hono",
+      koa: "Koa",
+      "@hapi/hapi": "Hapi",
+      "socket.io": "Socket.io",
+      prisma: "Prisma",
+      typeorm: "TypeORM",
+      mongoose: "Mongoose",
+      sequelize: "Sequelize",
+      drizzle: "Drizzle ORM",
+      webpack: "Webpack",
+      vite: "Vite",
+      esbuild: "esbuild",
+      rollup: "Rollup",
+      electron: "Electron",
+      "react-native": "React Native",
     };
 
-    for (const [dep, framework] of Object.entries(frameworkMap)) {
+    // Python frameworks (by package name)
+    const pyFrameworks: Record<string, string> = {
+      django: "Django",
+      flask: "Flask",
+      fastapi: "FastAPI",
+      starlette: "Starlette",
+      tornado: "Tornado",
+      pyramid: "Pyramid",
+      aiohttp: "aiohttp",
+      sqlalchemy: "SQLAlchemy",
+      alembic: "Alembic",
+      celery: "Celery",
+      pytest: "pytest",
+      pandas: "pandas",
+      numpy: "NumPy",
+      tensorflow: "TensorFlow",
+      torch: "PyTorch",
+      scikit_learn: "scikit-learn",
+    };
+
+    // Go frameworks (by module path patterns)
+    const goFrameworks: Record<string, string> = {
+      "github.com/gin-gonic/gin": "Gin",
+      "github.com/labstack/echo": "Echo",
+      "github.com/go-chi/chi": "Chi",
+      "github.com/gofiber/fiber": "Fiber",
+      "github.com/gorilla/mux": "Gorilla Mux",
+      "gorm.io/gorm": "GORM",
+      "github.com/jmoiron/sqlx": "sqlx",
+    };
+
+    // Rust frameworks (by crate name)
+    const rustFrameworks: Record<string, string> = {
+      actix_web: "Actix-web",
+      axum: "Axum",
+      rocket: "Rocket",
+      warp: "Warp",
+      tokio: "Tokio",
+      diesel: "Diesel",
+      sqlx: "SQLx",
+      serde: "Serde",
+    };
+
+    // Java frameworks (by artifact patterns)
+    const javaFrameworks: Record<string, string> = {
+      "spring-boot": "Spring Boot",
+      "spring-webmvc": "Spring MVC",
+      "spring-data": "Spring Data",
+      hibernate: "Hibernate",
+      "jakarta.persistence": "JPA",
+      "javax.persistence": "JPA",
+      quarkus: "Quarkus",
+      micronaut: "Micronaut",
+      "jersey-server": "Jersey (JAX-RS)",
+    };
+
+    // PHP frameworks (by package name)
+    const phpFrameworks: Record<string, string> = {
+      "laravel/framework": "Laravel",
+      "symfony/framework-bundle": "Symfony",
+      "slim/slim": "Slim",
+      "cakephp/cakephp": "CakePHP",
+      "yiisoft/yii2": "Yii",
+      "doctrine/orm": "Doctrine ORM",
+    };
+
+    // Check JS/TS dependencies
+    for (const [dep, framework] of Object.entries(jsFrameworks)) {
       if (dependencies[dep] || dependencies[`@${dep}`]) {
         frameworks.add(framework);
       }
     }
 
+    // Check Python dependencies (case insensitive, underscore/hyphen agnostic)
+    for (const [dep, framework] of Object.entries(pyFrameworks)) {
+      const normalizedDep = dep.toLowerCase().replace(/_/g, "-");
+      const found = Object.keys(dependencies).some(
+        (d) => d.toLowerCase().replace(/_/g, "-") === normalizedDep,
+      );
+      if (found) {
+        frameworks.add(framework);
+      }
+    }
+
+    // Check Go dependencies
+    for (const [dep, framework] of Object.entries(goFrameworks)) {
+      if (Object.keys(dependencies).some((d) => d.includes(dep))) {
+        frameworks.add(framework);
+      }
+    }
+
+    // Check Rust dependencies
+    for (const [dep, framework] of Object.entries(rustFrameworks)) {
+      const normalizedDep = dep.toLowerCase().replace(/_/g, "-");
+      if (
+        Object.keys(dependencies).some(
+          (d) => d.toLowerCase().replace(/_/g, "-") === normalizedDep,
+        )
+      ) {
+        frameworks.add(framework);
+      }
+    }
+
+    // Check Java dependencies
+    for (const [dep, framework] of Object.entries(javaFrameworks)) {
+      if (
+        Object.keys(dependencies).some((d) => d.toLowerCase().includes(dep))
+      ) {
+        frameworks.add(framework);
+      }
+    }
+
+    // Check PHP dependencies
+    for (const [dep, framework] of Object.entries(phpFrameworks)) {
+      if (dependencies[dep]) {
+        frameworks.add(framework);
+      }
+    }
+
+    // File-based framework detection
     const filePatterns: Record<string, string> = {
+      // JavaScript/TypeScript
       "next.config.js": "Next.js",
+      "next.config.ts": "Next.js",
+      "next.config.mjs": "Next.js",
       "nuxt.config.js": "Nuxt.js",
+      "nuxt.config.ts": "Nuxt.js",
       "vue.config.js": "Vue.js",
       "angular.json": "Angular",
       "svelte.config.js": "Svelte",
+      "svelte.config.ts": "Svelte",
+      "vite.config.js": "Vite",
+      "vite.config.ts": "Vite",
+      "webpack.config.js": "Webpack",
+      "tailwind.config.js": "Tailwind CSS",
+      "tailwind.config.ts": "Tailwind CSS",
+      // Python
       "manage.py": "Django",
+      "wsgi.py": "WSGI Application",
+      "asgi.py": "ASGI Application",
+      // PHP
       artisan: "Laravel",
       "composer.json": "PHP/Composer",
+      // Go
+      "go.mod": "Go Modules",
+      // Rust
+      "Cargo.toml": "Rust/Cargo",
+      // Java
+      "pom.xml": "Maven",
+      "build.gradle": "Gradle",
+      "settings.gradle": "Gradle",
     };
 
     for (const file of files) {
@@ -513,30 +1237,54 @@ class CodebaseAnalysisTask {
 
   private async analyzeDatabaseSchema(
     files: string[],
-    fileContents: Map<string, string>,
-  ): Promise<any> {
-    const schema = {
-      tables: [] as any[],
-      relationships: [] as any[],
+  ): Promise<Record<string, unknown>> {
+    const schema: Record<string, unknown> = {
+      tables: [] as { name: string; file: string; columns: string[] }[],
+      relationships: [] as string[],
       migrations: [] as string[],
     };
 
-    for (const [filePath, content] of fileContents) {
+    // Only read files relevant to database schema to avoid memory bloat
+    const schemaFiles = files.filter((f) => {
+      const filename = path.basename(f).toLowerCase();
+      return (
+        filename.includes("migration") ||
+        filename.endsWith(".sql") ||
+        filename === "schema.prisma"
+      );
+    });
+
+    for (const filePath of schemaFiles) {
       const filename = path.basename(filePath).toLowerCase();
 
       if (filename.includes("migration") || filename.endsWith(".sql")) {
-        schema.migrations.push(filePath);
+        (schema.migrations as string[]).push(filePath);
       }
 
       if (filename === "schema.prisma") {
-        const modelRegex = /model\s+(\w+)\s*{([^}]+)}/gi;
-        let match;
-        while ((match = modelRegex.exec(content)) !== null) {
-          schema.tables.push({
-            name: match[1],
-            file: filePath,
-            columns: this.extractPrismaColumns(match[2]),
-          });
+        try {
+          const content = await fs.promises.readFile(filePath, "utf-8");
+          const modelRegex = /model\s+(\w+)\s*{([^}]+)}/gi;
+          let match;
+          while ((match = modelRegex.exec(content)) !== null) {
+            (
+              schema.tables as {
+                name: string;
+                file: string;
+                columns: string[];
+              }[]
+            ).push({
+              name: match[1],
+              file: filePath,
+              columns: this.extractPrismaColumns(match[2]),
+            });
+          }
+        } catch (error: unknown) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Failed to read schema file ${filePath}: ${errorMessage}`,
+          );
         }
       }
     }
@@ -600,26 +1348,99 @@ class CodebaseAnalysisTask {
   }
 }
 
+/**
+ * Validate and sanitize worker input to prevent path traversal.
+ * All file paths must be absolute and reside within the workspace.
+ */
+function validateWorkerInput(payload: unknown): WorkerInputData {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Invalid payload: expected object");
+  }
+  const data = payload as Record<string, unknown>;
+
+  if (
+    typeof data.workspacePath !== "string" ||
+    !path.isAbsolute(data.workspacePath)
+  ) {
+    throw new Error(`Invalid workspacePath: must be an absolute path`);
+  }
+
+  if (!Array.isArray(data.files)) {
+    throw new Error("Invalid payload: files must be an array");
+  }
+
+  // Validate each file stays within workspacePath
+  const resolved = path.resolve(data.workspacePath);
+  for (const file of data.files as string[]) {
+    if (
+      !path.resolve(file).startsWith(resolved + path.sep) &&
+      path.resolve(file) !== resolved
+    ) {
+      throw new Error(`Security: file path escapes workspace: ${file}`);
+    }
+  }
+
+  return {
+    workspacePath: resolved,
+    files: data.files as string[],
+    grammarsPath: validateGrammarsPath(data.grammarsPath),
+  };
+}
+
+/**
+ * Validate grammarsPath: must be absolute and contain expected directory segments.
+ * Prevents loading arbitrary WASM files via path traversal.
+ */
+function validateGrammarsPath(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+
+  const resolved = path.resolve(value);
+
+  if (!path.isAbsolute(resolved)) {
+    throw new Error("Invalid grammarsPath: must be absolute");
+  }
+
+  // Must end with 'grammars' or contain a 'grammars' segment as a sanity check.
+  // A bare 'dist' segment alone is too permissive.
+  const segments = resolved.split(path.sep);
+  const hasExpectedSegment =
+    segments[segments.length - 1] === "grammars" ||
+    segments.some((s) => s === "grammars");
+  if (!hasExpectedSegment) {
+    throw new Error(
+      `Invalid grammarsPath: unexpected path structure: ${resolved}`,
+    );
+  }
+
+  return resolved;
+}
+
 // Logic to handle messages
 if (!isMainThread && parentPort) {
   const task = new CodebaseAnalysisTask();
 
-  parentPort.on("message", async (message: { type: string; payload: any }) => {
-    if (message.type === "ANALYZE_CODEBASE") {
-      try {
-        const result = await task.performAnalysis(message.payload);
-        parentPort?.postMessage({
-          type: "ANALYSIS_COMPLETE",
-          payload: result,
-        });
-      } catch (error: any) {
-        parentPort?.postMessage({
-          type: "ANALYSIS_ERROR",
-          error: error.message || String(error),
-        });
+  parentPort.on(
+    "message",
+    async (message: { type: string; payload: unknown }) => {
+      if (message.type === "ANALYZE_CODEBASE") {
+        try {
+          const validatedInput = validateWorkerInput(message.payload);
+          const result = await task.performAnalysis(validatedInput);
+          parentPort?.postMessage({
+            type: "ANALYSIS_COMPLETE",
+            payload: result,
+          });
+        } catch (error: unknown) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          parentPort?.postMessage({
+            type: "ANALYSIS_ERROR",
+            error: errorMessage,
+          });
+        }
+      } else if (message.type === "CANCEL") {
+        task.cancel();
       }
-    } else if (message.type === "CANCEL") {
-      task.cancel();
-    }
-  });
+    },
+  );
 }

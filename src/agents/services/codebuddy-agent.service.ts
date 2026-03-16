@@ -7,7 +7,14 @@ import {
   MemorySaver,
   BaseCheckpointSaver,
 } from "@langchain/langgraph";
-import { trace, Span, SpanStatusCode } from "@opentelemetry/api";
+import {
+  trace,
+  context,
+  Span,
+  SpanStatusCode,
+  Tracer,
+  Context,
+} from "@opentelemetry/api";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../infrastructure/logger/logger";
 import { createAdvancedDeveloperAgent } from "../developer/agent";
@@ -30,12 +37,28 @@ import { CostTrackingService } from "../../services/cost-tracking.service";
 import { CheckpointService } from "../../services/checkpoint.service";
 import { getGenerativeAiModel, getAPIKeyAndModel } from "../../utils/utils";
 import { Orchestrator } from "../../orchestrator";
-import { AgentSafetyGuard } from "./agent-safety-guard";
+import {
+  AgentSafetyGuard,
+  readAgentSafetyLimits,
+  type AgentSafetyLimits,
+} from "./agent-safety-guard";
 import { ConsentManager } from "./consent-manager";
 import { ContentNormalizer } from "./content-normalizer";
+import { ErrorRecoveryService } from "./error-recovery.service";
+import {
+  ProviderFailoverService,
+  classifyFailoverReason,
+} from "../../services/provider-failover.service";
+import { TOOL_NAMES } from "../constants/tool-names";
 
 /** Typed alias for the async iterator from a LangGraph agent stream. */
 type AgentStreamIterator = AsyncIterator<unknown>;
+
+/** Non-optional bundle for propagating OTel tracing through sub-generators. */
+interface TraceBundle {
+  tracer: Tracer;
+  parentCtx: Context;
+}
 
 // Guaranteed fallback — extracted as a named constant for compile-time safety
 const DEFAULT_TOOL_DESCRIPTION: IToolDescription = Object.freeze({
@@ -46,87 +69,87 @@ const DEFAULT_TOOL_DESCRIPTION: IToolDescription = Object.freeze({
 
 // Tool descriptions for user-friendly feedback
 const TOOL_DESCRIPTIONS: Record<string, IToolDescription> = {
-  run_command: {
+  [TOOL_NAMES.RUN_COMMAND]: {
     name: "Terminal",
     description: "Running command...",
     activityType: "executing",
   },
-  run_terminal_command: {
+  [TOOL_NAMES.RUN_TERMINAL_COMMAND]: {
     name: "Terminal",
     description: "Executing terminal command...",
     activityType: "executing",
   },
-  command: {
+  [TOOL_NAMES.COMMAND]: {
     name: "Terminal",
     description: "Running command...",
     activityType: "executing",
   },
-  web_search: {
+  [TOOL_NAMES.WEB_SEARCH]: {
     name: "Web Search",
     description: "Searching the web for relevant information...",
     activityType: "searching",
   },
-  read_file: {
+  [TOOL_NAMES.READ_FILE]: {
     name: "File Reader",
     description: "Reading file contents...",
     activityType: "reading",
   },
-  analyze_files_for_question: {
+  [TOOL_NAMES.ANALYZE_FILES]: {
     name: "Code Analyzer",
     description: "Analyzing code files...",
     activityType: "analyzing",
   },
-  think: {
+  [TOOL_NAMES.THINK]: {
     name: "Reasoning",
     description: "Thinking through the problem...",
     activityType: "thinking",
   },
-  write_file: {
+  [TOOL_NAMES.WRITE_FILE]: {
     name: "File Writer",
     description: "Writing to file...",
     activityType: "working",
   },
-  edit_file: {
+  [TOOL_NAMES.EDIT_FILE]: {
     name: "File Editor",
     description: "Editing file contents...",
     activityType: "working",
   },
-  search_codebase: {
+  [TOOL_NAMES.SEARCH_CODEBASE]: {
     name: "Codebase Search",
     description: "Searching the codebase...",
     activityType: "searching",
   },
-  manage_tasks: {
+  [TOOL_NAMES.MANAGE_TASKS]: {
     name: "Task Manager",
     description: "Managing tasks...",
     activityType: "working",
   },
-  manage_core_memory: {
+  [TOOL_NAMES.MANAGE_CORE_MEMORY]: {
     name: "Core Memory",
     description: "Managing memory...",
     activityType: "working",
   },
-  git_diff: {
+  [TOOL_NAMES.GIT_DIFF]: {
     name: "Git Diff",
     description: "Checking file changes...",
     activityType: "reviewing",
   },
-  git_log: {
+  [TOOL_NAMES.GIT_LOG]: {
     name: "Git Log",
     description: "Reviewing commit history...",
     activityType: "reviewing",
   },
-  git_branch: {
+  [TOOL_NAMES.GIT_BRANCH]: {
     name: "Git Branch",
     description: "Managing branches...",
     activityType: "working",
   },
-  run_tests: {
+  [TOOL_NAMES.RUN_TESTS]: {
     name: "Test Runner",
     description: "Running tests...",
     activityType: "executing",
   },
-  list_directory: {
+  [TOOL_NAMES.LIST_DIRECTORY]: {
     name: "Directory Listing",
     description: "Exploring directory structure...",
     activityType: "reading",
@@ -222,12 +245,12 @@ export function summarizeToolResultContent(
       raw.length > MAX_CONTENT_LENGTH ? raw.slice(0, MAX_CONTENT_LENGTH) : raw;
   }
 
-  if (toolName === "read_file") {
+  if (toolName === TOOL_NAMES.READ_FILE) {
     const lines = contentStr.split("\n").length;
     return `Read ${lines} lines`;
   }
 
-  if (toolName === "search_codebase") {
+  if (toolName === TOOL_NAMES.SEARCH_CODEBASE) {
     const matchCount = (contentStr.match(/match/gi) || []).length;
     return matchCount > 0 ? `Found ${matchCount} matches` : "Search complete";
   }
@@ -237,6 +260,18 @@ export function summarizeToolResultContent(
   }
 
   return "Completed successfully";
+}
+
+/**
+ * Returns true if the API key looks like a real credential
+ * rather than a placeholder or empty value.
+ */
+function isValidApiKey(key: string | undefined): key is string {
+  if (!key || key.trim().length === 0) return false;
+  if (key === "apiKey") return false; // VS Code settings default placeholder
+  if (key === "YOUR_API_KEY_HERE") return false; // Common copy-paste mistake
+  if (key.length < 8) return false; // Too short to be real
+  return true;
 }
 
 export class CodeBuddyAgentService {
@@ -257,7 +292,10 @@ export class CodeBuddyAgentService {
   private readonly safetyGuard: AgentSafetyGuard;
   private readonly consentManager: ConsentManager;
   private readonly contentNormalizer: ContentNormalizer;
+  private readonly errorRecovery: ErrorRecoveryService;
+  private readonly failoverService: ProviderFailoverService;
   private readonly modelChangeDisposable: { dispose(): void };
+  private readonly failoverConfigDisposable: { dispose(): void };
   private static readonly MAX_WARNED_TOOLS = 100;
   private static readonly MAX_CACHED_AGENTS = 3;
   private readonly warnedUnknownTools = new Set<string>();
@@ -273,6 +311,21 @@ export class CodeBuddyAgentService {
     this.safetyGuard = new AgentSafetyGuard();
     this.consentManager = new ConsentManager();
     this.contentNormalizer = new ContentNormalizer();
+    this.errorRecovery = new ErrorRecoveryService();
+    this.failoverService = ProviderFailoverService.getInstance();
+    this.initFailoverChain();
+
+    // Watch for failover/provider config changes (registered once, not per-init)
+    this.failoverConfigDisposable = vscode.workspace.onDidChangeConfiguration(
+      (e) => {
+        if (
+          e.affectsConfiguration("codebuddy.failover") ||
+          e.affectsConfiguration("generativeAi.option")
+        ) {
+          this.initFailoverChain();
+        }
+      },
+    );
 
     // Invalidate cached agents when the user switches model/provider
     this.modelChangeDisposable =
@@ -288,6 +341,51 @@ export class CodeBuddyAgentService {
 
     // Track every file the agent edits so checkpoints cover them
     this.initFileTracking();
+  }
+
+  /**
+   * Read the failover chain from VS Code settings.
+   * If empty/unconfigured, auto-detect from providers that have API keys.
+   */
+  private initFailoverChain(): void {
+    const enabled = vscode.workspace
+      .getConfiguration("codebuddy.failover")
+      .get<boolean>("enabled", true);
+    if (!enabled) return;
+
+    const configured = vscode.workspace
+      .getConfiguration("codebuddy.failover")
+      .get<string[]>("providers", []);
+
+    if (configured.length > 0) {
+      this.failoverService.setFallbackChain(configured);
+    } else {
+      // Auto-detect: check which providers have API keys configured
+      const allProviders = [
+        "Anthropic",
+        "OpenAI",
+        "Gemini",
+        "Groq",
+        "Deepseek",
+        "Qwen",
+        "GLM",
+        "Local",
+      ];
+      const available: string[] = [];
+      for (const p of allProviders) {
+        try {
+          const cfg = getAPIKeyAndModel(p.toLowerCase());
+          if (isValidApiKey(cfg.apiKey)) {
+            available.push(p);
+          }
+        } catch {
+          // Not configured — skip
+        }
+      }
+      if (available.length > 1) {
+        this.failoverService.setFallbackChain(available);
+      }
+    }
   }
 
   /**
@@ -441,31 +539,86 @@ export class CodeBuddyAgentService {
     let description = toolInfo.description;
 
     // Customize description based on tool args
-    if (toolName === "web_search" && typeof args?.query === "string") {
+    if (toolName === TOOL_NAMES.WEB_SEARCH && typeof args?.query === "string") {
       const q = args.query;
       description = `Searching the web for: "${q.substring(0, 50)}${q.length > 50 ? "..." : ""}"`;
-    } else if (toolName === "think" && typeof args?.thought === "string") {
-      description = args.thought;
-    } else if (toolName === "read_file" && typeof args?.path === "string") {
-      description = `Reading file: ${args.path.split("/").pop()}`;
     } else if (
-      toolName === "analyze_files_for_question" &&
+      toolName === TOOL_NAMES.THINK &&
+      typeof args?.thought === "string"
+    ) {
+      description = args.thought;
+    } else if (
+      toolName === TOOL_NAMES.READ_FILE &&
+      typeof args?.path === "string"
+    ) {
+      const fileName = (args.path as string).split("/").pop();
+      description = `Reading ${fileName}`;
+    } else if (
+      toolName === TOOL_NAMES.READ_FILE &&
+      typeof args?.file_path === "string"
+    ) {
+      const fileName = (args.file_path as string).split("/").pop();
+      description = `Reading ${fileName}`;
+    } else if (
+      toolName === TOOL_NAMES.ANALYZE_FILES &&
       Array.isArray(args?.files)
     ) {
-      description = `Analyzing ${args.files.length} file(s)...`;
+      const names = (args.files as string[])
+        .slice(0, 3)
+        .map((f: string) => f.split("/").pop())
+        .join(", ");
+      const suffix =
+        args.files.length > 3 ? ` +${args.files.length - 3} more` : "";
+      description = `Analyzing ${names}${suffix}`;
     } else if (
-      (toolName === "run_command" || toolName === "command") &&
+      (toolName === TOOL_NAMES.RUN_COMMAND ||
+        toolName === TOOL_NAMES.RUN_TERMINAL_COMMAND ||
+        toolName === TOOL_NAMES.COMMAND) &&
       args?.command
     ) {
       const cmd = `${args.command}`;
       const trimmed = cmd.length > 80 ? `${cmd.slice(0, 77)}...` : cmd;
-      description = `Command: ${trimmed}`;
-    } else if (args && typeof args === "object") {
-      const keys = Object.keys(args);
-      if (keys.length > 0) {
-        const shown = keys.slice(0, 3).join(", ");
-        description = `${toolInfo.description} (inputs: ${shown}${keys.length > 3 ? "…" : ""})`;
-      }
+      description = `Running: ${trimmed}`;
+    } else if (
+      (toolName === TOOL_NAMES.WRITE_FILE ||
+        toolName === TOOL_NAMES.EDIT_FILE) &&
+      typeof args?.file_path === "string"
+    ) {
+      const fileName = (args.file_path as string).split("/").pop();
+      const verb = toolName === TOOL_NAMES.WRITE_FILE ? "Writing" : "Editing";
+      description = `${verb} ${fileName}`;
+    } else if (
+      toolName === TOOL_NAMES.SEARCH_CODEBASE &&
+      typeof args?.query === "string"
+    ) {
+      const q = args.query as string;
+      description = `Searching for: "${q.substring(0, 50)}${q.length > 50 ? "..." : ""}"`;
+    } else if (
+      toolName === TOOL_NAMES.LIST_DIRECTORY &&
+      typeof args?.path === "string"
+    ) {
+      const dirName = (args.path as string).split("/").pop() || args.path;
+      description = `Listing ${dirName}/`;
+    } else if (toolName === TOOL_NAMES.GIT_DIFF) {
+      description = "Checking file changes";
+    } else if (toolName === TOOL_NAMES.GIT_LOG) {
+      description = "Reviewing commit history";
+    } else if (
+      toolName === TOOL_NAMES.GIT_BRANCH &&
+      typeof args?.branch_name === "string"
+    ) {
+      description = `Branch: ${args.branch_name}`;
+    } else if (
+      toolName === "run_tests" &&
+      typeof args?.test_file === "string"
+    ) {
+      const testFile = (args.test_file as string).split("/").pop();
+      description = `Testing ${testFile}`;
+    } else if (
+      toolName === "manage_tasks" &&
+      typeof args?.operation === "string"
+    ) {
+      description = `Tasks: ${args.operation}`;
     }
 
     return {
@@ -648,7 +801,11 @@ export class CodeBuddyAgentService {
       hasErrored: false,
       forceStopReason: null,
       agentState: "planning",
+      toolSpans: new Map(),
     };
+
+    // Snapshot safety limits once per stream session (O(1) config reads)
+    const limits = readAgentSafetyLimits();
 
     const tracer = trace.getTracer("codebuddy-agent-service");
     const span = tracer.startSpan("streamAgent", {
@@ -657,6 +814,8 @@ export class CodeBuddyAgentService {
         user_message: sanitizedMessage.substring(0, 500),
       },
     });
+    const parentCtx = trace.setSpan(context.active(), span);
+    const tracing: TraceBundle = { tracer, parentCtx };
 
     // Cost tracking — resolve current provider/model for pricing lookup
     const costTracker = CostTrackingService.getInstance();
@@ -668,6 +827,10 @@ export class CodeBuddyAgentService {
     } catch {
       // Non-critical — fallback pricing will be used
     }
+
+    // Enrich root span with model metadata for the trace detail panel
+    span.setAttribute("gen_ai.system", providerName);
+    span.setAttribute("gen_ai.request.model", currentModelName);
 
     try {
       const agent = await this.getAgent();
@@ -683,6 +846,22 @@ export class CodeBuddyAgentService {
         content: "Analyzing your request...",
         metadata: { threadId: conversationId, timestamp: Date.now() },
       };
+
+      // Emit provider health for the webview indicator
+      const providerHealth = this.failoverService.getAllHealth();
+      if (providerHealth.length > 0) {
+        yield {
+          type: StreamEventType.METADATA,
+          content: "provider_health",
+          metadata: {
+            threadId: conversationId,
+            timestamp: Date.now(),
+            status: "provider_health",
+            activeProvider: providerName,
+            health: providerHealth,
+          },
+        };
+      }
 
       // Create a checkpoint before the agent starts modifying files
       try {
@@ -710,156 +889,276 @@ export class CodeBuddyAgentService {
         )
       )[Symbol.asyncIterator]();
 
-      while (true) {
-        const { value: event, done } = await streamIterator.next();
-        if (done) break;
-        // Stop immediately if we've already errored
-        if (ctx.hasErrored) break;
+      const recovery = this.errorRecovery;
+      let retryAttempt = 0;
 
-        // DEBUG: Log raw events from agent (reduce verbosity in production)
-        this.logger.debug(
-          `[STREAM] Event #${ctx.eventCount + 1}: ${JSON.stringify(Object.keys(event || {}))}`,
-        );
+      // Labeled loop: on transient errors we retry with a nudge message
+      // instead of surfacing the error to the user.
+      streamLoop: while (true) {
+        try {
+          while (true) {
+            const { value: event, done } = await streamIterator.next();
+            if (done) break;
+            // Stop immediately if we've already errored
+            if (ctx.hasErrored) break;
 
-        ctx.eventCount++;
+            // DEBUG: Log raw events from agent (reduce verbosity in production)
+            this.logger.debug(
+              `[STREAM] Event #${ctx.eventCount + 1}: ${JSON.stringify(Object.keys(event || {}))}`,
+            );
 
-        // Check safety limits
-        const elapsed = Date.now() - ctx.startTime;
-        const safetyResult = this.safetyGuard.checkLimits(
-          ctx.eventCount,
-          ctx.totalToolInvocations,
-          elapsed,
-        );
+            ctx.eventCount++;
 
-        if (safetyResult.shouldStop) {
-          const limitLabel = this.safetyGuard.buildStopMessage(
-            safetyResult.reason!,
-            ctx.eventCount,
-            ctx.totalToolInvocations,
-            elapsed,
-          );
+            // Check safety limits
+            const elapsed = Date.now() - ctx.startTime;
+            const safetyResult = this.safetyGuard.checkLimits(
+              ctx.eventCount,
+              ctx.totalToolInvocations,
+              elapsed,
+              limits,
+            );
 
-          // Ask the user whether to continue or stop
-          yield {
-            type: StreamEventType.METADATA,
-            content: "interrupt_waiting",
-            metadata: {
-              threadId: conversationId,
-              status: "interrupt_waiting",
-              toolName: "Safety limit reached",
-              description: `${limitLabel} Would you like me to continue?`,
-            },
-          };
-          yield {
-            type: StreamEventType.CHUNK,
-            content: `${limitLabel} Would you like me to continue?`,
-            metadata: { threadId: conversationId, timestamp: Date.now() },
-          };
+            if (safetyResult.shouldStop) {
+              const limitLabel = this.safetyGuard.buildStopMessage(
+                safetyResult.reason!,
+                ctx.eventCount,
+                ctx.totalToolInvocations,
+                elapsed,
+              );
 
-          const continueGranted =
-            await this.waitForActionConsent(conversationId);
+              // Ask the user whether to continue or stop
+              yield {
+                type: StreamEventType.METADATA,
+                content: "interrupt_waiting",
+                metadata: {
+                  threadId: conversationId,
+                  status: "interrupt_waiting",
+                  toolName: "Safety limit reached",
+                  description: `${limitLabel} Would you like me to continue?`,
+                },
+              };
+              yield {
+                type: StreamEventType.CHUNK,
+                content: `${limitLabel} Would you like me to continue?`,
+                metadata: { threadId: conversationId, timestamp: Date.now() },
+              };
 
-          if (continueGranted) {
-            // User chose to continue — extend the limits and keep going
+              const continueGranted =
+                await this.waitForActionConsent(conversationId);
+
+              if (continueGranted) {
+                // User chose to continue — extend the limits and keep going
+                yield {
+                  type: StreamEventType.METADATA,
+                  content: "interrupt_approved",
+                  metadata: {
+                    threadId: conversationId,
+                    status: "interrupt_approved",
+                    toolName: "Safety limit reached",
+                  },
+                };
+                yield {
+                  type: StreamEventType.CHUNK,
+                  content: "Continuing...",
+                  metadata: { threadId: conversationId, timestamp: Date.now() },
+                };
+
+                this.safetyGuard.extendLimits(ctx);
+                Object.assign(ctx, this.safetyGuard.buildLimitReset());
+                this.logger.debug(
+                  `[STREAM] Limits extended for thread ${conversationId}: counters reset`,
+                );
+                continue;
+              }
+
+              // User denied — stop gracefully
+              ctx.forceStopReason = safetyResult.reason;
+              this.drainToolSpans(
+                ctx,
+                SpanStatusCode.ERROR,
+                "stream_force_stopped",
+              );
+
+              yield {
+                type: StreamEventType.METADATA,
+                content: "interrupt_denied",
+                metadata: {
+                  threadId: conversationId,
+                  status: "interrupt_denied",
+                  toolName: "Safety limit reached",
+                },
+              };
+
+              // Mark pending tools as completed
+              for (const [toolName, activity] of ctx.pendingToolCalls) {
+                activity.status = "completed";
+                activity.endTime = Date.now();
+                yield {
+                  type: StreamEventType.TOOL_END,
+                  content: JSON.stringify(activity),
+                  metadata: {
+                    toolName,
+                    duration: activity.endTime - activity.startTime,
+                  },
+                };
+              }
+              ctx.pendingToolCalls.clear();
+
+              yield {
+                type: StreamEventType.CHUNK,
+                content: limitLabel,
+                metadata: {
+                  threadId: conversationId,
+                  reason: ctx.forceStopReason,
+                },
+                accumulated: ctx.accumulatedContent
+                  ? `${ctx.accumulatedContent}\n\n${limitLabel}`
+                  : limitLabel,
+              };
+
+              break;
+            }
+
+            const entries = Object.entries(event as Record<string, unknown>);
+
+            const interruptEntry = entries.find(
+              ([nodeName]) => nodeName === "__interrupt__",
+            );
+
+            if (interruptEntry) {
+              const interruptGen = this.handleInterrupt(
+                interruptEntry as [string, IInterruptValue | IInterruptValue[]],
+                ctx,
+                agent,
+                config,
+              );
+              let interruptNext = await interruptGen.next();
+              while (!interruptNext.done) {
+                yield interruptNext.value;
+                interruptNext = await interruptGen.next();
+              }
+              // The generator's return value carries the new iterator (if any)
+              const newIter = interruptNext.value;
+              if (newIter) streamIterator = newIter;
+              continue;
+            }
+
+            yield* this.processNodeEntries(
+              entries as [string, IAgentNodeUpdate][],
+              ctx,
+              span,
+              streamManager,
+              costTracker,
+              conversationId,
+              providerName,
+              currentModelName,
+              limits,
+              onChunk,
+              tracing,
+            );
+          }
+
+          // Stream completed (normally or via safety guard) — exit retry loop
+          break streamLoop;
+        } catch (streamError) {
+          // ── Auto-recovery for transient errors ──
+          const err =
+            streamError instanceof Error
+              ? streamError
+              : new Error(String(streamError));
+          const decision = recovery.evaluate(err, retryAttempt, {
+            fromSafetyGuard: false,
+          });
+
+          if (decision.shouldRetry) {
+            retryAttempt++;
+            span.addEvent("error_recovery_attempt", {
+              attempt: retryAttempt,
+              "error.message": err.message.substring(0, 500),
+            });
+
+            // Drain any open tool spans from the failed stream
+            this.drainToolSpans(ctx, SpanStatusCode.ERROR, "retry_attempt");
+
+            // Mark pending tools as failed (they're stale from the old stream)
+            for (const [toolName, activity] of ctx.pendingToolCalls) {
+              activity.status = "failed";
+              activity.endTime = Date.now();
+              yield {
+                type: StreamEventType.TOOL_END,
+                content: JSON.stringify(activity),
+                metadata: { toolName, error: true },
+              };
+            }
+            ctx.pendingToolCalls.clear();
+
+            // Let the user know we're recovering (not a final error)
             yield {
-              type: StreamEventType.METADATA,
-              content: "interrupt_approved",
+              type: StreamEventType.WORKING,
+              content: `Recovering from a temporary error (attempt ${retryAttempt})...`,
               metadata: {
                 threadId: conversationId,
-                status: "interrupt_approved",
-                toolName: "Safety limit reached",
+                timestamp: Date.now(),
+                retryAttempt,
               },
             };
-            yield {
-              type: StreamEventType.CHUNK,
-              content: "Continuing...",
-              metadata: { threadId: conversationId, timestamp: Date.now() },
-            };
 
-            this.safetyGuard.extendLimits(ctx);
-            Object.assign(ctx, this.safetyGuard.buildLimitReset());
-            this.logger.debug(
-              `[STREAM] Limits extended for thread ${conversationId}: counters reset`,
+            // Exponential back-off
+            await new Promise((resolve) =>
+              setTimeout(resolve, decision.delayMs),
             );
-            continue;
+
+            // Reset error state so the loop can continue
+            ctx.hasErrored = false;
+            ctx.agentState = "running";
+
+            // Re-invoke the agent with a nudge message.  Because LangGraph
+            // uses checkpoint-based memory keyed on `thread_id`, the agent
+            // sees the full conversation history and can continue where it
+            // left off.
+            this.logger.log(
+              LogLevel.INFO,
+              `[ErrorRecovery] Nudging agent for thread ${conversationId} (attempt ${retryAttempt})`,
+            );
+
+            // Close the old iterator to release HTTP connections / internal state
+            try {
+              await streamIterator.return?.();
+            } catch {
+              // Suppress — we're already in error recovery
+            }
+
+            // Use a static nudge message (human role) to avoid prompt injection
+            const safeNudge =
+              retryAttempt <= 1
+                ? "There was a temporary interruption. Please continue from where you left off and complete your response."
+                : "The previous attempt was interrupted again. Please provide your final answer based on the information gathered so far.";
+
+            streamIterator = (
+              await agent.stream(
+                {
+                  messages: [
+                    {
+                      role: "human",
+                      content: safeNudge,
+                    },
+                  ],
+                },
+                config,
+              )
+            )[Symbol.asyncIterator]();
+
+            continue streamLoop;
           }
 
-          // User denied — stop gracefully
-          ctx.forceStopReason = safetyResult.reason;
-
-          yield {
-            type: StreamEventType.METADATA,
-            content: "interrupt_denied",
-            metadata: {
-              threadId: conversationId,
-              status: "interrupt_denied",
-              toolName: "Safety limit reached",
-            },
-          };
-
-          // Mark pending tools as completed
-          for (const [toolName, activity] of ctx.pendingToolCalls) {
-            activity.status = "completed";
-            activity.endTime = Date.now();
-            yield {
-              type: StreamEventType.TOOL_END,
-              content: JSON.stringify(activity),
-              metadata: {
-                toolName,
-                duration: activity.endTime - activity.startTime,
-              },
-            };
-          }
-          ctx.pendingToolCalls.clear();
-
-          yield {
-            type: StreamEventType.CHUNK,
-            content: limitLabel,
-            metadata: { threadId: conversationId, reason: ctx.forceStopReason },
-            accumulated: ctx.accumulatedContent
-              ? `${ctx.accumulatedContent}\n\n${limitLabel}`
-              : limitLabel,
-          };
-
-          break;
+          // Not retryable — drain remaining tool spans and rethrow
+          this.drainToolSpans(ctx, SpanStatusCode.ERROR, err.message);
+          throw err;
         }
+      } // end streamLoop
 
-        const entries = Object.entries(event as Record<string, unknown>);
-
-        const interruptEntry = entries.find(
-          ([nodeName]) => nodeName === "__interrupt__",
-        );
-
-        if (interruptEntry) {
-          const interruptGen = this.handleInterrupt(
-            interruptEntry as [string, IInterruptValue | IInterruptValue[]],
-            ctx,
-            agent,
-            config,
-          );
-          let interruptNext = await interruptGen.next();
-          while (!interruptNext.done) {
-            yield interruptNext.value;
-            interruptNext = await interruptGen.next();
-          }
-          // The generator's return value carries the new iterator (if any)
-          const newIter = interruptNext.value;
-          if (newIter) streamIterator = newIter;
-          continue;
-        }
-
-        yield* this.processNodeEntries(
-          entries as [string, IAgentNodeUpdate][],
-          ctx,
-          span,
-          streamManager,
-          costTracker,
-          conversationId,
-          providerName,
-          currentModelName,
-          onChunk,
-        );
-      }
+      // Record provider success for health tracking
+      this.failoverService.recordSuccess(providerName);
 
       yield* this.emitCompletion(
         ctx,
@@ -870,9 +1169,163 @@ export class CodeBuddyAgentService {
       );
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
+
+      // ── Provider Failover ────────────────────────────────
+      // If the primary provider failed and failover is enabled,
+      // try the next provider in the chain before giving up.
+      const failoverEnabled = vscode.workspace
+        .getConfiguration("codebuddy.failover")
+        .get<boolean>("enabled", true);
+
+      if (failoverEnabled) {
+        const reason = this.failoverService.recordFailure(providerName, err);
+
+        if (this.failoverService.shouldFailover(reason)) {
+          // Try to resolve an alternative provider
+          try {
+            const resolved = this.failoverService.resolveProvider(providerName);
+
+            if (resolved.isFallback) {
+              this.logger.log(
+                LogLevel.INFO,
+                `[Failover] Switching from "${providerName}" to "${resolved.provider}" (reason: ${reason})`,
+              );
+
+              // Notify user about the provider switch
+              yield {
+                type: StreamEventType.WORKING,
+                content: `Switching to ${resolved.provider} due to ${reason.replace(/_/g, " ")} on ${providerName}...`,
+                metadata: {
+                  threadId: conversationId,
+                  timestamp: Date.now(),
+                  failover: true,
+                  fromProvider: providerName,
+                  toProvider: resolved.provider,
+                },
+              };
+
+              // Drain tool spans from the failed attempt
+              this.drainToolSpans(
+                ctx,
+                SpanStatusCode.ERROR,
+                "provider_failover",
+              );
+
+              // Mark pending tools as failed
+              for (const [toolName, activity] of ctx.pendingToolCalls) {
+                activity.status = "failed";
+                activity.endTime = Date.now();
+                yield {
+                  type: StreamEventType.TOOL_END,
+                  content: JSON.stringify(activity),
+                  metadata: { toolName, error: true },
+                };
+              }
+              ctx.pendingToolCalls.clear();
+
+              // Remove only the failed provider's cached agent (preserve other providers)
+              for (const key of this.agentCache.keys()) {
+                if (key.startsWith(`agent:${providerName}:`)) {
+                  this.agentCache.delete(key);
+                }
+              }
+
+              // Create new agent with the failover provider
+              const failoverAgent = await this.getAgent();
+
+              // Reset stream context for the new attempt
+              ctx.hasErrored = false;
+              ctx.agentState = "running";
+
+              // Update provider/model tracking for cost and tracing
+              const failoverProviderName = resolved.provider;
+              const failoverModelName = resolved.model ?? resolved.provider;
+              span.setAttribute("gen_ai.failover.from", providerName);
+              span.setAttribute("gen_ai.failover.to", failoverProviderName);
+              span.setAttribute("gen_ai.failover.reason", reason);
+              span.addEvent("provider_failover", {
+                from: providerName,
+                to: failoverProviderName,
+                reason,
+              });
+
+              // Stream from the failover agent using the same thread_id
+              // so the agent retains conversation context from checkpoints
+              const failoverConfig = {
+                configurable: { thread_id: conversationId },
+                recursionLimit: 100,
+              };
+              const failoverIterator: AgentStreamIterator = (
+                await failoverAgent.stream(
+                  {
+                    messages: [
+                      {
+                        role: "user",
+                        content: sanitizedMessage,
+                      },
+                    ],
+                  },
+                  failoverConfig,
+                )
+              )[Symbol.asyncIterator]();
+
+              // Process the failover stream (single pass — no nested failover)
+              try {
+                yield* this.drainAgentStream(
+                  failoverIterator,
+                  ctx,
+                  span,
+                  streamManager,
+                  costTracker,
+                  conversationId,
+                  failoverProviderName,
+                  failoverModelName,
+                  limits,
+                  onChunk,
+                  tracing,
+                );
+
+                // Failover stream succeeded
+                this.failoverService.recordSuccess(failoverProviderName);
+
+                yield* this.emitCompletion(
+                  ctx,
+                  span,
+                  streamManager,
+                  costTracker,
+                  conversationId,
+                );
+                return; // Success — exit the generator
+              } catch (failoverError) {
+                // Failover stream also failed — record and fall through to error
+                this.failoverService.recordFailure(
+                  failoverProviderName,
+                  failoverError,
+                );
+                this.logger.log(
+                  LogLevel.ERROR,
+                  `[Failover] Fallback provider "${failoverProviderName}" also failed`,
+                  failoverError,
+                );
+              }
+            }
+          } catch (resolveError) {
+            // No alternative provider available — fall through to error
+            this.logger.log(
+              LogLevel.WARN,
+              `[Failover] No alternative provider available: ${resolveError instanceof Error ? resolveError.message : resolveError}`,
+            );
+          }
+        }
+      }
+
+      // ── Original error path (no failover or failover exhausted) ──
       ctx.agentState = "failed";
       ctx.hasErrored = true;
       span.recordException(err);
+
+      // Drain any remaining tool spans
+      this.drainToolSpans(ctx, SpanStatusCode.ERROR, err.message);
 
       // Mark pending tools as failed
       for (const [toolName, activity] of ctx.pendingToolCalls) {
@@ -1091,6 +1544,67 @@ export class CodeBuddyAgentService {
     return newIterator;
   }
 
+  /**
+   * Drain an agent stream iterator through the standard node-entry pipeline.
+   * Used for both primary retries and failover streams to avoid logic duplication.
+   * Does NOT handle interrupts or safety interludes — callers manage those.
+   *
+   * @throws if the underlying stream throws (caller decides how to handle)
+   */
+  private async *drainAgentStream(
+    iterator: AgentStreamIterator,
+    ctx: IStreamContext,
+    span: Span,
+    streamManager: StreamManager,
+    costTracker: CostTrackingService,
+    conversationId: string,
+    providerName: string,
+    modelName: string,
+    limits: AgentSafetyLimits,
+    onChunk?: (chunk: IStreamEvent) => void,
+    tracing?: TraceBundle,
+  ): AsyncGenerator<IStreamEvent> {
+    while (true) {
+      const { value: event, done } = await iterator.next();
+      if (done || ctx.hasErrored) break;
+
+      ctx.eventCount++;
+      const elapsed = Date.now() - ctx.startTime;
+      const safetyResult = this.safetyGuard.checkLimits(
+        ctx.eventCount,
+        ctx.totalToolInvocations,
+        elapsed,
+        limits,
+      );
+      if (safetyResult.shouldStop) {
+        this.logger.log(
+          LogLevel.WARN,
+          `[Stream] Safety limit hit during drain: ${safetyResult.reason}`,
+        );
+        break;
+      }
+
+      const entries = Object.entries(event as Record<string, unknown>) as [
+        string,
+        IAgentNodeUpdate,
+      ][];
+
+      yield* this.processNodeEntries(
+        entries,
+        ctx,
+        span,
+        streamManager,
+        costTracker,
+        conversationId,
+        providerName,
+        modelName,
+        limits,
+        onChunk,
+        tracing,
+      );
+    }
+  }
+
   private async *processNodeEntries(
     entries: [string, IAgentNodeUpdate][],
     ctx: IStreamContext,
@@ -1100,116 +1614,190 @@ export class CodeBuddyAgentService {
     conversationId: string,
     providerName: string,
     currentModelName: string,
+    limits: AgentSafetyLimits,
     onChunk?: (chunk: IStreamEvent) => void,
+    tracing?: TraceBundle,
   ): AsyncGenerator<IStreamEvent> {
     for (const [nodeName, update] of entries) {
-      if (update?.messages && Array.isArray(update.messages)) {
-        for (const message of update.messages) {
-          if (
-            message.usage_metadata &&
-            (message.usage_metadata.input_tokens ||
-              message.usage_metadata.output_tokens)
-          ) {
-            const usage = message.usage_metadata;
-            const costData = costTracker.recordUsage(
-              conversationId,
-              providerName,
-              currentModelName,
-              usage.input_tokens ?? 0,
-              usage.output_tokens ?? 0,
+      // Always create a span — noop if tracing is off (Null Object pattern)
+      const nodeSpan = tracing
+        ? tracing.tracer.startSpan(
+            nodeName,
+            { attributes: { "graph.node": nodeName } },
+            tracing.parentCtx,
+          )
+        : trace.getTracer("noop").startSpan(nodeName);
+      const nodeCtx = trace.setSpan(
+        tracing?.parentCtx ?? context.active(),
+        nodeSpan,
+      );
+      const childTracing: TraceBundle | undefined = tracing
+        ? { tracer: tracing.tracer, parentCtx: nodeCtx }
+        : undefined;
+
+      try {
+        if (update?.messages && Array.isArray(update.messages)) {
+          for (const message of update.messages) {
+            if (
+              message.usage_metadata &&
+              (message.usage_metadata.input_tokens ||
+                message.usage_metadata.output_tokens)
+            ) {
+              const usage = message.usage_metadata;
+
+              // Record LLM usage on the node span for per-node token visibility
+              nodeSpan.setAttribute("gen_ai.system", providerName);
+              nodeSpan.setAttribute("gen_ai.request.model", currentModelName);
+              nodeSpan.setAttribute(
+                "gen_ai.usage.input_tokens",
+                usage.input_tokens ?? 0,
+              );
+              nodeSpan.setAttribute(
+                "gen_ai.usage.output_tokens",
+                usage.output_tokens ?? 0,
+              );
+              nodeSpan.setAttribute(
+                "gen_ai.usage.total_tokens",
+                (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+              );
+
+              const costData = costTracker.recordUsage(
+                conversationId,
+                providerName,
+                currentModelName,
+                usage.input_tokens ?? 0,
+                usage.output_tokens ?? 0,
+              );
+              yield {
+                type: StreamEventType.METADATA,
+                content: "cost_update",
+                metadata: {
+                  threadId: conversationId,
+                  status: "cost_update",
+                  costData,
+                },
+              };
+            }
+
+            if (message.type === "tool" || message.name) {
+              const toolName = message.name || "unknown";
+              // Find the pending activity by toolName (pendingToolCalls is keyed by invocationId)
+              const toolActivity = [...ctx.pendingToolCalls.values()].find(
+                (a) => a.toolName === toolName,
+              );
+
+              if (toolActivity) {
+                toolActivity.status = "completed";
+                toolActivity.endTime = Date.now();
+                toolActivity.result = {
+                  summary: this.summarizeToolResult(message.content, toolName),
+                  itemCount: this.countResultItems(message.content),
+                };
+
+                span.addEvent("tool_end", {
+                  "tool.name": toolName,
+                  "tool.result_summary": toolActivity.result.summary,
+                  "node.name": nodeName,
+                  duration_ms: toolActivity.endTime - toolActivity.startTime,
+                });
+
+                // End the child span for this tool (keyed by invocationId)
+                const spanKey = toolActivity.invocationId ?? toolName;
+                const toolSpan = ctx.toolSpans.get(spanKey) as Span | undefined;
+                if (toolSpan) {
+                  toolSpan.setAttribute(
+                    "tool.result_summary",
+                    toolActivity.result.summary ?? "",
+                  );
+                  toolSpan.setAttribute(
+                    "tool.duration_ms",
+                    toolActivity.endTime! - toolActivity.startTime,
+                  );
+                  toolSpan.setStatus({ code: SpanStatusCode.OK });
+                  toolSpan.end();
+                  ctx.toolSpans.delete(spanKey);
+                }
+
+                yield {
+                  type: StreamEventType.TOOL_END,
+                  content: JSON.stringify(toolActivity),
+                  metadata: {
+                    toolName,
+                    node: nodeName,
+                    duration: toolActivity.endTime - toolActivity.startTime,
+                  },
+                };
+
+                yield {
+                  type: StreamEventType.WORKING,
+                  content: `Finished ${this.getToolInfo(toolName).name} and processing results...`,
+                  metadata: {
+                    toolName,
+                    node: nodeName,
+                    result: toolActivity.result?.summary,
+                    timestamp: Date.now(),
+                  },
+                };
+
+                ctx.pendingToolCalls.delete(
+                  toolActivity.invocationId ?? toolName,
+                );
+              }
+            }
+          }
+
+          const lastMessage = update.messages[update.messages.length - 1];
+          if (lastMessage?.content && lastMessage.type !== "tool") {
+            const newContent = this.contentNormalizer.normalize(
+              lastMessage.content,
             );
-            yield {
-              type: StreamEventType.METADATA,
-              content: "cost_update",
-              metadata: {
-                threadId: conversationId,
-                status: "cost_update",
-                costData,
-              },
-            };
-          }
+            const delta = newContent.slice(ctx.accumulatedContent.length);
+            if (delta) {
+              ctx.accumulatedContent = newContent;
+              const chunkMeta: Record<string, unknown> = { node: nodeName };
+              if (lastMessage.type) {
+                chunkMeta.messageType = lastMessage.type;
+              }
+              streamManager.addChunk(delta, chunkMeta);
 
-          if (message.type === "tool" || message.name) {
-            const toolName = message.name || "unknown";
-            const toolActivity = ctx.pendingToolCalls.get(toolName);
-
-            if (toolActivity) {
-              toolActivity.status = "completed";
-              toolActivity.endTime = Date.now();
-              toolActivity.result = {
-                summary: this.summarizeToolResult(message.content, toolName),
-                itemCount: this.countResultItems(message.content),
+              const chunkEvent = {
+                type: StreamEventType.CHUNK,
+                content: delta,
+                metadata: chunkMeta,
+                accumulated: ctx.accumulatedContent,
               };
-
-              span.addEvent("tool_end", {
-                "tool.name": toolName,
-                "tool.result_summary": toolActivity.result.summary,
-                "node.name": nodeName,
-                duration_ms: toolActivity.endTime - toolActivity.startTime,
-              });
-
-              yield {
-                type: StreamEventType.TOOL_END,
-                content: JSON.stringify(toolActivity),
-                metadata: {
-                  toolName,
-                  node: nodeName,
-                  duration: toolActivity.endTime - toolActivity.startTime,
-                },
-              };
-
-              yield {
-                type: StreamEventType.WORKING,
-                content: `Finished ${this.getToolInfo(toolName).name} and processing results...`,
-                metadata: {
-                  toolName,
-                  node: nodeName,
-                  result: toolActivity.result?.summary,
-                  timestamp: Date.now(),
-                },
-              };
-
-              ctx.pendingToolCalls.delete(toolName);
+              yield chunkEvent;
+              onChunk?.(chunkEvent);
             }
           }
         }
 
-        const lastMessage = update.messages[update.messages.length - 1];
-        if (lastMessage?.content && lastMessage.type !== "tool") {
-          const newContent = this.contentNormalizer.normalize(
-            lastMessage.content,
+        const toolCalls = this.collectToolCalls(update);
+        if (toolCalls.length > 0) {
+          yield* this.processToolCalls(
+            toolCalls,
+            nodeName,
+            ctx,
+            span,
+            streamManager,
+            limits,
+            childTracing,
           );
-          const delta = newContent.slice(ctx.accumulatedContent.length);
-          if (delta) {
-            ctx.accumulatedContent = newContent;
-            const chunkMeta: Record<string, unknown> = { node: nodeName };
-            if (lastMessage.type) {
-              chunkMeta.messageType = lastMessage.type;
-            }
-            streamManager.addChunk(delta, chunkMeta);
-
-            const chunkEvent = {
-              type: StreamEventType.CHUNK,
-              content: delta,
-              metadata: chunkMeta,
-              accumulated: ctx.accumulatedContent,
-            };
-            yield chunkEvent;
-            onChunk?.(chunkEvent);
+          if (ctx.hasErrored) {
+            nodeSpan.setStatus({ code: SpanStatusCode.ERROR });
+            return;
           }
         }
-      }
 
-      const toolCalls = this.collectToolCalls(update);
-      if (toolCalls.length > 0) {
-        yield* this.processToolCalls(
-          toolCalls,
-          nodeName,
-          ctx,
-          span,
-          streamManager,
-        );
-        if (ctx.hasErrored) return;
+        nodeSpan.setStatus({ code: SpanStatusCode.OK });
+      } catch (err) {
+        nodeSpan.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      } finally {
+        nodeSpan.end();
       }
     }
   }
@@ -1224,6 +1812,8 @@ export class CodeBuddyAgentService {
     ctx: IStreamContext,
     span: Span,
     streamManager: StreamManager,
+    limits: AgentSafetyLimits,
+    tracing?: TraceBundle,
   ): AsyncGenerator<IStreamEvent> {
     this.logger.debug(
       `[STREAM] Tool calls detected: ${toolCalls.length} tools - ${toolCalls.map((tc) => tc.name).join(", ")}`,
@@ -1267,13 +1857,15 @@ export class CodeBuddyAgentService {
 
       if (!isMiddlewareNode) {
         if (
-          (toolCall.name === "edit_file" || toolCall.name === "write_file") &&
+          (toolCall.name === TOOL_NAMES.EDIT_FILE ||
+            toolCall.name === TOOL_NAMES.WRITE_FILE) &&
           toolCall.args?.file_path
         ) {
           const filePath = toolCall.args.file_path as string;
           const fileLoop = this.safetyGuard.detectFileLoop(
             filePath,
             ctx.fileEditCounts,
+            limits,
           );
           ctx.fileEditCounts.set(filePath, fileLoop.editCount);
           if (fileLoop.isLooping) {
@@ -1307,6 +1899,7 @@ export class CodeBuddyAgentService {
         const loopResult = this.safetyGuard.detectToolLoop(
           toolCall.name,
           currentCount,
+          limits,
         );
         if (loopResult.isLooping && !loopResult.isReadOnly) {
           this.logger.log(
@@ -1348,7 +1941,31 @@ export class CodeBuddyAgentService {
         toolCall.args,
       );
       toolActivity.status = "running";
-      ctx.pendingToolCalls.set(toolCall.name, toolActivity);
+      const invocationId =
+        toolCall.id ??
+        `${toolCall.name}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+      toolActivity.invocationId = invocationId;
+      ctx.pendingToolCalls.set(invocationId, toolActivity);
+
+      // Create a child span for this tool invocation (keyed by unique invocationId)
+      const toolSpan = tracing
+        ? tracing.tracer.startSpan(
+            `tool:${toolCall.name}`,
+            {
+              attributes: {
+                "tool.name": toolCall.name,
+                "tool.invocation_id": invocationId,
+                "tool.args": JSON.stringify(toolCall.args).substring(0, 1000),
+                "node.name": nodeName,
+                "tool.is_middleware": isMiddlewareNode,
+              },
+            },
+            tracing.parentCtx,
+          )
+        : undefined;
+      if (toolSpan) {
+        ctx.toolSpans.set(invocationId, toolSpan);
+      }
 
       span.addEvent("tool_start", {
         "tool.name": toolCall.name,
@@ -1369,7 +1986,7 @@ export class CodeBuddyAgentService {
         },
       };
 
-      if (toolCall.name === "think") {
+      if (toolCall.name === TOOL_NAMES.THINK) {
         yield {
           type: StreamEventType.THINKING_START,
           content: toolActivity.description,
@@ -1397,6 +2014,20 @@ export class CodeBuddyAgentService {
     }
   }
 
+  /** Ends all in-flight tool spans with a given status. Call on any early exit. */
+  private drainToolSpans(
+    ctx: IStreamContext,
+    code: SpanStatusCode,
+    reason?: string,
+  ): void {
+    for (const [key, opaqueSpan] of ctx.toolSpans) {
+      const toolSpan = opaqueSpan as Span;
+      toolSpan.setStatus({ code, message: reason ?? `Stream ended (${key})` });
+      toolSpan.end();
+    }
+    ctx.toolSpans.clear();
+  }
+
   private async *emitCompletion(
     ctx: IStreamContext,
     span: Span,
@@ -1404,6 +2035,9 @@ export class CodeBuddyAgentService {
     costTracker: CostTrackingService,
     conversationId: string,
   ): AsyncGenerator<IStreamEvent> {
+    // Defensively close any remaining tool spans
+    this.drainToolSpans(ctx, SpanStatusCode.OK);
+
     if (ctx.hasErrored) {
       streamManager.endStream();
       return;
@@ -1420,7 +2054,7 @@ export class CodeBuddyAgentService {
           duration: activity.endTime - activity.startTime,
         },
       };
-      if (toolName === "think") {
+      if (toolName === TOOL_NAMES.THINK) {
         yield {
           type: StreamEventType.THINKING_END,
           content: activity.description,
@@ -1443,6 +2077,28 @@ export class CodeBuddyAgentService {
     streamManager.endStream(ctx.accumulatedContent);
 
     const finalCost = costTracker.getConversationCost(conversationId);
+
+    // Enrich root span with final cost/token data
+    if (finalCost) {
+      span.setAttribute("gen_ai.usage.cost", finalCost.estimatedCostUSD ?? 0);
+      span.setAttribute(
+        "gen_ai.usage.input_tokens",
+        finalCost.inputTokens ?? 0,
+      );
+      span.setAttribute(
+        "gen_ai.usage.output_tokens",
+        finalCost.outputTokens ?? 0,
+      );
+      span.setAttribute(
+        "gen_ai.usage.total_tokens",
+        finalCost.totalTokens ?? 0,
+      );
+      span.setAttribute(
+        "gen_ai.usage.request_count",
+        finalCost.requestCount ?? 0,
+      );
+    }
+
     yield {
       type: StreamEventType.END,
       content: ctx.accumulatedContent,
@@ -1460,7 +2116,7 @@ export class CodeBuddyAgentService {
     if (!content) return "Completed";
 
     // Handle web_search via synthesizer (requires `this`)
-    if (toolName === "web_search") {
+    if (toolName === TOOL_NAMES.WEB_SEARCH) {
       const contentStr =
         typeof content === "string" ? content : JSON.stringify(content);
       try {
@@ -1569,6 +2225,17 @@ export class CodeBuddyAgentService {
     }
   }
 
+  /**
+   * Get the current health status of all configured providers.
+   * Used by the webview handler to show provider status indicators.
+   */
+  getProviderHealth() {
+    return {
+      activeProvider: getGenerativeAiModel() ?? "unknown",
+      health: this.failoverService.getAllHealth(),
+    };
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
@@ -1588,6 +2255,7 @@ export class CodeBuddyAgentService {
 
     // Unsubscribe from model-change events
     this.modelChangeDisposable.dispose();
+    this.failoverConfigDisposable.dispose();
 
     // Wait for pending initialization before closing, to avoid race condition
     // where dispose() is called while initCheckpointer() is still running
