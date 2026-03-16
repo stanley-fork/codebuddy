@@ -204,8 +204,9 @@ export async function activate(context: vscode.ExtensionContext) {
     const terminal = Terminal.getInstance();
     terminal.setExtensionPath(context.extensionPath);
 
-    // Initialize Skill Service with extension path
+    // Initialize Skill Service with extension path and secret storage
     SkillService.setExtensionPath(context.extensionPath);
+    SkillService.setSecretStorage(context.secrets);
     const skillService = SkillService.getInstance();
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
