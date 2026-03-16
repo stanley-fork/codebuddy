@@ -10,7 +10,7 @@ BIN_DIR="$PROJECT_ROOT/.codebuddy/bin"
 TEMP_DIR=$(mktemp -d)
 
 REDIS_VERSION="stable"
-DOWNLOAD_URL="http://download.redis.io/redis-${REDIS_VERSION}.tar.gz"
+DOWNLOAD_URL="https://download.redis.io/redis-${REDIS_VERSION}.tar.gz"
 
 echo "Using temp directory: $TEMP_DIR"
 cd "$TEMP_DIR"

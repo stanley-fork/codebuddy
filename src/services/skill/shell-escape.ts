@@ -182,7 +182,10 @@ export function isSafeCommandName(command: string): boolean {
  * @returns true if the name is valid
  */
 export function isValidEnvVarName(name: string): boolean {
-  return /^[A-Z][A-Z0-9_]*$/.test(name);
+  // POSIX: env var names are [A-Z_][A-Z0-9_]* (uppercase convention)
+  // Allow underscore prefix (used by _CE_M, _JAVA_OPTIONS, _PRIVATE, etc.)
+  if (!name || name.length === 0) return false;
+  return /^[A-Z_][A-Z0-9_]*$/.test(name);
 }
 
 /**
