@@ -28,7 +28,8 @@ google-auth==2.23.4
 
 # Cryptography - Security operations
 # Used for secure credential storage and encryption
-cryptography==41.0.7
+# NOTE: Version 42.0.0+ contains security fixes for CVE-2023-49083 and others
+cryptography>=42.0.0
 
 # Security Best Practices:
 # - Run 'pip-audit' to check for known vulnerabilities

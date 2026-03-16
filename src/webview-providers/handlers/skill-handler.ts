@@ -203,7 +203,7 @@ export class SkillHandler implements WebviewMessageHandler {
    * Use this in methods that are only called after the handle() null check.
    */
   private requireSkillService(): SkillService {
-    const service = this.requireSkillService();
+    const service = this.getSkillService();
     if (!service) {
       throw new Error("Skills service is not available");
     }

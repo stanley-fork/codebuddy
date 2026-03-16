@@ -193,28 +193,25 @@ export function isValidEnvVarName(name: string): boolean {
  * Escapes values to prevent injection.
  *
  * @param envVars - Record of environment variable names to values
- * @returns Safe export commands for POSIX shells
+ * @returns Safe export commands for POSIX shells (one per line)
  *
  * @example
- * buildEnvExports({ API_KEY: "secret123", PATH: "/usr/bin" })
- * // "export API_KEY='secret123' PATH='/usr/bin'"
+ * buildEnvExports({ API_KEY: "secret123", DEBUG: "true" })
+ * // "export API_KEY='secret123'\nexport DEBUG='true'"
  */
 export function buildEnvExports(envVars: Record<string, string>): string {
-  const exports: string[] = [];
+  const lines: string[] = [];
 
   for (const [name, value] of Object.entries(envVars)) {
     // Skip invalid env var names
     if (!isValidEnvVarName(name)) {
-      console.warn(`Skipping invalid env var name: ${name}`);
+      console.warn(`[shell-escape] Skipping invalid env var name: ${name}`);
       continue;
     }
 
-    exports.push(`${name}=${escapeShellArg(value)}`);
+    // One export per line for POSIX compatibility (sh, bash, zsh, dash)
+    lines.push(`export ${name}=${escapeShellArg(value)}`);
   }
 
-  if (exports.length === 0) {
-    return "";
-  }
-
-  return `export ${exports.join(" ")}`;
+  return lines.join("\n");
 }
