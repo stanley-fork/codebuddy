@@ -70,14 +70,25 @@ const SENSITIVE_SYSTEM_ENV_VARS = new Set([
 export class SkillService {
   private static instance: SkillService | null = null;
   private static extensionPath: string | null = null;
+  private static secretStorage: vscode.SecretStorage | null = null;
   private readonly logger: Logger;
   private readonly registry: SkillRegistry;
   private readonly installer: SkillInstaller;
+  private readonly secrets: vscode.SecretStorage;
   private skillStates: Map<string, SkillState> = new Map();
   private initialized = false;
   private initializationError: Error | null = null;
+  // Installation status cache with TTL to avoid N subprocess calls per getSkills()
+  private installationStatusCache: Map<
+    string,
+    { installed: boolean; checkedAt: number }
+  > = new Map();
+  private readonly INSTALL_CHECK_INTERVAL_MS = 30_000; // 30 seconds
+  // Debounce timer for saveSkillStates
+  private saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly SAVE_DEBOUNCE_MS = 500; // 500ms debounce
 
-  private constructor(extensionPath: string) {
+  private constructor(extensionPath: string, secrets: vscode.SecretStorage) {
     this.logger = Logger.initialize("SkillService", {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,
@@ -85,6 +96,7 @@ export class SkillService {
       enableTelemetry: false,
     });
 
+    this.secrets = secrets;
     this.registry = new SkillRegistry(extensionPath);
     this.installer = new SkillInstaller(extensionPath);
   }
@@ -97,6 +109,13 @@ export class SkillService {
   }
 
   /**
+   * Set the secret storage (must be called during extension activation)
+   */
+  public static setSecretStorage(secrets: vscode.SecretStorage): void {
+    SkillService.secretStorage = secrets;
+  }
+
+  /**
    * Get or create the singleton instance
    */
   public static getInstance(): SkillService {
@@ -106,9 +125,26 @@ export class SkillService {
           "SkillService.setExtensionPath() must be called before getInstance()",
         );
       }
-      SkillService.instance = new SkillService(SkillService.extensionPath);
+      if (!SkillService.secretStorage) {
+        throw new Error(
+          "SkillService.setSecretStorage() must be called before getInstance()",
+        );
+      }
+      SkillService.instance = new SkillService(
+        SkillService.extensionPath,
+        SkillService.secretStorage,
+      );
     }
     return SkillService.instance;
+  }
+
+  /**
+   * Check if the service has been initialized (for defensive access)
+   */
+  public static isInitialized(): boolean {
+    return (
+      SkillService.extensionPath !== null && SkillService.secretStorage !== null
+    );
   }
 
   /**
@@ -157,6 +193,31 @@ export class SkillService {
   }
 
   /**
+   * Get installation status with caching to avoid N subprocess calls per render
+   */
+  private async getInstallationStatus(
+    skill: SkillDefinition,
+  ): Promise<boolean> {
+    if (!skill.dependencies) return true;
+
+    const cached = this.installationStatusCache.get(skill.name);
+    const now = Date.now();
+
+    if (cached && now - cached.checkedAt < this.INSTALL_CHECK_INTERVAL_MS) {
+      return cached.installed;
+    }
+
+    // Actual check (with TTL from SkillInstaller's own 10s cache)
+    const result = await this.installer.checkInstalled(skill);
+    this.installationStatusCache.set(skill.name, {
+      installed: result.installed,
+      checkedAt: now,
+    });
+
+    return result.installed;
+  }
+
+  /**
    * Get all skills with their current states
    */
   public async getSkills(): Promise<Skill[]> {
@@ -173,14 +234,13 @@ export class SkillService {
 
     const skills: Skill[] = await Promise.all(
       definitions.map(async (def) => {
-        const state = this.skillStates.get(def.name) ?? {
-          ...DEFAULT_SKILL_STATE,
+        const state = {
+          ...(this.skillStates.get(def.name) ?? DEFAULT_SKILL_STATE),
         };
 
-        // Check installation status if enabled
+        // Check installation status if enabled (uses cache to avoid N subprocess calls)
         if (state.enabled && def.dependencies) {
-          const checkResult = await this.installer.checkInstalled(def);
-          state.installed = checkResult.installed;
+          state.installed = await this.getInstallationStatus(def);
         }
 
         return {
@@ -504,7 +564,9 @@ export class SkillService {
   }
 
   /**
-   * Clean up states for skills that no longer exist
+   * Clean up states for skills that no longer exist.
+   * Only removes workspace-scoped states; global-scoped states are preserved
+   * even if the skill isn't in the current workspace registry.
    */
   private async cleanupOrphanedStates(): Promise<void> {
     const validSkillNames = new Set(
@@ -512,9 +574,13 @@ export class SkillService {
     );
     const orphanedStates: string[] = [];
 
-    for (const skillId of this.skillStates.keys()) {
+    for (const [skillId, state] of this.skillStates.entries()) {
       if (!validSkillNames.has(skillId)) {
-        orphanedStates.push(skillId);
+        // Only remove workspace-scoped states for skills not present in this workspace
+        // Global-scoped states are preserved even if the skill isn't in the current registry
+        if (state.scope === "workspace") {
+          orphanedStates.push(skillId);
+        }
       }
     }
 
@@ -523,21 +589,39 @@ export class SkillService {
         this.skillStates.delete(skillId);
         this.logger.log(
           LogLevel.DEBUG,
-          `Removed orphaned skill state: ${skillId}`,
+          `Removed orphaned workspace skill state: ${skillId}`,
         );
       }
       await this.saveSkillStates();
       this.logger.log(
         LogLevel.INFO,
-        `Cleaned up ${orphanedStates.length} orphaned skill states: ${orphanedStates.join(", ")}`,
+        `Cleaned up ${orphanedStates.length} orphaned workspace skill states: ${orphanedStates.join(", ")}`,
       );
     }
   }
 
   /**
-   * Save skill states to VS Code configuration
+   * Save skill states to VS Code configuration (debounced)
    */
   private async saveSkillStates(): Promise<void> {
+    // Debounce to prevent configuration thrashing from rapid changes
+    if (this.saveDebounceTimer) {
+      clearTimeout(this.saveDebounceTimer);
+    }
+
+    return new Promise((resolve) => {
+      this.saveDebounceTimer = setTimeout(async () => {
+        this.saveDebounceTimer = null;
+        await this.doSaveSkillStates();
+        resolve();
+      }, this.SAVE_DEBOUNCE_MS);
+    });
+  }
+
+  /**
+   * Actual save implementation (called after debounce)
+   */
+  private async doSaveSkillStates(): Promise<void> {
     const states: Record<string, SkillState> = {};
 
     for (const [name, state] of this.skillStates) {
@@ -590,15 +674,9 @@ export class SkillService {
     const envId = environmentId ?? state?.activeEnvironment ?? "default";
     const secretKey = `codebuddy.skill.${skillId}.${envId}.${key}`;
 
-    // Get the extension context's secrets
-    const secrets = (global as { codebuddySecrets?: vscode.SecretStorage })
-      .codebuddySecrets;
-    if (secrets) {
-      await secrets.store(secretKey, value);
-      this.logger.log(LogLevel.DEBUG, `Stored secret: ${secretKey}`);
-    } else {
-      this.logger.warn("Secret storage not available");
-    }
+    // Use the injected SecretStorage (always available due to DI)
+    await this.secrets.store(secretKey, value);
+    this.logger.log(LogLevel.DEBUG, `Stored secret: ${secretKey}`);
   }
 
   /**
@@ -616,13 +694,8 @@ export class SkillService {
     const envId = environmentId ?? state?.activeEnvironment ?? "default";
     const secretKey = `codebuddy.skill.${skillId}.${envId}.${key}`;
 
-    const secrets = (global as { codebuddySecrets?: vscode.SecretStorage })
-      .codebuddySecrets;
-    if (secrets) {
-      return secrets.get(secretKey);
-    }
-
-    return undefined;
+    // Use the injected SecretStorage (always available due to DI)
+    return this.secrets.get(secretKey);
   }
 
   /**
@@ -763,11 +836,10 @@ export class SkillService {
       }
     }
 
-    // Merge with process env using VS Code's safe env injection
-    const env: Record<string, string> = {
-      ...process.env,
-      ...safeEnvVars,
-    } as Record<string, string>;
+    // Only inject skill-specific env vars
+    // Don't spread process.env - VS Code terminals inherit shell env automatically
+    // Spreading process.env could leak extension host secrets (ANTHROPIC_API_KEY, etc.)
+    const env: Record<string, string> = safeEnvVars;
 
     // Sanitize terminal name (prevent injection in terminal title)
     const safeName = (options?.name ?? displayName)
@@ -1100,15 +1172,13 @@ export class SkillService {
     const state = this.skillStates.get(skillId);
     const environments = state?.environments ?? DEFAULT_ENVIRONMENTS;
 
-    // Clear secrets for all environments
-    const secrets = (global as { codebuddySecrets?: vscode.SecretStorage })
-      .codebuddySecrets;
-    if (secrets && skill.config) {
+    // Clear secrets for all environments using injected SecretStorage
+    if (skill.config) {
       for (const env of environments) {
         for (const field of skill.config) {
           if (field.type === "secret") {
             const secretKey = `codebuddy.skill.${skillId}.${env.id}.${field.name}`;
-            await secrets.delete(secretKey);
+            await this.secrets.delete(secretKey);
           }
         }
       }
@@ -1116,7 +1186,7 @@ export class SkillService {
       for (const field of skill.config) {
         if (field.type === "secret") {
           const secretKey = `codebuddy.skill.${skillId}.${field.name}`;
-          await secrets.delete(secretKey);
+          await this.secrets.delete(secretKey);
         }
       }
     }
@@ -1151,14 +1221,12 @@ export class SkillService {
     const state = this.skillStates.get(skillId);
     const env = state?.environments?.find((e) => e.id === environmentId);
 
-    // Clear secrets for the specific environment
-    const secrets = (global as { codebuddySecrets?: vscode.SecretStorage })
-      .codebuddySecrets;
-    if (secrets && skill.config) {
+    // Clear secrets for the specific environment using injected SecretStorage
+    if (skill.config) {
       for (const field of skill.config) {
         if (field.type === "secret") {
           const secretKey = `codebuddy.skill.${skillId}.${environmentId}.${field.name}`;
-          await secrets.delete(secretKey);
+          await this.secrets.delete(secretKey);
         }
       }
     }
@@ -1303,17 +1371,13 @@ export class SkillService {
       delete state.environmentConfigs[environmentId];
     }
 
-    // Clear secrets for this environment
+    // Clear secrets for this environment using injected SecretStorage
     const skill = this.registry.getSkill(skillId);
     if (skill?.config) {
-      const secrets = (global as { codebuddySecrets?: vscode.SecretStorage })
-        .codebuddySecrets;
-      if (secrets) {
-        for (const field of skill.config) {
-          if (field.type === "secret") {
-            const secretKey = `codebuddy.skill.${skillId}.${environmentId}.${field.name}`;
-            await secrets.delete(secretKey);
-          }
+      for (const field of skill.config) {
+        if (field.type === "secret") {
+          const secretKey = `codebuddy.skill.${skillId}.${environmentId}.${field.name}`;
+          await this.secrets.delete(secretKey);
         }
       }
     }

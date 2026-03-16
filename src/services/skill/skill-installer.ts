@@ -269,18 +269,11 @@ export class SkillInstaller {
 
     // HIGH-RISK: Patterns that are outright forbidden - always blocked
     // These represent clear security violations with no legitimate use in install/setup
-    // Note: sudo is conditionally allowed for install commands (displayed in terminal for user review)
     const highRiskPatterns: Array<{
       pattern: RegExp;
       description: string;
-      skippable?: boolean;
     }> = [
-      // Privilege escalation - sudo allowed for install contexts only
-      {
-        pattern: /sudo\s+/i,
-        description: "sudo privilege escalation",
-        skippable: allowSudo,
-      },
+      // Note: sudo is handled separately with allowlist validation below
       { pattern: /su\s+-/i, description: "su user switching" },
       { pattern: /chmod\s+777/i, description: "chmod 777 permission change" },
       { pattern: /chown\s+root/i, description: "chown to root" },
@@ -295,14 +288,40 @@ export class SkillInstaller {
       { pattern: /\x00/, description: "null byte injection" },
     ];
 
-    for (const { pattern, description, skippable } of highRiskPatterns) {
-      if (skippable) continue; // Skip this check if allowed in context
+    for (const { pattern, description } of highRiskPatterns) {
       if (pattern.test(command)) {
         this.logger.warn(
           `Forbidden command pattern detected in ${context}: ${description}`,
         );
         return `Command contains forbidden pattern: ${description}`;
       }
+    }
+
+    // Sudo validation - only allow known-safe package manager patterns
+    if (/sudo\s+/i.test(command)) {
+      if (!allowSudo) {
+        this.logger.warn(`Sudo command blocked in ${context}`);
+        return "Command contains sudo privilege escalation";
+      }
+      // Even when allowSudo=true, verify it matches a known-safe package manager pattern
+      const ALLOWED_SUDO_PATTERNS = [
+        /^sudo\s+(apt|apt-get)\s+install\s+-y\s+[\w][\w.-]*$/i,
+        /^sudo\s+dnf\s+install\s+-y\s+[\w][\w.-]*$/i,
+        /^sudo\s+pacman\s+-S\s+--noconfirm\s+[\w][\w.-]*$/i,
+        /^sudo\s+snap\s+install\s+[\w][\w.-]*(\s+--classic)?$/i,
+        // Allow compound commands like "sudo apt update && sudo apt install -y pkg"
+        /^sudo\s+(apt|apt-get)\s+update\s*&&\s*sudo\s+(apt|apt-get)\s+install\s+-y\s+[\w][\w.-]*$/i,
+      ];
+      const isSafeSudo = ALLOWED_SUDO_PATTERNS.some((p) =>
+        p.test(command.trim()),
+      );
+      if (!isSafeSudo) {
+        this.logger.error(
+          `Sudo command doesn't match allowlist in ${context}: ${command}`,
+        );
+        return "sudo command not in allowlist. Use a specific package manager install command.";
+      }
+      this.logger.info(`Allowing allowlisted sudo command in ${context}`);
     }
 
     // MEDIUM-RISK: Patterns that warrant warnings but may be legitimate

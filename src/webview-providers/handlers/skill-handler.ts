@@ -183,8 +183,31 @@ export class SkillHandler implements WebviewMessageHandler {
     "delete-skill-environment",
   ];
 
-  private getSkillService(): SkillService {
-    return SkillService.getInstance();
+  /**
+   * Get the skill service with defensive access.
+   * Returns null if the service is not initialized, enabling graceful error handling.
+   */
+  private getSkillService(): SkillService | null {
+    try {
+      if (!SkillService.isInitialized()) {
+        return null;
+      }
+      return SkillService.getInstance();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Get the skill service, throwing if not available.
+   * Use this in methods that are only called after the handle() null check.
+   */
+  private requireSkillService(): SkillService {
+    const service = this.requireSkillService();
+    if (!service) {
+      throw new Error("Skills service is not available");
+    }
+    return service;
   }
 
   /**
@@ -192,7 +215,7 @@ export class SkillHandler implements WebviewMessageHandler {
    */
   private async postSkillsList(ctx: HandlerContext): Promise<void> {
     try {
-      const skills = await this.getSkillService().getSkills();
+      const skills = await this.requireSkillService().getSkills();
       await ctx.webview.webview.postMessage({
         type: "skills-list",
         skills,
@@ -212,7 +235,7 @@ export class SkillHandler implements WebviewMessageHandler {
    * Send skill categories to the webview
    */
   private async postCategories(ctx: HandlerContext): Promise<void> {
-    const categories = this.getSkillService().getCategories();
+    const categories = this.requireSkillService().getCategories();
     await ctx.webview.webview.postMessage({
       type: "skill-categories",
       categories,
@@ -224,6 +247,15 @@ export class SkillHandler implements WebviewMessageHandler {
    */
   async handle(message: SkillMessage, ctx: HandlerContext): Promise<void> {
     const service = this.getSkillService();
+
+    // Defensive check: if service is not initialized, send error to webview
+    if (!service) {
+      await ctx.webview.webview.postMessage({
+        type: "skills-error",
+        error: "Skills service is not available. Please reload the extension.",
+      });
+      return;
+    }
 
     switch (message.command) {
       case "get-skills":
@@ -299,7 +331,10 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId, scope = "workspace" } = message;
 
     try {
-      const result = await this.getSkillService().enableSkill(skillId, scope);
+      const result = await this.requireSkillService().enableSkill(
+        skillId,
+        scope,
+      );
 
       if (result.requiresInstall) {
         // Send back that installation is required
@@ -347,7 +382,7 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId } = message;
 
     try {
-      const result = await this.getSkillService().disableSkill(skillId);
+      const result = await this.requireSkillService().disableSkill(skillId);
 
       if (result.success) {
         // Use status bar for non-intrusive feedback on routine operations
@@ -382,7 +417,8 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId } = message;
 
     try {
-      const result = await this.getSkillService().checkDependencies(skillId);
+      const result =
+        await this.requireSkillService().checkDependencies(skillId);
 
       await ctx.webview.webview.postMessage({
         type: "skill-deps-check",
@@ -404,7 +440,7 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId } = message;
 
     try {
-      const skill = await this.getSkillService().getSkill(skillId);
+      const skill = await this.requireSkillService().getSkill(skillId);
       if (!skill) {
         vscode.window.showErrorMessage(`Skill not found: ${skillId}`);
         return;
@@ -425,7 +461,8 @@ export class SkillHandler implements WebviewMessageHandler {
         return;
       }
 
-      const result = await this.getSkillService().installDependencies(skillId);
+      const result =
+        await this.requireSkillService().installDependencies(skillId);
 
       await ctx.webview.webview.postMessage({
         type: "skill-install-result",
@@ -435,7 +472,8 @@ export class SkillHandler implements WebviewMessageHandler {
 
       if (result.success) {
         // After installation, try to enable the skill again
-        const enableResult = await this.getSkillService().enableSkill(skillId);
+        const enableResult =
+          await this.requireSkillService().enableSkill(skillId);
 
         if (enableResult.success) {
           vscode.window.showInformationMessage(
@@ -463,7 +501,7 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId, config } = message;
 
     try {
-      const skill = await this.getSkillService().getSkill(skillId);
+      const skill = await this.requireSkillService().getSkill(skillId);
       if (!skill) {
         vscode.window.showErrorMessage(`Skill not found: ${skillId}`);
         return;
@@ -471,7 +509,7 @@ export class SkillHandler implements WebviewMessageHandler {
 
       // If config is provided from UI, save it directly
       if (config && Object.keys(config).length > 0) {
-        const result = await this.getSkillService().configureSkill(
+        const result = await this.requireSkillService().configureSkill(
           skillId,
           config,
         );
@@ -507,7 +545,7 @@ export class SkillHandler implements WebviewMessageHandler {
 
         if (field.type === "secret") {
           // Check if secret exists in SecretStorage
-          const storedSecret = await this.getSkillService().getSecret(
+          const storedSecret = await this.requireSkillService().getSecret(
             skillId,
             field.name,
           );
@@ -538,7 +576,7 @@ export class SkillHandler implements WebviewMessageHandler {
         if (field.required && !value) {
           // For secrets, check if there's an existing stored value
           if (field.type === "secret") {
-            const storedSecret = await this.getSkillService().getSecret(
+            const storedSecret = await this.requireSkillService().getSecret(
               skillId,
               field.name,
             );
@@ -565,7 +603,7 @@ export class SkillHandler implements WebviewMessageHandler {
       }
 
       if (!cancelled) {
-        const result = await this.getSkillService().configureSkill(
+        const result = await this.requireSkillService().configureSkill(
           skillId,
           newConfig,
         );
@@ -601,7 +639,7 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId } = message;
 
     try {
-      const skill = await this.getSkillService().getSkill(skillId);
+      const skill = await this.requireSkillService().getSkill(skillId);
       if (!skill) {
         vscode.window.showErrorMessage(`Skill not found: ${skillId}`);
         return;
@@ -614,7 +652,7 @@ export class SkillHandler implements WebviewMessageHandler {
         return;
       }
 
-      await this.getSkillService().runSetupCommand(skillId);
+      await this.requireSkillService().runSetupCommand(skillId);
 
       // Mark as needing verification after setup
       await ctx.webview.webview.postMessage({
@@ -634,7 +672,7 @@ export class SkillHandler implements WebviewMessageHandler {
    */
   private async handleGetPlatformInfo(ctx: HandlerContext): Promise<void> {
     try {
-      const info = this.getSkillService().getPlatformInfo();
+      const info = this.requireSkillService().getPlatformInfo();
 
       await ctx.webview.webview.postMessage({
         type: "platform-info",
@@ -652,7 +690,7 @@ export class SkillHandler implements WebviewMessageHandler {
   private async handleRefreshSkills(ctx: HandlerContext): Promise<void> {
     try {
       const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      await this.getSkillService().reload(workspacePath);
+      await this.requireSkillService().reload(workspacePath);
 
       vscode.window.setStatusBarMessage("✓ Skills refreshed from disk", 3000);
       await this.postSkillsList(ctx);
@@ -681,7 +719,7 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId } = message;
 
     try {
-      const service = this.getSkillService();
+      const service = this.requireSkillService();
       const environments = service.getEnvironments(skillId);
       const activeEnv = service.getActiveEnvironment(skillId);
 
@@ -706,7 +744,7 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId, environment } = message;
 
     try {
-      const service = this.getSkillService();
+      const service = this.requireSkillService();
 
       // If environment data is provided from UI, create directly
       if (environment) {
@@ -766,7 +804,7 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId, environmentId } = message;
 
     try {
-      const service = this.getSkillService();
+      const service = this.requireSkillService();
 
       // If environmentId provided, switch directly
       if (environmentId) {
@@ -820,7 +858,7 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId, environmentId, config } = message;
 
     try {
-      const service = this.getSkillService();
+      const service = this.requireSkillService();
 
       // If config data is provided from UI, configure directly
       if (config && Object.keys(config).length > 0) {
@@ -882,7 +920,7 @@ export class SkillHandler implements WebviewMessageHandler {
     const { skillId, environmentId } = message;
 
     try {
-      const service = this.getSkillService();
+      const service = this.requireSkillService();
       const skill = await service.getSkill(skillId);
       const env = service
         .getEnvironments(skillId)
