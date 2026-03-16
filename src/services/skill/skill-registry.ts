@@ -259,8 +259,10 @@ export class SkillRegistry {
     source: SkillSource,
     filePath: string,
   ): SkillDefinition | null {
+    // Normalize CRLF → LF to handle Windows-cloned repos
+    const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-    const match = content.match(frontmatterRegex);
+    const match = normalized.match(frontmatterRegex);
 
     if (!match) {
       this.logger.warn(`No frontmatter found in ${filePath}`);

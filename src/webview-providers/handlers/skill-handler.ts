@@ -215,7 +215,20 @@ export class SkillHandler implements WebviewMessageHandler {
    */
   private async postSkillsList(ctx: HandlerContext): Promise<void> {
     try {
-      const skills = await this.requireSkillService().getSkills();
+      const service = this.requireSkillService();
+
+      // Check initialization state and report to webview
+      const initState = service.getInitializationState();
+      if (!initState.initialized) {
+        await ctx.webview.webview.postMessage({
+          type: "skills-loading-state",
+          initialized: false,
+          error: initState.error,
+        });
+        return;
+      }
+
+      const skills = await service.getSkills();
       await ctx.webview.webview.postMessage({
         type: "skills-list",
         skills,
