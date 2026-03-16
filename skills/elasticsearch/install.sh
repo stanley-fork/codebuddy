@@ -14,12 +14,27 @@ mkdir -p "$BIN_DIR"
 echo "🔍 Checking for jq..."
 if [ ! -f "$BIN_DIR/jq" ]; then
     echo "⬇️  Downloading jq..."
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
     ARCH=$(uname -m)
-    if [ "$ARCH" == "arm64" ]; then
-        JQ_URL="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64"
-    else
-        JQ_URL="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-amd64"
-    fi
+
+    case "$OS" in
+      darwin)
+        case "$ARCH" in
+          arm64) JQ_URL="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64" ;;
+          *)     JQ_URL="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-amd64" ;;
+        esac
+        ;;
+      linux)
+        case "$ARCH" in
+          aarch64|arm64) JQ_URL="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-arm64" ;;
+          *)             JQ_URL="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64" ;;
+        esac
+        ;;
+      *)
+        echo "❌ Unsupported OS: $OS — please install jq manually"
+        exit 1
+        ;;
+    esac
     
     curl -L -o "$BIN_DIR/jq" "$JQ_URL"
     chmod +x "$BIN_DIR/jq"

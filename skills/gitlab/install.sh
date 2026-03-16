@@ -43,7 +43,9 @@ fi
 
 # Latest release logic could be complex without jq/gh. 
 # Using a fixed recent version for reliability if brew is missing.
-GLAB_VERSION="1.36.0" 
+# TODO: Update this version periodically. Check releases at:
+#       https://gitlab.com/gitlab-org/cli/-/releases
+GLAB_VERSION="1.46.1" 
 FILENAME="glab_${GLAB_VERSION}_${OS}_${ARCH}.tar.gz"
 DOWNLOAD_URL="https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/${FILENAME}"
 

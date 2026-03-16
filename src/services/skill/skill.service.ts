@@ -342,9 +342,12 @@ export class SkillService {
     // Check if configuration is required
     const requiresConfig = this.checkRequiresConfig(skill);
 
-    // Update state
+    // Preserve existing state (environments, activeEnvironment, configValues, etc.)
+    const existingState = this.skillStates.get(skillId) ?? {
+      ...DEFAULT_SKILL_STATE,
+    };
     const state: SkillState = {
-      ...this.skillStates.get(skillId),
+      ...existingState,
       enabled: true,
       installed: true,
       configured: !requiresConfig,
@@ -595,27 +598,57 @@ export class SkillService {
       await this.saveSkillStates();
       this.logger.log(
         LogLevel.INFO,
-        `Cleaned up ${orphanedStates.length} orphaned workspace skill states: ${orphanedStates.join(", ")}`,
+        `Cleaned up ${orphanedStates.length} orphaned workspace skill states`,
+      );
+      this.logger.log(
+        LogLevel.DEBUG,
+        `Orphaned state IDs: ${orphanedStates.join(", ")}`,
       );
     }
   }
 
+  // Shared promise for debounced saves - all callers await the same save
+  private pendingSavePromise: Promise<void> | null = null;
+  private pendingSaveResolvers: Array<() => void> = [];
+
   /**
    * Save skill states to VS Code configuration (debounced)
+   * All callers awaiting during debounce window will resolve when save completes.
    */
-  private async saveSkillStates(): Promise<void> {
-    // Debounce to prevent configuration thrashing from rapid changes
+  private saveSkillStates(): Promise<void> {
+    // Clear any existing timer
     if (this.saveDebounceTimer) {
       clearTimeout(this.saveDebounceTimer);
     }
 
-    return new Promise((resolve) => {
-      this.saveDebounceTimer = setTimeout(async () => {
-        this.saveDebounceTimer = null;
+    // Create or reuse the shared promise
+    if (!this.pendingSavePromise) {
+      this.pendingSavePromise = new Promise<void>((resolve) => {
+        this.pendingSaveResolvers.push(resolve);
+      });
+    } else {
+      // Add this caller to the list of resolvers for the existing promise
+      this.pendingSavePromise = this.pendingSavePromise.then(() => {});
+      return new Promise<void>((resolve) => {
+        this.pendingSaveResolvers.push(resolve);
+      });
+    }
+
+    const promise = this.pendingSavePromise;
+
+    this.saveDebounceTimer = setTimeout(async () => {
+      this.saveDebounceTimer = null;
+      this.pendingSavePromise = null;
+      try {
         await this.doSaveSkillStates();
-        resolve();
-      }, this.SAVE_DEBOUNCE_MS);
-    });
+      } finally {
+        // Resolve all waiting callers
+        const resolvers = this.pendingSaveResolvers.splice(0);
+        resolvers.forEach((r) => r());
+      }
+    }, this.SAVE_DEBOUNCE_MS);
+
+    return promise;
   }
 
   /**
@@ -625,21 +658,42 @@ export class SkillService {
     const states: Record<string, SkillState> = {};
 
     for (const [name, state] of this.skillStates) {
-      // Don't persist sensitive data
+      // Get the skill definition to identify secret fields by type
+      const skillDef = this.registry.getSkill(name);
+      const secretFieldNames = new Set(
+        (skillDef?.config ?? [])
+          .filter((f) => f.type === "secret")
+          .map((f) => f.name),
+      );
+
       const { configValues, ...safeState } = state;
+
+      // Filter out secret fields (stored in SecretStorage, not disk)
+      let filteredConfigValues:
+        | Record<string, string | number | boolean>
+        | undefined;
+      if (configValues) {
+        const droppedFields: string[] = [];
+        filteredConfigValues = Object.fromEntries(
+          Object.entries(configValues).filter(([key]) => {
+            if (secretFieldNames.has(key)) {
+              droppedFields.push(key);
+              return false;
+            }
+            return true;
+          }),
+        );
+        if (droppedFields.length > 0) {
+          this.logger.log(
+            LogLevel.DEBUG,
+            `Secret fields excluded from disk for skill "${name}": ${droppedFields.join(", ")} (stored in SecretStorage)`,
+          );
+        }
+      }
+
       states[name] = {
         ...safeState,
-        // Only keep non-sensitive config values
-        configValues: configValues
-          ? Object.fromEntries(
-              Object.entries(configValues).filter(
-                ([key]) =>
-                  !key.toLowerCase().includes("token") &&
-                  !key.toLowerCase().includes("secret") &&
-                  !key.toLowerCase().includes("password"),
-              ),
-            )
-          : undefined,
+        configValues: filteredConfigValues,
       };
     }
 
