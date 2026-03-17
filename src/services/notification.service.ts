@@ -110,8 +110,10 @@ export class NotificationService {
       const results = this.dbService.executeSql(
         `SELECT COUNT(*) as count FROM notifications`,
       );
-      const count = results[0]?.count ?? 0;
-      if (count <= NotificationService.MAX_STORED_NOTIFICATIONS) {
+      // Coerce explicitly: SQLite COUNT may return number or bigint depending on driver
+      const totalCount = Number(results[0]?.count ?? 0);
+      const excess = totalCount - NotificationService.MAX_STORED_NOTIFICATIONS;
+      if (excess <= 0) {
         return;
       }
       this.dbService.executeSqlCommand(
@@ -121,7 +123,10 @@ export class NotificationService {
            ORDER BY timestamp ASC
            LIMIT ?
          )`,
-        [count - NotificationService.MAX_STORED_NOTIFICATIONS],
+        [excess],
+      );
+      this.logger.debug(
+        `Pruned ${excess} old notifications (was ${totalCount})`,
       );
     } catch (pruneError) {
       this.logger.warn("Failed to prune old notifications", pruneError);

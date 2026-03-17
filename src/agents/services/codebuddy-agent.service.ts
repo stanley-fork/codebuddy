@@ -2333,14 +2333,15 @@ export class CodeBuddyAgentService {
 
     this.checkpointerPromise = null;
 
-    // Close the SQLite handle if it was opened
-    if (
-      checkpointerToClose &&
-      typeof (checkpointerToClose as unknown as Record<string, unknown>)
-        .close === "function"
-    ) {
+    // Close the checkpointer if it was opened (SqlJsCheckpointSaver has dispose(), others may have close())
+    if (checkpointerToClose) {
       try {
-        (checkpointerToClose as unknown as { close(): void }).close();
+        const saver = checkpointerToClose as unknown as Record<string, unknown>;
+        if (typeof saver.dispose === "function") {
+          await (saver as unknown as { dispose(): Promise<void> }).dispose();
+        } else if (typeof saver.close === "function") {
+          (saver as unknown as { close(): void }).close();
+        }
       } catch (e) {
         this.logger.warn("Failed to close checkpointer", e);
       }

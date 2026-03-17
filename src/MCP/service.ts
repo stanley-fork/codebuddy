@@ -266,7 +266,7 @@ export class MCPService implements vscode.Disposable {
 
   /**
    * Get or create a circuit breaker for a server.
-   * Creates on first access — the name reflects the factory side-effect.
+   * Returns the existing breaker or creates a new one with static defaults.
    */
   private getOrCreateCircuitBreaker(serverName: string): CircuitBreaker {
     let cb = this.circuitBreakers.get(serverName);
@@ -800,6 +800,7 @@ export class MCPService implements vscode.Disposable {
     maxRetries = 3,
   ): Promise<void> {
     const cb = this.getOrCreateCircuitBreaker(serverName);
+    let lastError: unknown;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
@@ -834,44 +835,46 @@ export class MCPService implements vscode.Disposable {
         }
         return;
       } catch (error: any) {
-        // Record every failure so the circuit breaker trips at the right threshold
-        cb.recordFailure();
-
+        lastError = error;
         const isLastAttempt = attempt === maxRetries - 1;
 
-        if (isLastAttempt) {
-          const cbState = cb.getState();
-          this.logger.error(
-            `Failed to connect to ${serverName} after ${maxRetries} attempts (circuit: ${cbState})`,
-            error,
+        if (!isLastAttempt) {
+          const waitTime = Math.min(1000 * Math.pow(2, attempt), 10_000);
+          this.logger.warn(
+            `Connection attempt ${attempt + 1} failed for ${serverName}, retrying in ${waitTime}ms...`,
           );
-
-          if (cbState === CircuitState.OPEN) {
-            const cooldown = Math.ceil(cb.getRemainingCooldownMs() / 1000);
-            this.notificationService.addNotification(
-              "error",
-              "MCP Connection Suspended",
-              `${serverName} failed repeatedly. Retries paused for ${cooldown}s.`,
-              NotificationSource.MCP,
-            );
-          } else {
-            this.notificationService.addNotification(
-              "error",
-              "MCP Connection Failed",
-              `Failed to connect to ${serverName} after ${maxRetries} attempts: ${error.message || error}`,
-              NotificationSource.MCP,
-            );
-          }
-          throw error;
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
         }
-
-        const waitTime = Math.min(1000 * Math.pow(2, attempt), 10_000);
-        this.logger.warn(
-          `Connection attempt ${attempt + 1} failed for ${serverName}, retrying in ${waitTime}ms...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, waitTime));
       }
     }
+
+    // Record ONE logical failure for the entire connectToServer() call
+    // to avoid tripping the circuit breaker from a single call with internal retries
+    cb.recordFailure();
+
+    const cbState = cb.getState();
+    this.logger.error(
+      `Failed to connect to ${serverName} after ${maxRetries} attempts (circuit: ${cbState})`,
+      lastError,
+    );
+
+    if (cbState === CircuitState.OPEN) {
+      const cooldown = Math.ceil(cb.getRemainingCooldownMs() / 1000);
+      this.notificationService.addNotification(
+        "error",
+        "MCP Connection Suspended",
+        `${serverName} failed repeatedly. Retries paused for ${cooldown}s.`,
+        NotificationSource.MCP,
+      );
+    } else {
+      this.notificationService.addNotification(
+        "error",
+        "MCP Connection Failed",
+        `Failed to connect to ${serverName} after ${maxRetries} attempts: ${(lastError as any)?.message || lastError}`,
+        NotificationSource.MCP,
+      );
+    }
+    throw lastError;
   }
 
   getToolCount(): number {

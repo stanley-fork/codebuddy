@@ -39,12 +39,7 @@ export interface EmbeddingProviderConfig {
 export class EmbeddingService {
   private static readonly DEFAULT_OPTIONS: Required<EmbeddingServiceOptions> =
     EmbeddingsConfig;
-  private static warnedProviders = new Set<string>();
-
-  /** Reset the warned-providers dedup state (for test isolation). */
-  static _resetWarnedProviders(): void {
-    EmbeddingService.warnedProviders.clear();
-  }
+  private hasWarnedUnsupported = false;
 
   private readonly options: Required<EmbeddingServiceOptions>;
   private readonly requestInterval: number;
@@ -92,8 +87,8 @@ export class EmbeddingService {
       // Unsupported provider for embeddings — callers should pre-resolve to a
       // capable provider. If we still arrive here, skip initialization and
       // let generateEmbedding() fail gracefully instead of using a mismatched key.
-      if (!EmbeddingService.warnedProviders.has(this.provider)) {
-        EmbeddingService.warnedProviders.add(this.provider);
+      if (!this.hasWarnedUnsupported) {
+        this.hasWarnedUnsupported = true;
         this.logger.warn(
           `Unsupported provider for embeddings: ${this.provider}. ` +
             `Embedding generation will fail. Configure a Gemini API key or use an embedding-capable provider.`,
