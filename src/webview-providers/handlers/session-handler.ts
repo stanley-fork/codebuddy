@@ -7,6 +7,11 @@ import {
   LlmChatMessage,
   WebviewChatMessage,
 } from "../../interfaces/chat-history.interface";
+import {
+  ContextWindowCompactionService,
+  resolveContextWindow,
+  type CompactionMessage,
+} from "../../services/context-window-compaction.service";
 
 export class SessionHandler implements WebviewMessageHandler {
   readonly commands = [
@@ -18,6 +23,7 @@ export class SessionHandler implements WebviewMessageHandler {
     "get-current-session",
     "clear-history",
     "request-chat-history",
+    "compact-history",
   ];
 
   private chatHistorySyncPromise: Promise<void> | null = null;
@@ -234,8 +240,16 @@ export class SessionHandler implements WebviewMessageHandler {
       case "clear-history":
         await this.chatHistoryManager.clearHistory("agentId");
         this.orchestrator.publish("onClearHistory", message);
-        ctx.webview.webview.postMessage({ command: "history-cleared" });
+        try {
+          await ctx.webview.webview.postMessage({ command: "history-cleared" });
+        } catch {
+          ctx.logger.warn("Failed to notify webview of history clear");
+        }
         ctx.logger.info("Chat history cleared");
+        break;
+
+      case "compact-history":
+        await this.handleCompactHistory(ctx, message);
         break;
 
       case "request-chat-history":
@@ -360,6 +374,105 @@ export class SessionHandler implements WebviewMessageHandler {
       await this.chatHistorySyncPromise;
     } finally {
       this.chatHistorySyncPromise = null;
+    }
+  }
+
+  /**
+   * Handle the /compact command: manually compact the current session's
+   * chat history to free context window space.
+   *
+   * Note: This compacts the DB-based chat history used by Ask mode.
+   * Agent mode compaction happens automatically before each agent.stream()
+   * call in codebuddy-agent.service.ts using LangGraph checkpoint state.
+   */
+  private async handleCompactHistory(
+    ctx: HandlerContext,
+    message: any,
+  ): Promise<void> {
+    const compactionService = ContextWindowCompactionService.getInstance();
+    if (!compactionService) {
+      try {
+        await ctx.webview.webview.postMessage({
+          type: "compact-result",
+          success: false,
+          message: "Compaction service not available.",
+        });
+      } catch {
+        ctx.logger.warn("Failed to notify webview: compaction unavailable");
+      }
+      return;
+    }
+
+    try {
+      const agentId = "agentId";
+      const history = (await this.agentService.getChatHistory(agentId)) || [];
+
+      if (history.length < 6) {
+        await ctx.webview.webview.postMessage({
+          type: "compact-result",
+          success: false,
+          message:
+            "Not enough messages to compact (minimum 6 messages required).",
+        });
+        return;
+      }
+
+      // Convert DB history to CompactionMessage format
+      const compactionMessages: CompactionMessage[] = history.map(
+        (msg): CompactionMessage => ({
+          role: msg.type === "user" ? "user" : "assistant",
+          content: msg.content || "",
+          timestamp: msg.timestamp,
+        }),
+      );
+
+      const contextWindowTokens = resolveContextWindow();
+      const result = await compactionService.compact(compactionMessages, {
+        maxContextTokens: contextWindowTokens,
+        systemPromptTokens: 2000,
+      });
+
+      if (result.compacted) {
+        // Save compacted history back
+        const compactedHistory = result.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+          type: m.role === "user" ? "user" : "model",
+          timestamp: m.timestamp ?? Date.now(),
+        }));
+        await this.agentService.saveChatHistory(agentId, compactedHistory);
+
+        ctx.logger.info(
+          `Manual compaction: ${result.originalCount} → ${result.finalCount} messages, ` +
+            `${result.originalTokens} → ${result.finalTokens} tokens (tier ${result.tier})`,
+        );
+      }
+
+      await ctx.webview.webview.postMessage({
+        type: "compact-result",
+        success: true,
+        compacted: result.compacted,
+        originalCount: result.originalCount,
+        finalCount: result.finalCount,
+        originalTokens: result.originalTokens,
+        finalTokens: result.finalTokens,
+        tier: result.tier,
+        message: result.compacted
+          ? `Compacted ${result.originalCount} → ${result.finalCount} messages (saved ~${result.originalTokens - result.finalTokens} tokens)`
+          : "No compaction needed — history is within budget.",
+      });
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      ctx.logger.error("Compact history failed:", errMsg);
+      try {
+        await ctx.webview.webview.postMessage({
+          type: "compact-result",
+          success: false,
+          message: `Compaction failed: ${errMsg}`,
+        });
+      } catch {
+        ctx.logger.warn("Failed to notify webview of compaction error");
+      }
     }
   }
 }

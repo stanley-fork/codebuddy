@@ -247,4 +247,13 @@ export interface IStreamableAgent {
     input: unknown,
     config: Record<string, unknown>,
   ): Promise<AsyncIterable<unknown>>;
+  /** Retrieve the current LangGraph state snapshot for a thread. */
+  getState?(
+    config: Record<string, unknown>,
+  ): Promise<{ values: { messages?: unknown[] }; [k: string]: unknown }>;
+  /** Overwrite part of the LangGraph state for a thread. */
+  updateState?(
+    config: Record<string, unknown>,
+    values: Record<string, unknown>,
+  ): Promise<unknown>;
 }
