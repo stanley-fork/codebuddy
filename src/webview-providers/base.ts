@@ -187,6 +187,7 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
         evictionPolicy: "LRU",
       },
       this.performanceProfiler,
+      "webview",
     );
 
     this.userFeedbackService = new UserFeedbackService();
@@ -1029,6 +1030,16 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
 
             default:
               this.logger.warn(`Unhandled webview command: ${message.command}`);
+              // Notify the webview that the command was not recognized
+              if (_view.webview) {
+                _view.webview.postMessage({
+                  type: "error",
+                  payload: {
+                    error: `Unknown command: ${message.command}`,
+                    command: message.command,
+                  },
+                });
+              }
           }
         }),
       );

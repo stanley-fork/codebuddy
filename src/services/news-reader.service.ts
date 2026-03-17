@@ -46,10 +46,14 @@ export class NewsReaderService implements vscode.Disposable {
 
   private constructor() {
     this.logger = Logger.initialize("NewsReaderService", {});
-    this.cacheManager = new EnhancedCacheManager({
-      maxSize: 100, // Cache up to 100 articles
-      defaultTtl: 24 * 60 * 60 * 1000, // 24 hours
-    });
+    this.cacheManager = new EnhancedCacheManager(
+      {
+        maxSize: 100, // Cache up to 100 articles
+        defaultTtl: 24 * 60 * 60 * 1000, // 24 hours
+      },
+      undefined,
+      "news-reader",
+    );
   }
 
   public static getInstance(): NewsReaderService {

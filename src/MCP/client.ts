@@ -25,6 +25,7 @@ export class MCPClient {
   private readonly notificationService: NotificationService;
   private reconnectAttempts = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 3;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly serverName: string,
@@ -179,6 +180,10 @@ export class MCPClient {
   }
 
   private async attemptReconnect(): Promise<void> {
+    // Skip reconnection if intentionally disconnected (e.g. config reload)
+    if (this.state === MCPClientState.DISCONNECTED) {
+      return;
+    }
     if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
       this.logger.error(
         `Max reconnection attempts reached for ${this.serverName}`,
@@ -198,7 +203,8 @@ export class MCPClient {
     this.logger.info(
       `Reconnect attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS} in ${delay}ms...`,
     );
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       this.connect().catch((error) => {
         this.logger.error("Reconnection failed:", error);
       });
@@ -366,6 +372,12 @@ export class MCPClient {
   }
 
   private cleanup(): void {
+    // Cancel any pending reconnect timer to prevent reconnection after intentional disconnect
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     if (this.process && !this.process.killed) {
       const killTimeout = setTimeout(() => {
         try {

@@ -16,6 +16,10 @@ export class ObservabilityHandler implements WebviewMessageHandler {
     "get-dependency-graph",
   ];
 
+  // Change detection: only push traces to webview when new spans appear
+  private lastTraceCount = 0;
+  private lastTraceHash = "";
+
   private sanitizeTraces(traces: any[]) {
     return traces.map((span) => ({
       name: span.name,
@@ -58,6 +62,16 @@ export class ObservabilityHandler implements WebviewMessageHandler {
 
       case "observability-get-traces": {
         const traces = ObservabilityService.getInstance().getTraces();
+        // Skip posting if nothing changed since the last poll
+        const traceHash = `${traces.length}:${traces.length > 0 ? traces[traces.length - 1].endTime : ""}`;
+        if (
+          traces.length === this.lastTraceCount &&
+          traceHash === this.lastTraceHash
+        ) {
+          break;
+        }
+        this.lastTraceCount = traces.length;
+        this.lastTraceHash = traceHash;
         ctx.logger.debug(
           `[WEBVIEW] Sending ${traces.length} traces to webview`,
         );
@@ -70,6 +84,8 @@ export class ObservabilityHandler implements WebviewMessageHandler {
 
       case "observability-clear-traces": {
         ObservabilityService.getInstance().clearTraces();
+        this.lastTraceCount = 0;
+        this.lastTraceHash = "";
         await ctx.webview.webview.postMessage({
           type: "observability-traces",
           traces: [],
