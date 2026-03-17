@@ -51,6 +51,11 @@ import {
 } from "../../services/provider-failover.service";
 import { TOOL_NAMES } from "../constants/tool-names";
 import { SqlJsCheckpointSaver } from "../../services/sqljs-checkpoint-saver";
+import {
+  ContextWindowCompactionService,
+  resolveContextWindow,
+  type CompactionMessage,
+} from "../../services/context-window-compaction.service";
 
 /** Typed alias for the async iterator from a LangGraph agent stream. */
 type AgentStreamIterator = AsyncIterator<unknown>;
@@ -372,6 +377,71 @@ export class CodeBuddyAgentService {
 
     // Track every file the agent edits so checkpoints cover them
     this.initFileTracking();
+
+    // Initialize context window compaction with a lightweight summarizer.
+    // Uses the current agent's LLM for summarization and character-based
+    // token estimation (accurate enough for compaction decisions).
+    this.initCompactionService();
+  }
+
+  /**
+   * Lazily initialize the compaction service. The summarize function
+   * creates a temporary chat model from current settings to generate summaries.
+   * Token counting uses a character-based estimator (chars / 4).
+   */
+  private initCompactionService(): void {
+    try {
+      ContextWindowCompactionService.createInstance(
+        async (text: string): Promise<string | undefined> => {
+          try {
+            const agent = await this.getAgent();
+            // Use the agent's LLM to summarize — send a single-turn request
+            const result: any[] = [];
+            for await (const event of await agent.stream(
+              {
+                messages: [{ role: "user", content: text }],
+              },
+              {
+                configurable: {
+                  thread_id: `compaction-${Date.now()}`,
+                },
+                recursionLimit: 2,
+              },
+            )) {
+              // Extract text content from the stream
+              const entries = Object.values(event as Record<string, any>);
+              for (const entry of entries) {
+                if (entry?.messages) {
+                  for (const msg of entry.messages) {
+                    if (typeof msg.content === "string" && msg.content) {
+                      result.push(msg.content);
+                    }
+                  }
+                }
+              }
+            }
+            return result.join("") || undefined;
+          } catch (err) {
+            this.logger.warn(
+              `Compaction summarization failed: ${err instanceof Error ? err.message : err}`,
+            );
+            return undefined;
+          }
+        },
+        async (text: string): Promise<number> => {
+          // Character-based estimation: ~4 chars per token
+          return Math.ceil(text.length / 4);
+        },
+      );
+      this.logger.log(
+        LogLevel.INFO,
+        "Context window compaction service initialized",
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Failed to initialize compaction service: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   /**
@@ -939,6 +1009,114 @@ export class CodeBuddyAgentService {
       } catch (cpError) {
         this.logger.warn(
           `Failed to create checkpoint: ${cpError instanceof Error ? cpError.message : cpError}`,
+        );
+      }
+
+      // ── Context Window Compaction ────────────────────────────────
+      // Check existing thread messages and compact if nearing the context
+      // window limit. This prevents LLM input overflow on long conversations.
+      try {
+        const compactionService = ContextWindowCompactionService.getInstance();
+        if (compactionService && agent.getState) {
+          const stateConfig = {
+            configurable: { thread_id: conversationId },
+          };
+          const state = await agent.getState(stateConfig);
+          const existingMessages = (state?.values?.messages ?? []) as any[];
+
+          if (existingMessages.length > 0) {
+            const contextWindowTokens = resolveContextWindow(currentModelName);
+            // Estimate system prompt at ~2000 tokens (conservative)
+            const systemPromptTokens = 2000;
+
+            const compactionResult = await compactionService.compact(
+              existingMessages.map(
+                (m: any): CompactionMessage => ({
+                  role:
+                    m._getType?.() === "human"
+                      ? "user"
+                      : m._getType?.() === "ai"
+                        ? "assistant"
+                        : m._getType?.() === "tool"
+                          ? "tool"
+                          : m._getType?.() === "system"
+                            ? "system"
+                            : (m.role ?? "user"),
+                  content:
+                    typeof m.content === "string"
+                      ? m.content
+                      : JSON.stringify(m.content ?? ""),
+                  tool_call_id: m.tool_call_id,
+                  tool_calls: m.tool_calls,
+                }),
+              ),
+              {
+                maxContextTokens: contextWindowTokens,
+                systemPromptTokens,
+              },
+            );
+
+            // Emit context window warning/critical events
+            if (compactionResult.warningLevel !== "none") {
+              yield {
+                type: StreamEventType.METADATA,
+                content: "context_window_status",
+                metadata: {
+                  threadId: conversationId,
+                  timestamp: Date.now(),
+                  status: "context_window_status",
+                  warningLevel: compactionResult.warningLevel,
+                  usageTokens: compactionResult.originalTokens,
+                  budgetTokens: contextWindowTokens,
+                  compacted: compactionResult.compacted,
+                  tier: compactionResult.tier,
+                },
+              };
+            }
+
+            // If compaction was performed, update the thread state
+            if (compactionResult.compacted && agent.updateState) {
+              this.logger.info(
+                `Compacted thread ${conversationId}: ` +
+                  `${compactionResult.originalCount} → ${compactionResult.finalCount} messages, ` +
+                  `${compactionResult.originalTokens} → ${compactionResult.finalTokens} tokens ` +
+                  `(tier ${compactionResult.tier})`,
+              );
+              // Convert CompactionMessages back to LangGraph-compatible format
+              const { HumanMessage, AIMessage, SystemMessage, ToolMessage } =
+                await import("@langchain/core/messages");
+              const langchainMessages = compactionResult.messages.map((m) => {
+                switch (m.role) {
+                  case "user":
+                    return new HumanMessage(m.content);
+                  case "assistant": {
+                    const aiMsg = new AIMessage(m.content);
+                    if (m.tool_calls?.length) {
+                      (aiMsg as any).tool_calls = m.tool_calls;
+                    }
+                    return aiMsg;
+                  }
+                  case "tool":
+                    return new ToolMessage({
+                      content: m.content,
+                      tool_call_id: m.tool_call_id ?? "unknown",
+                    });
+                  case "system":
+                    return new SystemMessage(m.content);
+                  default:
+                    return new HumanMessage(m.content);
+                }
+              });
+              await agent.updateState(stateConfig, {
+                messages: langchainMessages,
+              });
+            }
+          }
+        }
+      } catch (compactionError) {
+        // Compaction is non-critical — log and proceed
+        this.logger.warn(
+          `Context window compaction failed: ${compactionError instanceof Error ? compactionError.message : compactionError}`,
         );
       }
 
