@@ -114,7 +114,8 @@ function estimateTokens(text: string): number {
   const codeRatio = structuredLen / text.length;
 
   // Detect non-ASCII density (CJK, Arabic, etc.)
-  const nonAscii = text.match(/[^\x00-\x7F]/g)?.length ?? 0;
+  // eslint-disable-next-line no-control-regex
+  const nonAscii = text.match(/[^\u0000-\u007F]/g)?.length ?? 0;
   const nonAsciiRatio = nonAscii / text.length;
 
   let charsPerToken: number;
