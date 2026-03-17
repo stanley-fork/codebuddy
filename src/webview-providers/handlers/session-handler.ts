@@ -240,7 +240,11 @@ export class SessionHandler implements WebviewMessageHandler {
       case "clear-history":
         await this.chatHistoryManager.clearHistory("agentId");
         this.orchestrator.publish("onClearHistory", message);
-        ctx.webview.webview.postMessage({ command: "history-cleared" });
+        try {
+          await ctx.webview.webview.postMessage({ command: "history-cleared" });
+        } catch {
+          ctx.logger.warn("Failed to notify webview of history clear");
+        }
         ctx.logger.info("Chat history cleared");
         break;
 
@@ -376,6 +380,10 @@ export class SessionHandler implements WebviewMessageHandler {
   /**
    * Handle the /compact command: manually compact the current session's
    * chat history to free context window space.
+   *
+   * Note: This compacts the DB-based chat history used by Ask mode.
+   * Agent mode compaction happens automatically before each agent.stream()
+   * call in codebuddy-agent.service.ts using LangGraph checkpoint state.
    */
   private async handleCompactHistory(
     ctx: HandlerContext,
@@ -383,11 +391,15 @@ export class SessionHandler implements WebviewMessageHandler {
   ): Promise<void> {
     const compactionService = ContextWindowCompactionService.getInstance();
     if (!compactionService) {
-      await ctx.webview.webview.postMessage({
-        type: "compact-result",
-        success: false,
-        message: "Compaction service not available.",
-      });
+      try {
+        await ctx.webview.webview.postMessage({
+          type: "compact-result",
+          success: false,
+          message: "Compaction service not available.",
+        });
+      } catch {
+        ctx.logger.warn("Failed to notify webview: compaction unavailable");
+      }
       return;
     }
 

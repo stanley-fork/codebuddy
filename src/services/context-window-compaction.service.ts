@@ -42,13 +42,20 @@ const AUTO_COMPACT_THRESHOLD = 0.9;
 
 // ── Types ────────────────────────────────────────────────────────────
 
+export interface CompactionToolCall {
+  id?: string;
+  name?: string;
+  args?: string | Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 export interface CompactionMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   /** Tool call ID, present if role === "tool" */
   tool_call_id?: string;
   /** Tool calls made by the assistant */
-  tool_calls?: any[];
+  tool_calls?: CompactionToolCall[];
   /** Original timestamp if available */
   timestamp?: number;
   /** Token count cache to avoid recomputation */
@@ -157,7 +164,8 @@ export function resolveContextWindow(modelName?: string): number {
 // ── Service ──────────────────────────────────────────────────────────
 
 export class ContextWindowCompactionService {
-  private static instance: ContextWindowCompactionService;
+  private static instance: ContextWindowCompactionService | undefined;
+  private static isDisposed = false;
   private readonly logger: Logger;
 
   constructor(
@@ -165,10 +173,10 @@ export class ContextWindowCompactionService {
     private readonly countTokens: TokenCountFn,
   ) {
     this.logger = Logger.initialize("ContextWindowCompactionService", {
-      minLevel: LogLevel.DEBUG,
-      enableConsole: true,
+      minLevel: LogLevel.INFO,
+      enableConsole: false,
       enableFile: true,
-      enableTelemetry: true,
+      enableTelemetry: false,
     });
   }
 
@@ -176,12 +184,27 @@ export class ContextWindowCompactionService {
     summarize: SummarizeFn,
     countTokens: TokenCountFn,
   ): ContextWindowCompactionService {
-    ContextWindowCompactionService.instance =
-      new ContextWindowCompactionService(summarize, countTokens);
-    return ContextWindowCompactionService.instance;
+    if (ContextWindowCompactionService.instance) {
+      ContextWindowCompactionService.instance.logger.warn(
+        "Replacing existing ContextWindowCompactionService instance",
+      );
+    }
+    const newInstance = new ContextWindowCompactionService(
+      summarize,
+      countTokens,
+    );
+    ContextWindowCompactionService.instance = newInstance;
+    ContextWindowCompactionService.isDisposed = false;
+    return newInstance;
+  }
+
+  static disposeInstance(): void {
+    ContextWindowCompactionService.instance = undefined;
+    ContextWindowCompactionService.isDisposed = true;
   }
 
   static getInstance(): ContextWindowCompactionService | undefined {
+    if (ContextWindowCompactionService.isDisposed) return undefined;
     return ContextWindowCompactionService.instance;
   }
 
@@ -208,11 +231,10 @@ export class ContextWindowCompactionService {
       reservedResponseTokens = 4096,
     } = options;
 
-    // Apply safety margin to all token estimates
-    const effectiveBudget = Math.floor(
-      (maxContextTokens - systemPromptTokens - reservedResponseTokens) /
-        SAFETY_MARGIN,
-    );
+    // Apply safety margin once to the budget (single source of truth)
+    const rawBudget =
+      maxContextTokens - systemPromptTokens - reservedResponseTokens;
+    const effectiveBudget = Math.floor(rawBudget / SAFETY_MARGIN);
 
     // Count tokens for each message
     const annotated = await this.annotateTokenCounts(messages);
@@ -221,9 +243,8 @@ export class ContextWindowCompactionService {
       0,
     );
 
-    // Determine warning level
-    const usageRatio =
-      (originalTokens * SAFETY_MARGIN + systemPromptTokens) / maxContextTokens;
+    // Determine warning level (raw ratio, no margin — this is for display)
+    const usageRatio = (originalTokens + systemPromptTokens) / maxContextTokens;
     const warningLevel: CompactionResult["warningLevel"] =
       usageRatio >= AUTO_COMPACT_THRESHOLD
         ? "critical"
@@ -479,7 +500,16 @@ export class ContextWindowCompactionService {
   }
 
   private extractText(msg: CompactionMessage): string {
-    return msg.content || "";
+    if (typeof msg.content === "string") {
+      return msg.content;
+    }
+    if (Array.isArray(msg.content)) {
+      return (msg.content as Array<{ type: string; text?: string }>)
+        .filter((part) => part.type === "text")
+        .map((part) => part.text ?? "")
+        .join("\n");
+    }
+    return "";
   }
 
   // ── Private: Tool Result Stripping ─────────────────────────────────
@@ -511,7 +541,7 @@ export class ContextWindowCompactionService {
         msg.tool_calls?.length
       ) {
         // Keep the assistant message but strip large tool call arguments
-        const strippedToolCalls = msg.tool_calls.map((tc: any) => ({
+        const strippedToolCalls = msg.tool_calls.map((tc) => ({
           ...tc,
           args:
             typeof tc.args === "string" && tc.args.length > 200
@@ -547,6 +577,9 @@ export class ContextWindowCompactionService {
     const cutoff = messages.length - RECENT_MESSAGES_TO_KEEP;
     const toSummarize = messages.slice(0, cutoff);
     const recent = messages.slice(cutoff);
+
+    // Check if there are enough older messages to actually summarize
+    if (toSummarize.length < 2) return null;
 
     // Use adaptive chunk sizing based on message density
     const effectiveContextWindow = budget * SAFETY_MARGIN;
@@ -679,6 +712,9 @@ export class ContextWindowCompactionService {
     const toSummarize = messages.slice(0, cutoff);
     const recent = messages.slice(cutoff);
 
+    // Need at least 2 older messages to summarize
+    if (toSummarize.length < 2) return null;
+
     // Only summarize the oldest half
     const halfPoint = Math.floor(toSummarize.length / 2);
     const oldestHalf = toSummarize.slice(0, halfPoint);
@@ -770,21 +806,28 @@ export class ContextWindowCompactionService {
 
   /**
    * Trim messages from the front (after the first system/summary message)
-   * until total tokens fit within budget.
+   * until total tokens fit within budget. O(n) single-pass.
    */
   private async trimToFit(
     messages: CompactionMessage[],
     budget: number,
   ): Promise<CompactionMessage[]> {
-    const result = [...messages];
-    let total = await this.totalTokens(result);
+    // Ensure all messages are annotated once
+    const annotated = await this.annotateTokenCounts(messages);
+    let total = annotated.reduce((sum, m) => sum + (m._tokenCount ?? 0), 0);
 
-    // Keep first message (summary) and trim from position 1
-    while (total > budget && result.length > 2) {
-      result.splice(1, 1);
-      total = await this.totalTokens(result);
+    // [0] = summary/system message — never remove
+    // Remove from index 1 forward until within budget
+    const toRemove = new Set<number>();
+    let removeIdx = 1;
+
+    while (total > budget && removeIdx < annotated.length - 1) {
+      total -= annotated[removeIdx]._tokenCount ?? 0;
+      toRemove.add(removeIdx);
+      removeIdx++;
     }
 
-    return result;
+    const result = annotated.filter((_, i) => !toRemove.has(i));
+    return this.repairToolResultPairing(result);
   }
 }
