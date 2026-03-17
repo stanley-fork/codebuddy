@@ -289,7 +289,7 @@ suite("Fallback standup parser (regex)", () => {
   test("deduplicates ticket IDs", () => {
     const notes = "ticket 1279, #1279, MR 1279";
     const matches =
-      notes.match(/(?:#|!|ticket\s*|MR\s*|capital[- ]?)(\d{4,})/gi) || [];
+      notes.match(/(?:#|!|ticket\s*|MR\s*|capital[- ]?)(\d{2,})/gi) || [];
     const ids = [
       ...new Set(
         matches.map((m) =>
@@ -306,14 +306,22 @@ suite("Fallback standup parser (regex)", () => {
 
 suite("Name matching logic", () => {
   /** Replicated from MeetingIntelligenceService for unit testing. */
+  const NAME_STOPWORDS = new Set([
+    "the", "and", "for", "her", "his", "our", "their", "with",
+    "from", "has", "had", "was", "are", "not", "but", "can",
+  ]);
+
   function nameMatch(candidate: string, target: string): boolean {
     const normalizedCandidate = candidate.toLowerCase().trim();
     const normalizedTarget = target.toLowerCase().trim();
     if (normalizedCandidate === normalizedTarget) return true;
     const candidateParts = normalizedCandidate.split(/\s+/);
     const targetParts = normalizedTarget.split(/\s+/);
-    return candidateParts.some((part) =>
-      targetParts.some((tPart) => part === tPart && part.length > 2),
+    return candidateParts.some(
+      (part) =>
+        part.length > 2 &&
+        !NAME_STOPWORDS.has(part) &&
+        targetParts.some((tPart) => part === tPart),
     );
   }
 
@@ -339,6 +347,12 @@ suite("Name matching logic", () => {
 
   test("does not match completely different names", () => {
     assert.ok(!nameMatch("Marcus Wong", "Nelson Choon"));
+  });
+
+  test("does not match common stopwords", () => {
+    assert.ok(!nameMatch("The Manager", "The Other"));
+    assert.ok(!nameMatch("Her Name", "Her Role"));
+    assert.ok(!nameMatch("And More", "And Less"));
   });
 
   test("handles extra whitespace", () => {

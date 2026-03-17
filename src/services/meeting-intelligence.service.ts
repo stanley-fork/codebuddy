@@ -1,4 +1,4 @@
-import * as cp from "child_process";
+import { execFile } from "child_process";
 import * as vscode from "vscode";
 import { z } from "zod";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
@@ -76,9 +76,13 @@ const StandupRecordSchema = z.object({
 export class MeetingIntelligenceService {
   private static instance: MeetingIntelligenceService | undefined;
   private readonly logger: Logger;
-  private readonly llm: BaseLLM<any> | null;
   private readonly memoryTool: MemoryTool;
   private cachedMyName: string | undefined;
+  private llmCache: { configHash: string; llm: BaseLLM<any> | null } | null =
+    null;
+  private standupCache: { data: StandupRecord[]; fetchedAt: number } | null =
+    null;
+  private static readonly CACHE_TTL_MS = 60_000;
 
   private constructor() {
     this.logger = Logger.initialize("MeetingIntelligenceService", {
@@ -87,8 +91,33 @@ export class MeetingIntelligenceService {
       enableFile: true,
       enableTelemetry: true,
     });
-    this.llm = this.initializeLLM();
     this.memoryTool = new MemoryTool();
+
+    // Invalidate LLM cache when user changes provider/key settings
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("codebuddy")) {
+        this.llmCache = null;
+        this.logger.info("LLM config changed — cache invalidated");
+      }
+    });
+  }
+
+  /** Compute a lightweight hash of the current LLM config. */
+  private getConfigHash(): string {
+    const provider = (getGenerativeAiModel() || "groq").toLowerCase();
+    const { apiKey, model } = getAPIKeyAndModel(provider);
+    return `${provider}:${model ?? ""}:${apiKey?.slice(-6) ?? "none"}`;
+  }
+
+  /** Resolve the configured LLM, re-initializing only when config changes. */
+  private getLLM(): BaseLLM<any> | null {
+    const hash = this.getConfigHash();
+    if (this.llmCache?.configHash === hash) {
+      return this.llmCache.llm;
+    }
+    const llm = this.initializeLLM();
+    this.llmCache = { configHash: hash, llm };
+    return llm;
   }
 
   /**
@@ -168,6 +197,7 @@ export class MeetingIntelligenceService {
   async ingest(rawNotes: string): Promise<string> {
     const record = await this.parseStandup(rawNotes);
     await this.store(record);
+    this.standupCache = null; // invalidate after write
     await this.pruneOldStandups();
     const myName = await this.resolveMyName();
     return this.formatPersonalBrief(record, myName);
@@ -182,6 +212,7 @@ export class MeetingIntelligenceService {
   ): Promise<{ cardJson: string; record: StandupRecord }> {
     const record = await this.parseStandup(rawNotes);
     await this.store(record);
+    this.standupCache = null; // invalidate after write
     await this.pruneOldStandups();
     const myName = await this.resolveMyName();
 
@@ -368,7 +399,8 @@ ${delimiter}_END`;
   }
 
   private async parseStandup(rawNotes: string): Promise<StandupRecord> {
-    if (!this.llm) {
+    const llm = this.getLLM();
+    if (!llm) {
       this.logger.warn("No LLM configured — using fallback parser");
       return this.fallbackParse(rawNotes);
     }
@@ -376,7 +408,7 @@ ${delimiter}_END`;
     const prompt = this.buildParsePrompt(rawNotes);
 
     try {
-      const response = await this.llm.generateText(prompt);
+      const response = await llm.generateText(prompt);
       if (!response) {
         throw new Error("Empty LLM response");
       }
@@ -420,7 +452,7 @@ ${delimiter}_END`;
     const ticketIds = [
       ...new Set(
         (
-          rawNotes.match(/(?:#|!|ticket\s*|MR\s*|capital[- ]?)(\d{4,})/gi) || []
+          rawNotes.match(/(?:#|!|ticket\s*|MR\s*|capital[- ]?)(\d{2,})/gi) || []
         ).map((m) => m.replace(/^(?:#|!|ticket\s*|MR\s*|capital[- ]?)/i, "")),
       ),
     ];
@@ -460,6 +492,15 @@ ${delimiter}_END`;
   }
 
   private async loadStandups(): Promise<StandupRecord[]> {
+    const now = Date.now();
+    if (
+      this.standupCache &&
+      now - this.standupCache.fetchedAt <
+        MeetingIntelligenceService.CACHE_TTL_MS
+    ) {
+      return this.standupCache.data;
+    }
+
     try {
       const raw = await this.memoryTool.execute(
         "search",
@@ -469,7 +510,7 @@ ${delimiter}_END`;
       const entries = JSON.parse(raw);
       if (!Array.isArray(entries)) return [];
 
-      return entries
+      const parsed = entries
         .map((e: { content: string }) => {
           try {
             return JSON.parse(e.content) as StandupRecord;
@@ -479,6 +520,9 @@ ${delimiter}_END`;
         })
         .filter((r): r is StandupRecord => r !== null)
         .sort((a, b) => b.date.localeCompare(a.date));
+
+      this.standupCache = { data: parsed, fetchedAt: now };
+      return parsed;
     } catch {
       return [];
     }
@@ -584,7 +628,7 @@ ${delimiter}_END`;
 
   // ── Utilities ──────────────────────────────────────────────────
 
-  async resolveMyName(): Promise<string> {
+  private async resolveMyName(): Promise<string> {
     // 1. Check VS Code setting (synchronous, fast)
     const setting = vscode.workspace
       .getConfiguration("codebuddy.standup")
@@ -594,13 +638,14 @@ ${delimiter}_END`;
     // 2. Return cached git result
     if (this.cachedMyName !== undefined) return this.cachedMyName;
 
-    // 3. Async git lookup with timeout
+    // 3. Async git lookup with execFile (no shell — Issue 4)
     return new Promise<string>((resolve) => {
-      cp.exec(
-        "git config user.name",
+      execFile(
+        "git",
+        ["config", "user.name"],
         { encoding: "utf8", timeout: 3000 },
         (err, stdout) => {
-          const name = stdout?.trim() ?? "";
+          const name = (stdout as string)?.trim() ?? "";
           if (name) {
             this.cachedMyName = name;
             resolve(name);
@@ -616,6 +661,25 @@ ${delimiter}_END`;
     });
   }
 
+  private static readonly NAME_STOPWORDS = new Set([
+    "the",
+    "and",
+    "for",
+    "her",
+    "his",
+    "our",
+    "their",
+    "with",
+    "from",
+    "has",
+    "had",
+    "was",
+    "are",
+    "not",
+    "but",
+    "can",
+  ]);
+
   /** Fuzzy name matching — handles first name, last name, partial. */
   private nameMatch(candidate: string, target: string): boolean {
     const normalizedCandidate = candidate.toLowerCase().trim();
@@ -623,8 +687,11 @@ ${delimiter}_END`;
     if (normalizedCandidate === normalizedTarget) return true;
     const candidateParts = normalizedCandidate.split(/\s+/);
     const targetParts = normalizedTarget.split(/\s+/);
-    return candidateParts.some((part) =>
-      targetParts.some((tPart) => part === tPart && part.length > 2),
+    return candidateParts.some(
+      (part) =>
+        part.length > 2 &&
+        !MeetingIntelligenceService.NAME_STOPWORDS.has(part) &&
+        targetParts.some((tPart) => part === tPart),
     );
   }
 

@@ -114,6 +114,11 @@ export class StandupHandler implements WebviewMessageHandler {
       ctx.logger.error(`StandupHandler error: ${msg}`);
       try {
         await ctx.sendResponse(`Error processing standup command: ${msg}`);
+        // Notify webview store so isIngesting spinner resets (Issue 1)
+        await ctx.webview.webview.postMessage({
+          command: "standup-error",
+          error: msg,
+        });
       } catch {
         // webview may be disposed
       }

@@ -480,8 +480,8 @@ export const CoWorkerPanel: React.FC<CoWorkerPanelProps> = ({
 
             {recentStandups.length > 0 && (
               <RecentList>
-                {recentStandups.map((s, i) => (
-                  <RecentItem key={i}>
+                {recentStandups.map((s) => (
+                  <RecentItem key={`${s.date}-${s.teamName}`}>
                     <RecentDate>{s.date} — {s.teamName}</RecentDate>
                     <RecentMeta>
                       {s.commitmentCount} tasks · {s.blockerCount} blockers

@@ -42,7 +42,8 @@ const ChatInput: React.FC<ChatInputProps> = ({
   const clearReaderContext = useChatStore((s) => s.setReaderContext);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const mentionDropdownRef = useRef<HTMLDivElement>(null);
+  const slashDropdownRef = useRef<HTMLDivElement>(null);
   const onSendRef = useRef(onSendMessage);
   useEffect(() => { onSendRef.current = onSendMessage; }, [onSendMessage]);
 
@@ -242,8 +243,8 @@ const ChatInput: React.FC<ChatInputProps> = ({
 
   // Scroll selected item into view
   useEffect(() => {
-    if (mentionOpen && dropdownRef.current) {
-      const el = dropdownRef.current.querySelector(`[data-idx="${mentionIndex}"]`);
+    if (mentionOpen && mentionDropdownRef.current) {
+      const el = mentionDropdownRef.current.querySelector(`[data-idx="${mentionIndex}"]`);
       el?.scrollIntoView({ block: "nearest" });
     }
   }, [mentionIndex, mentionOpen]);
@@ -276,7 +277,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
 
       {/* Slash command autocomplete dropdown */}
       {slashOpen && filteredSlashCommands.length > 0 && (
-        <div className="mention-dropdown" ref={dropdownRef}>
+        <div className="mention-dropdown" ref={slashDropdownRef}>
           <ul className="mention-list">
             {filteredSlashCommands.map((cmd, i) => (
               <li
@@ -309,7 +310,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
 
       {/* Mention autocomplete dropdown (rendered above textarea) */}
       {mentionOpen && totalItems > 0 && (
-        <div className="mention-dropdown" ref={dropdownRef}>
+        <div className="mention-dropdown" ref={mentionDropdownRef}>
           <ul className="mention-list">
             {hasActiveEditor && (
               <li
