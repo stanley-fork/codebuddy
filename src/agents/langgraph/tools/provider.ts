@@ -48,6 +48,7 @@ import {
   DebugGetVariablesTool,
 } from "./debugger";
 import { LangChainArchitectureTool } from "./architecture";
+import { LangChainStandupTool } from "./standup";
 
 const logger = Logger.initialize("ToolProvider", {
   minLevel: LogLevel.DEBUG,
@@ -207,6 +208,12 @@ class DebugControlToolFactory implements IToolFactory {
 class ArchitectureToolFactory implements IToolFactory {
   createTool(): StructuredTool<any> {
     return new LangChainArchitectureTool();
+  }
+}
+
+class StandupToolFactory implements IToolFactory {
+  createTool(): StructuredTool<any> {
+    return new LangChainStandupTool();
   }
 }
 
@@ -414,6 +421,7 @@ export class ToolProvider {
       new DebugEvaluateToolFactory(),
       new DebugControlToolFactory(),
       new ArchitectureToolFactory(),
+      new StandupToolFactory(),
     ];
 
     // Deduplicate tools during initialization
