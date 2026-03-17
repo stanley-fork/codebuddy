@@ -44,6 +44,11 @@ import { ObservabilityService } from "../services/observability.service";
 import { ChatHistoryPruningService } from "../services/chat-history-pruning.service";
 import { ContextEnhancementService } from "../services/context-enhancement.service";
 import { ProviderFailoverService } from "../services/provider-failover.service";
+import {
+  ContextWindowCompactionService,
+  resolveContextWindow,
+  type CompactionMessage,
+} from "../services/context-window-compaction.service";
 import type { IProviderFactory } from "./provider-factory.interface";
 import { type ProviderKey, toProviderKey } from "./provider-name";
 import {
@@ -681,6 +686,29 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                 `Selected Generative AI Model: ${selectedGenerativeAiModel}`,
               );
 
+              // Handle /compact slash command
+              if (
+                typeof message.message === "string" &&
+                message.message.trim().toLowerCase() === "/compact"
+              ) {
+                await this.sendResponse(
+                  "⏳ Compacting conversation history...",
+                  "bot",
+                );
+                // Dispatch to session handler which handles "compact-history"
+                const ctx: HandlerContext = {
+                  webview: _view,
+                  logger: this.logger,
+                  extensionUri: this._extensionUri,
+                  sendResponse: this.sendResponse.bind(this),
+                };
+                await this.handlerRegistry.dispatch(
+                  { command: "compact-history" },
+                  ctx,
+                );
+                break;
+              }
+
               // Validate user input for security
               const validation = this.inputValidator.validateInput(
                 message.message,
@@ -1136,6 +1164,9 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
    * A more advanced pruning strategy that summarizes the oldest part of the chat history
    * once the token count exceeds a threshold, instead of just deleting it.
    *
+   * Attempts to use the new ContextWindowCompactionService first (with proper
+   * context window resolution), falling back to the legacy pruning service.
+   *
    * @param history The current chat history.
    * @param maxTokens The maximum number of tokens allowed for the context window.
    * @param systemInstruction The system instruction, which also counts towards the token limit.
@@ -1148,6 +1179,84 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
     systemInstruction: string,
     agentId?: string,
   ): Promise<any[]> {
+    // Try the new compaction service first
+    const compactionService = ContextWindowCompactionService.getInstance();
+    if (compactionService && history.length > 0) {
+      try {
+        const modelName = this.getCurrentModelName();
+        const contextWindowTokens = resolveContextWindow(modelName);
+        const systemPromptTokens = Math.ceil(
+          (systemInstruction?.length ?? 0) / 4,
+        );
+
+        const compactionMessages: CompactionMessage[] = history.map(
+          (msg: any) => ({
+            role:
+              msg.role === "user" ||
+              msg.role === "model" ||
+              msg.role === "assistant"
+                ? msg.role === "model"
+                  ? "assistant"
+                  : msg.role
+                : "user",
+            content: msg.parts
+              ? (msg.parts[0]?.text ?? "")
+              : (msg.content ?? ""),
+          }),
+        );
+
+        const result = await compactionService.compact(compactionMessages, {
+          maxContextTokens: contextWindowTokens,
+          systemPromptTokens,
+        });
+
+        if (result.compacted) {
+          this.logger.info(
+            `Ask mode compaction: ${result.originalCount} → ${result.finalCount} messages ` +
+              `(${result.originalTokens} → ${result.finalTokens} tokens, tier ${result.tier})`,
+          );
+
+          // Save summary if available
+          if (agentId && result.tier > 0) {
+            const summaryMsg = result.messages.find(
+              (m) => m.role === "system" && m.content.includes("[Conversation"),
+            );
+            if (summaryMsg) {
+              await this.chatHistoryManager.saveSummary(
+                agentId,
+                summaryMsg.content,
+              );
+            }
+          }
+
+          // Convert back to the provider's message format
+          return result.messages.map((m) => {
+            if (history[0]?.parts) {
+              // Google Generative AI format
+              return {
+                role: m.role === "assistant" ? "model" : m.role,
+                parts: [{ text: m.content }],
+              };
+            }
+            return {
+              role: m.role === "assistant" ? "model" : m.role,
+              content: m.content,
+            };
+          });
+        }
+
+        // Not compacted means within budget — return as-is
+        return history;
+      } catch (err) {
+        this.logger.warn(
+          `Compaction failed in Ask mode, falling back to legacy pruning: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      }
+    }
+
+    // Fallback to legacy pruning service
     return this.chatHistoryPruningService.pruneChatHistoryWithSummary(
       history,
       maxTokens,
