@@ -101,18 +101,20 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({ searchQuery: _se
     handlers.postMessage({ command: 'docker-get-models' });
     handlers.postMessage({ command: 'docker-get-local-model' });
 
-    // Poll every 30 seconds to reduce log spam
+    // Poll every 30 seconds but only fetch models if Docker/Ollama is active
     const interval = setInterval(() => {
-      // Only check runner status periodically
+      // Always check runner status (lightweight CLI check)
       handlers.postMessage({ command: 'docker-check-status' });
       handlers.postMessage({ command: 'docker-check-ollama-status' });
-      // Only fetch models if we know something is running to avoid error logs
-      handlers.postMessage({ command: 'docker-get-models' });
+      // Only fetch models if we know something is running to avoid error log spam
+      if (dockerRunnerEnabled || composeStarted) {
+        handlers.postMessage({ command: 'docker-get-models' });
+      }
       handlers.postMessage({ command: 'docker-get-local-model' });
     }, 30000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [dockerRunnerEnabled, composeStarted]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
