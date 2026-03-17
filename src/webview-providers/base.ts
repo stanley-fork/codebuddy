@@ -1230,19 +1230,34 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
           }
 
           // Convert back to the provider's message format
-          return result.messages.map((m) => {
+          const converted: any[] = [];
+          for (const m of result.messages) {
             if (history[0]?.parts) {
-              // Google Generative AI format
-              return {
+              // Google Generative AI format — "system" role is not supported
+              if (m.role === "system") {
+                // Inject as user+model pair so the context is preserved
+                converted.push({
+                  role: "user",
+                  parts: [{ text: `[System context]\n${m.content}` }],
+                });
+                converted.push({
+                  role: "model",
+                  parts: [{ text: "Understood." }],
+                });
+              } else {
+                converted.push({
+                  role: m.role === "assistant" ? "model" : m.role,
+                  parts: [{ text: m.content }],
+                });
+              }
+            } else {
+              converted.push({
                 role: m.role === "assistant" ? "model" : m.role,
-                parts: [{ text: m.content }],
-              };
+                content: m.content,
+              });
             }
-            return {
-              role: m.role === "assistant" ? "model" : m.role,
-              content: m.content,
-            };
-          });
+          }
+          return converted;
         }
 
         // Not compacted means within budget — return as-is

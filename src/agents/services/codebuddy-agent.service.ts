@@ -56,6 +56,11 @@ import {
   resolveContextWindow,
   type CompactionMessage,
 } from "../../services/context-window-compaction.service";
+import { ChatAnthropic } from "@langchain/anthropic";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import { ChatGroq } from "@langchain/groq";
+import { ChatOpenAI } from "@langchain/openai";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 
 /** Typed alias for the async iterator from a LangGraph agent stream. */
 type AgentStreamIterator = AsyncIterator<unknown>;
@@ -387,45 +392,41 @@ export class CodeBuddyAgentService {
   /**
    * Lazily initialize the compaction service. The summarize function
    * creates a temporary chat model from current settings to generate summaries.
+   * Uses a raw LLM call (no agent.stream) to avoid recursive re-entrancy.
    * Token counting uses a character-based estimator (chars / 4).
    */
   private initCompactionService(): void {
     try {
+      let isSummarizing = false;
+
       ContextWindowCompactionService.createInstance(
         async (text: string): Promise<string | undefined> => {
+          if (isSummarizing) {
+            this.logger.warn("Compaction summarization re-entrancy blocked");
+            return undefined;
+          }
+          isSummarizing = true;
           try {
-            const agent = await this.getAgent();
-            // Use the agent's LLM to summarize — send a single-turn request
-            const result: any[] = [];
-            for await (const event of await agent.stream(
-              {
-                messages: [{ role: "user", content: text }],
-              },
-              {
-                configurable: {
-                  thread_id: `compaction-${Date.now()}`,
-                },
-                recursionLimit: 2,
-              },
-            )) {
-              // Extract text content from the stream
-              const entries = Object.values(event as Record<string, any>);
-              for (const entry of entries) {
-                if (entry?.messages) {
-                  for (const msg of entry.messages) {
-                    if (typeof msg.content === "string" && msg.content) {
-                      result.push(msg.content);
-                    }
-                  }
-                }
-              }
+            const model = this.createSummarizationModel();
+            if (!model) {
+              this.logger.warn("No LLM available for compaction summarization");
+              return undefined;
             }
-            return result.join("") || undefined;
+            const response = await model.invoke([
+              new SystemMessage(
+                "You are a summarization assistant. Produce concise summaries that preserve essential facts, decisions, file paths, and code references.",
+              ),
+              new HumanMessage(text),
+            ]);
+            const content = response?.content;
+            return typeof content === "string" && content ? content : undefined;
           } catch (err) {
             this.logger.warn(
               `Compaction summarization failed: ${err instanceof Error ? err.message : err}`,
             );
             return undefined;
+          } finally {
+            isSummarizing = false;
           }
         },
         async (text: string): Promise<number> => {
@@ -441,6 +442,81 @@ export class CodeBuddyAgentService {
       this.logger.warn(
         `Failed to initialize compaction service: ${err instanceof Error ? err.message : err}`,
       );
+    }
+  }
+
+  /**
+   * Create a lightweight chat model for summarization based on current provider settings.
+   * Returns undefined if configuration is invalid.
+   */
+  private createSummarizationModel():
+    | ChatAnthropic
+    | ChatGroq
+    | ChatOpenAI
+    | ChatGoogleGenerativeAI
+    | undefined {
+    const provider = getGenerativeAiModel()?.toLowerCase();
+    if (!provider) return undefined;
+    try {
+      const { apiKey, model: modelName, baseUrl } = getAPIKeyAndModel(provider);
+      if (!apiKey) return undefined;
+      switch (provider) {
+        case "anthropic":
+          return new ChatAnthropic({
+            anthropicApiKey: apiKey,
+            modelName: modelName || "claude-sonnet-4-20250514",
+          });
+        case "openai":
+          return new ChatOpenAI({
+            openAIApiKey: apiKey,
+            modelName: modelName || "gpt-4o",
+            configuration: baseUrl ? { baseURL: baseUrl } : undefined,
+          });
+        case "groq":
+          return new ChatGroq({
+            apiKey,
+            model: modelName || "llama-3.3-70b-versatile",
+          });
+        case "gemini":
+          return new ChatGoogleGenerativeAI({
+            apiKey,
+            model: modelName || "gemini-2.0-flash",
+          });
+        case "deepseek":
+          return new ChatOpenAI({
+            openAIApiKey: apiKey,
+            modelName: modelName || "deepseek-chat",
+            configuration: { baseURL: baseUrl || "https://api.deepseek.com" },
+          });
+        case "qwen":
+          return new ChatOpenAI({
+            openAIApiKey: apiKey,
+            modelName: modelName || "qwen-plus",
+            configuration: {
+              baseURL:
+                baseUrl ||
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            },
+          });
+        case "glm":
+          return new ChatOpenAI({
+            openAIApiKey: apiKey,
+            modelName: modelName || "glm-4-plus",
+            configuration: {
+              baseURL: baseUrl || "https://open.bigmodel.cn/api/paas/v4",
+            },
+          });
+        case "local":
+          return new ChatOpenAI({
+            openAIApiKey: apiKey || "not-needed",
+            modelName: modelName || "local-model",
+            configuration: { baseURL: baseUrl || "http://localhost:11434/v1" },
+          });
+        default:
+          return undefined;
+      }
+    } catch {
+      return undefined;
     }
   }
 
