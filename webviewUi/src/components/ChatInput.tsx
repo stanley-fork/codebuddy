@@ -34,6 +34,9 @@ const ChatInput: React.FC<ChatInputProps> = ({
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionAnchor, setMentionAnchor] = useState(-1); // cursor position of the '@'
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashQuery, setSlashQuery] = useState("");
 
   const readerContext = useChatStore((s) => s.readerContext);
   const clearReaderContext = useChatStore((s) => s.setReaderContext);
@@ -59,6 +62,23 @@ const ChatInput: React.FC<ChatInputProps> = ({
   const hasActiveEditor = Boolean(activeEditor);
   const totalItems = hasActiveEditor ? filteredFiles.length + 1 : filteredFiles.length;
 
+  // ── Slash commands ──
+  const SLASH_COMMANDS = useMemo(() => [
+    { command: "/standup", label: "Parse Meeting Notes", description: "Ingest standup or meeting notes", icon: "📋" },
+    { command: "/standup my-tasks", label: "My Tasks", description: "Show your commitments from recent standups", icon: "✅" },
+    { command: "/standup blockers", label: "Blockers", description: "List all active blockers", icon: "🔴" },
+    { command: "/standup history", label: "Standup History", description: "Browse past standup records", icon: "📅" },
+    { command: "/compact", label: "Compact History", description: "Compress conversation context window", icon: "🗜️" },
+  ], []);
+
+  const filteredSlashCommands = useMemo(() => {
+    if (!slashQuery) return SLASH_COMMANDS;
+    const q = slashQuery.toLowerCase();
+    return SLASH_COMMANDS.filter(
+      (c) => c.command.toLowerCase().includes(q) || c.label.toLowerCase().includes(q),
+    );
+  }, [slashQuery, SLASH_COMMANDS]);
+
   // ── Input handling ──
   const handleInput = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -67,7 +87,24 @@ const ChatInput: React.FC<ChatInputProps> = ({
       setUserInput(value);
 
       const cursorPos = e.target.selectionStart ?? value.length;
-      // Find the last unescaped @ before the cursor
+
+      // ── Slash command detection: '/' at position 0 ──
+      if (value.startsWith("/")) {
+        const spaceIdx = value.indexOf(" ", 1);
+        // Only show autocomplete if cursor is within the command portion
+        // (before first space, or no space yet)
+        const isInCommand = spaceIdx === -1 || cursorPos <= spaceIdx;
+        if (isInCommand) {
+          setSlashQuery(value.slice(1, spaceIdx === -1 ? undefined : spaceIdx));
+          setSlashOpen(true);
+          setSlashIndex(0);
+          setMentionOpen(false);
+          return;
+        }
+      }
+      setSlashOpen(false);
+
+      // ── Existing @ mention detection ──
       const textBeforeCursor = value.slice(0, cursorPos);
       const lastAt = textBeforeCursor.lastIndexOf("@");
 
@@ -120,6 +157,42 @@ const ChatInput: React.FC<ChatInputProps> = ({
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (disabled) return;
 
+      // Slash command navigation
+      if (slashOpen && filteredSlashCommands.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setSlashIndex((i) => Math.min(i + 1, filteredSlashCommands.length - 1));
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setSlashIndex((i) => Math.max(i - 1, 0));
+          return;
+        }
+        if (e.key === "Tab" || e.key === "Enter") {
+          e.preventDefault();
+          const selected = filteredSlashCommands[slashIndex];
+          if (selected) {
+            setUserInput(selected.command + " ");
+            setSlashOpen(false);
+            requestAnimationFrame(() => {
+              const el = textareaRef.current;
+              if (el) {
+                const pos = selected.command.length + 1;
+                el.focus();
+                el.setSelectionRange(pos, pos);
+              }
+            });
+          }
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setSlashOpen(false);
+          return;
+        }
+      }
+
       // Mention navigation
       if (mentionOpen && totalItems > 0) {
         if (e.key === "ArrowDown") {
@@ -155,7 +228,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
         sendMessage();
       }
     },
-    [disabled, mentionOpen, totalItems, mentionIndex, hasActiveEditor, activeEditor, filteredFiles, userInput, selectFile],
+    [disabled, slashOpen, filteredSlashCommands, slashIndex, mentionOpen, totalItems, mentionIndex, hasActiveEditor, activeEditor, filteredFiles, userInput, selectFile],
   );
 
   const sendMessage = useCallback(() => {
@@ -198,6 +271,39 @@ const ChatInput: React.FC<ChatInputProps> = ({
           >
             ✕
           </button>
+        </div>
+      )}
+
+      {/* Slash command autocomplete dropdown */}
+      {slashOpen && filteredSlashCommands.length > 0 && (
+        <div className="mention-dropdown" ref={dropdownRef}>
+          <ul className="mention-list">
+            {filteredSlashCommands.map((cmd, i) => (
+              <li
+                key={cmd.command}
+                className={`mention-item${slashIndex === i ? " mention-item--active" : ""}`}
+                data-idx={i}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setUserInput(cmd.command + " ");
+                  setSlashOpen(false);
+                  requestAnimationFrame(() => {
+                    const el = textareaRef.current;
+                    if (el) {
+                      el.focus();
+                      el.setSelectionRange(cmd.command.length + 1, cmd.command.length + 1);
+                    }
+                  });
+                }}
+              >
+                <span className="mention-ext" style={{ fontSize: 14 }}>{cmd.icon}</span>
+                <div className="mention-file-info">
+                  <span className="mention-name">{cmd.command}</span>
+                  <span className="mention-path">{cmd.description}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

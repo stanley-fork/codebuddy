@@ -173,6 +173,40 @@ export class MeetingIntelligenceService {
     return this.formatPersonalBrief(record, myName);
   }
 
+  /**
+   * Parse raw meeting notes and return structured card data for the webview,
+   * alongside persisting the record.
+   */
+  async ingestStructured(
+    rawNotes: string,
+  ): Promise<{ cardJson: string; record: StandupRecord }> {
+    const record = await this.parseStandup(rawNotes);
+    await this.store(record);
+    await this.pruneOldStandups();
+    const myName = await this.resolveMyName();
+
+    const myCommitments = record.commitments.filter((c) =>
+      this.nameMatch(c.person, myName),
+    );
+    const otherCommitments = record.commitments.filter(
+      (c) => !this.nameMatch(c.person, myName),
+    );
+
+    const cardData = {
+      type: "standup_brief" as const,
+      date: record.date,
+      teamName: record.teamName,
+      participants: record.participants,
+      myCommitments,
+      otherCommitments,
+      blockers: record.blockers,
+      decisions: record.decisions,
+      ticketMentions: record.ticketMentions,
+    };
+
+    return { cardJson: JSON.stringify(cardData), record };
+  }
+
   /** Return the specified person's (or current user's) commitments. */
   async getMyTasks(person?: string): Promise<string> {
     const name = person ?? (await this.resolveMyName());

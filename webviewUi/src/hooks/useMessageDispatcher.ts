@@ -8,6 +8,7 @@ import { useSessionsStore } from "../stores/sessions.store";
 import { useNotificationsStore } from "../stores/notifications.store";
 import { useContentStore } from "../stores/content.store";
 import { useChatStore } from "../stores/chat.store";
+import { useStandupStore } from "../stores/standup.store";
 import type { IWebviewMessage } from "./useStreamingChat";
 
 interface ConfigData {
@@ -372,6 +373,20 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
               threadId,
             });
           }
+          break;
+
+        // ── Meeting Intelligence ──
+        case "standup-result":
+          if (message.summary) {
+            useStandupStore.getState().addStandupSummary(message.summary);
+          }
+          useStandupStore.getState().setIngesting(false);
+          break;
+
+        case "standup-error":
+          useStandupStore
+            .getState()
+            .setError(message.error || "Meeting note parsing failed");
           break;
 
         default:
