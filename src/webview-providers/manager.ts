@@ -542,29 +542,26 @@ export class WebViewProviderManager
    */
   private extractErrorFromContent(value: unknown): string | undefined {
     if (typeof value !== "string") return undefined;
-    try {
-      const parsed = JSON.parse(value);
-      if (parsed && typeof parsed.message === "string") return parsed.message;
-      if (parsed && typeof parsed.error === "string") return parsed.error;
-    } catch {
-      // Not JSON — only treat as error if it has error-like phrasing
-      const ERROR_PREFIXES = [
-        "error:",
-        "failed:",
-        "cannot ",
-        "could not ",
-        "unable to ",
-        "timeout",
-        "unauthorized",
-        "forbidden",
-        "not found",
-      ];
-      const lowerVal = value.toLowerCase().trimStart();
-      const isErrorLike = ERROR_PREFIXES.some((p) => lowerVal.startsWith(p));
 
-      if (isErrorLike && value.length < 300 && !value.includes("\n")) {
-        return value;
+    // Only extract from valid JSON with explicit error/message shape.
+    // Never reflect raw string content — it may be LLM output containing PII.
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed)
+      ) {
+        const obj = parsed as Record<string, unknown>;
+        if (typeof obj.message === "string" && obj.message.length < 200) {
+          return obj.message;
+        }
+        if (typeof obj.error === "string" && obj.error.length < 200) {
+          return obj.error;
+        }
       }
+    } catch {
+      // Not JSON — do not reflect raw string content
     }
     return undefined;
   }

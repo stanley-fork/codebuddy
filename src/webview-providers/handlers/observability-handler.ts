@@ -20,23 +20,29 @@ export class ObservabilityHandler implements WebviewMessageHandler {
   private lastTraceHash = "";
 
   /**
-   * Compute a lightweight structural hash over span identities and timestamps.
-   * Avoids false cache-hits from mid-array mutations or same-count replacements.
+   * Compute a monotonic cursor from span count + latest timestamps.
+   * Spans are append-only — if count and max timestamps haven't changed, nothing is new.
    */
   private computeTraceHash(traces: any[]): string {
     if (traces.length === 0) return "empty";
-    let hash = 0;
+
+    let latestEndTime = 0;
+    let latestStartTime = 0;
+
     for (const span of traces) {
-      const ctx = span.spanContext?.() ?? {};
-      const id = ctx.traceId ?? ctx.spanId ?? span.name ?? "";
-      const start = String(span.startTime ?? "");
-      const end = String(span.endTime ?? "");
-      const part = `${id}|${start}|${end}`;
-      for (let i = 0; i < part.length; i++) {
-        hash = (Math.imul(31, hash) + part.charCodeAt(i)) | 0;
-      }
+      // OpenTelemetry endTime is [seconds, nanos] tuple
+      const end = Array.isArray(span.endTime)
+        ? span.endTime[0] * 1e9 + span.endTime[1]
+        : Number(span.endTime ?? 0);
+      const start = Array.isArray(span.startTime)
+        ? span.startTime[0] * 1e9 + span.startTime[1]
+        : Number(span.startTime ?? 0);
+
+      if (end > latestEndTime) latestEndTime = end;
+      if (start > latestStartTime) latestStartTime = start;
     }
-    return `${traces.length}:${hash >>> 0}`;
+
+    return `${traces.length}:${latestStartTime}:${latestEndTime}`;
   }
 
   private sanitizeTraces(traces: any[]) {

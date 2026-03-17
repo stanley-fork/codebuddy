@@ -70,14 +70,14 @@ interface CheckpointRow {
 
 const VALID_METADATA_KEYS = ["source", "step", "parents"] as const;
 
-/** Pre-mapped JSON paths for metadata filter keys — zero injection surface. */
-const METADATA_JSON_PATHS: Record<
+/** Pre-built parameterized SQL fragments for metadata filter keys — zero injection surface. */
+const METADATA_FILTER_SQL: Record<
   (typeof VALID_METADATA_KEYS)[number],
   string
 > = {
-  source: "$.source",
-  step: "$.step",
-  parents: "$.parents",
+  source: `json_extract(CAST(metadata AS TEXT), '$.source') = ?`,
+  step: `json_extract(CAST(metadata AS TEXT), '$.step') = ?`,
+  parents: `json_extract(CAST(metadata AS TEXT), '$.parents') = ?`,
 } as const;
 
 export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
@@ -156,7 +156,12 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
   private async ensureSetup(): Promise<void> {
     if (this.isSetup) return;
     if (this.initPromise) return this.initPromise;
-    this.initPromise = this.doSetup();
+
+    this.initPromise = this.doSetup().catch((err) => {
+      // Clear cached promise so next call can retry after transient failure
+      this.initPromise = null;
+      throw err;
+    });
     return this.initPromise;
   }
 
@@ -511,16 +516,14 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
       params.push(before.configurable.checkpoint_id);
     }
 
-    // Apply metadata filters — keys mapped to pre-defined JSON path literals.
+    // Apply metadata filters — keys mapped to pre-built parameterized SQL fragments.
     if (filter) {
       for (const [key, value] of Object.entries(filter)) {
         if (value === undefined) continue;
-        const jsonPath =
-          METADATA_JSON_PATHS[key as keyof typeof METADATA_JSON_PATHS];
-        if (!jsonPath) continue; // unknown key — skip silently
-        whereClauses.push(
-          `json_extract(CAST(metadata AS TEXT), '${jsonPath}') = ?`,
-        );
+        const fragment =
+          METADATA_FILTER_SQL[key as keyof typeof METADATA_FILTER_SQL];
+        if (!fragment) continue; // unknown key — skip silently
+        whereClauses.push(fragment);
         params.push(JSON.stringify(value));
       }
     }
@@ -712,10 +715,16 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
       String(row.pending_sends),
     );
 
+    // json_group_array returns [null] when there are no matching rows — filter those out
+    const validSends = sends.filter(
+      (s) => s !== null && s.type !== undefined && s.value !== undefined,
+    );
+    if (validSends.length === 0) return checkpoint;
+
     const migratedValues = {
       ...(checkpoint.channel_values ?? {}),
       [TASKS]: await Promise.all(
-        sends.map(({ type, value }) => this.serde.loadsTyped(type, value)),
+        validSends.map(({ type, value }) => this.serde.loadsTyped(type, value)),
       ),
     };
 

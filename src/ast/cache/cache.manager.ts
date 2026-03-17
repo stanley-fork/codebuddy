@@ -130,7 +130,6 @@ export class CacheManager {
    */
   clear(): void {
     this.cache.clear();
-    this.resetStats();
   }
 
   /**

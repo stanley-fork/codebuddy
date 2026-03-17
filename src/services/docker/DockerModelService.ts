@@ -19,7 +19,7 @@ export class DockerModelService implements vscode.Disposable {
   // Cache Docker daemon availability to avoid repeated spawn failures
   private dockerDaemonAvailable: boolean | null = null;
   private lastDaemonCheck = 0;
-  private static readonly DAEMON_CHECK_COOLDOWN_MS = 60_000; // Re-check at most once per minute
+  private static readonly DAEMON_CHECK_COOLDOWN_MS = 15_000; // Re-check at most once per 15 seconds
 
   constructor() {
     this.logger = Logger.initialize(DockerModelService.name, {
@@ -57,19 +57,22 @@ export class DockerModelService implements vscode.Disposable {
    * Returns true if the daemon socket is connectable.
    */
   private async probeDockerSocket(): Promise<boolean> {
-    const socketPath =
-      process.platform === "win32"
-        ? "\\\\.\\pipe\\docker_engine"
-        : (process.env.DOCKER_HOST?.replace("unix://", "") ??
-          "/var/run/docker.sock");
+    const isWindows = process.platform === "win32";
+    const socketPath = isWindows
+      ? "\\\\.\\pipe\\docker_engine"
+      : (process.env.DOCKER_HOST?.replace("unix://", "") ??
+        "/var/run/docker.sock");
 
-    // Non-blocking existence check on Unix
-    if (process.platform !== "win32") {
-      try {
+    // Fast-path existence check on all platforms
+    try {
+      if (isWindows) {
+        // Named pipes show up via fs.stat on Windows
+        await fsp.stat(socketPath);
+      } else {
         await fsp.access(socketPath, fs.constants.R_OK);
-      } catch {
-        return false;
       }
+    } catch {
+      return false;
     }
 
     return new Promise((resolve) => {
