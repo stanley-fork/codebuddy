@@ -798,10 +798,12 @@ export class MCPService implements vscode.Disposable {
         }
         return;
       } catch (error: any) {
+        // Record every failure so the circuit breaker trips at the right threshold
+        cb.recordFailure();
+
         const isLastAttempt = attempt === maxRetries - 1;
 
         if (isLastAttempt) {
-          cb.recordFailure();
           const cbState = cb.getState();
           this.logger.error(
             `Failed to connect to ${serverName} after ${maxRetries} attempts (circuit: ${cbState})`,
@@ -812,8 +814,8 @@ export class MCPService implements vscode.Disposable {
             const cooldown = Math.ceil(cb.getRemainingCooldownMs() / 1000);
             this.notificationService.addNotification(
               "error",
-              "MCP Connection Failed",
-              `Failed to connect to ${serverName}. Retries paused for ${cooldown}s to avoid resource waste.`,
+              "MCP Connection Suspended",
+              `${serverName} failed repeatedly. Retries paused for ${cooldown}s.`,
               NotificationSource.MCP,
             );
           } else {
@@ -827,7 +829,7 @@ export class MCPService implements vscode.Disposable {
           throw error;
         }
 
-        const waitTime = 1000 * (attempt + 1);
+        const waitTime = Math.min(1000 * Math.pow(2, attempt), 10_000);
         this.logger.warn(
           `Connection attempt ${attempt + 1} failed for ${serverName}, retrying in ${waitTime}ms...`,
         );

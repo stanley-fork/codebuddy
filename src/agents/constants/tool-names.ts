@@ -24,6 +24,8 @@ export const TOOL_NAMES = {
   WEB_SEARCH: "web_search",
   GREP: "grep",
   GLOB: "glob",
+  WRITE_TODOS: "write_todos",
+  TASK: "task",
 } as const;
 
 export type ToolName = (typeof TOOL_NAMES)[keyof typeof TOOL_NAMES];

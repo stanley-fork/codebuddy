@@ -174,13 +174,12 @@ const TOOL_DESCRIPTIONS: Record<string, IToolDescription> = {
     description: "Checking repository status...",
     activityType: "reviewing",
   },
-  // Tools that may come from MCP or custom agent definitions
-  write_todos: {
+  [TOOL_NAMES.WRITE_TODOS]: {
     name: "Todo Manager",
     description: "Updating todo list...",
     activityType: "working",
   },
-  task: {
+  [TOOL_NAMES.TASK]: {
     name: "Task Runner",
     description: "Running task...",
     activityType: "executing",

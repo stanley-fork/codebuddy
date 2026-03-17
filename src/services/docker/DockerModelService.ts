@@ -45,19 +45,13 @@ export class DockerModelService implements vscode.Disposable {
     }
 
     try {
-      // checkDockerModelRunner only tests if the CLI subcommand exists (--help),
-      // not if the daemon is running. Use a lightweight daemon check instead.
+      // `docker ps` requires a running daemon — cheapest reachability check.
+      // getRunningOllamaContainer() runs `docker ps --filter ...` which will
+      // throw if the daemon socket is unavailable.
       await this.terminal.getRunningOllamaContainer();
-      // If we get here without error, daemon is reachable
       this.dockerDaemonAvailable = true;
     } catch {
-      // Try one more lightweight check — docker ps is the cheapest daemon call
-      try {
-        await this.terminal.getRunningOllamaContainer();
-        this.dockerDaemonAvailable = true;
-      } catch {
-        this.dockerDaemonAvailable = false;
-      }
+      this.dockerDaemonAvailable = false;
     }
     this.lastDaemonCheck = now;
     return this.dockerDaemonAvailable;
