@@ -36,6 +36,7 @@ export class SettingsHandler implements WebviewMessageHandler {
     "update-user-info",
     "updateConfiguration",
     "update-model-event",
+    "codebuddy-model-change-event",
     "reindex-workspace-event",
     "open-codebuddy-settings",
     "get-provider-health",
@@ -164,6 +165,17 @@ export class SettingsHandler implements WebviewMessageHandler {
             );
         }
         this.orchestrator.publish("onModelChange", message);
+        break;
+
+      case "codebuddy-model-change-event":
+        ctx.logger.info(`CodeBuddy mode changed to: ${message.message}`);
+        await vscode.workspace
+          .getConfiguration()
+          .update(
+            "codebuddy.codeBuddyMode",
+            message.message,
+            vscode.ConfigurationTarget.Global,
+          );
         break;
 
       case "reindex-workspace-event":

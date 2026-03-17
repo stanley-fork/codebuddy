@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import styled from 'styled-components';
 import { useSettings } from '../SettingsContext';
 import { PREDEFINED_LOCAL_MODELS, BUDGET_ALTERNATIVES, modelOptions as modelOptionsWithPricing } from '../../../constants/constant';
@@ -94,6 +94,13 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({ searchQuery: _se
   const [activeLocalModel, setActiveLocalModel] = useState<string | null>(null);
   const [settingModel, setSettingModel] = useState<string | null>(null);
 
+  // Track latest state via refs so the interval closure always reads current values
+  // without requiring teardown/re-creation of the interval on every state change.
+  const dockerRunnerRef = useRef(dockerRunnerEnabled || false);
+  const composeStartedRef = useRef(composeStarted || false);
+  dockerRunnerRef.current = dockerRunnerEnabled;
+  composeStartedRef.current = composeStarted;
+
   useEffect(() => {
     // Check status on mount
     handlers.postMessage({ command: 'docker-check-status' });
@@ -101,13 +108,13 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({ searchQuery: _se
     handlers.postMessage({ command: 'docker-get-models' });
     handlers.postMessage({ command: 'docker-get-local-model' });
 
-    // Poll every 30 seconds to reduce log spam
+    // Poll every 30 seconds; only fetch models when Docker/Ollama is active
     const interval = setInterval(() => {
-      // Only check runner status periodically
       handlers.postMessage({ command: 'docker-check-status' });
       handlers.postMessage({ command: 'docker-check-ollama-status' });
-      // Only fetch models if we know something is running to avoid error logs
-      handlers.postMessage({ command: 'docker-get-models' });
+      if (dockerRunnerRef.current || composeStartedRef.current) {
+        handlers.postMessage({ command: 'docker-get-models' });
+      }
       handlers.postMessage({ command: 'docker-get-local-model' });
     }, 30000);
 

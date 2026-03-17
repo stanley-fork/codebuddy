@@ -39,6 +39,7 @@ export interface EmbeddingProviderConfig {
 export class EmbeddingService {
   private static readonly DEFAULT_OPTIONS: Required<EmbeddingServiceOptions> =
     EmbeddingsConfig;
+  private hasWarnedUnsupported = false;
 
   private readonly options: Required<EmbeddingServiceOptions>;
   private readonly requestInterval: number;
@@ -83,12 +84,16 @@ export class EmbeddingService {
         baseURL: baseURL,
       });
     } else {
-      // Fallback or default to Gemini if unknown, but better to warn
-      this.logger.warn(
-        `Unsupported provider for embeddings: ${this.provider}. Defaulting to Gemini logic if possible.`,
-      );
-      this.genAI = new GoogleGenerativeAI(config.apiKey);
-      this.provider = "gemini";
+      // Unsupported provider for embeddings — callers should pre-resolve to a
+      // capable provider. If we still arrive here, skip initialization and
+      // let generateEmbedding() fail gracefully instead of using a mismatched key.
+      if (!this.hasWarnedUnsupported) {
+        this.hasWarnedUnsupported = true;
+        this.logger.warn(
+          `Unsupported provider for embeddings: ${this.provider}. ` +
+            `Embedding generation will fail. Configure a Gemini API key or use an embedding-capable provider.`,
+        );
+      }
     }
   }
 

@@ -1,4 +1,7 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as fsp from "fs/promises";
+import * as net from "net";
 import { Logger, LogLevel } from "../../infrastructure/logger/logger";
 import { Terminal } from "../../utils/terminal";
 
@@ -13,6 +16,11 @@ export class DockerModelService implements vscode.Disposable {
   private readonly logger: Logger;
   private readonly terminal: Terminal;
 
+  // Cache Docker daemon availability to avoid repeated spawn failures
+  private dockerDaemonAvailable: boolean | null = null;
+  private lastDaemonCheck = 0;
+  private static readonly DAEMON_CHECK_COOLDOWN_MS = 15_000; // Re-check at most once per 15 seconds
+
   constructor() {
     this.logger = Logger.initialize(DockerModelService.name, {
       minLevel: LogLevel.INFO,
@@ -25,6 +33,73 @@ export class DockerModelService implements vscode.Disposable {
 
   static getInstance(): DockerModelService {
     return (DockerModelService.instance ??= new DockerModelService());
+  }
+
+  /**
+   * Check if Docker daemon is reachable. Caches result to avoid repeated spawn failures.
+   */
+  private async isDockerDaemonAvailable(): Promise<boolean> {
+    const now = Date.now();
+    if (
+      this.dockerDaemonAvailable !== null &&
+      now - this.lastDaemonCheck < DockerModelService.DAEMON_CHECK_COOLDOWN_MS
+    ) {
+      return this.dockerDaemonAvailable;
+    }
+
+    this.dockerDaemonAvailable = await this.probeDockerSocket();
+    this.lastDaemonCheck = Date.now();
+    return this.dockerDaemonAvailable;
+  }
+
+  /**
+   * Probe the Docker socket directly without spawning a process.
+   * Returns true if the daemon socket is connectable.
+   */
+  private async probeDockerSocket(): Promise<boolean> {
+    const isWindows = process.platform === "win32";
+    const socketPath = isWindows
+      ? "\\\\.\\pipe\\docker_engine"
+      : (process.env.DOCKER_HOST?.replace("unix://", "") ??
+        "/var/run/docker.sock");
+
+    // Fast-path existence check on all platforms
+    try {
+      if (isWindows) {
+        // Named pipes show up via fs.stat on Windows
+        await fsp.stat(socketPath);
+      } else {
+        await fsp.access(socketPath, fs.constants.R_OK);
+      }
+    } catch {
+      return false;
+    }
+
+    return new Promise((resolve) => {
+      const socket = net.createConnection({ path: socketPath });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, 1000);
+
+      socket.once("connect", () => {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once("error", () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+  }
+
+  /**
+   * Reset cached daemon status (e.g. when user explicitly retries).
+   */
+  resetDaemonCache(): void {
+    this.dockerDaemonAvailable = null;
+    this.lastDaemonCheck = 0;
   }
 
   async checkModelRunnerAvailable(): Promise<boolean> {
@@ -64,11 +139,24 @@ export class DockerModelService implements vscode.Disposable {
   }
 
   async checkOllamaRunning(): Promise<boolean> {
+    // Centralized cache check — no duplicated cooldown logic
+    const daemonUp = await this.isDockerDaemonAvailable();
+    if (!daemonUp) return false;
+
     try {
       const output = await this.terminal.getRunningOllamaContainer();
       // output is JSON string or empty
       return output.trim().length > 0;
     } catch (e) {
+      // Daemon was up during probe but failed now — invalidate cache
+      const msg = String(e);
+      if (
+        msg.includes("docker.sock") ||
+        msg.includes("connect:") ||
+        msg.includes("exit code 1")
+      ) {
+        this.resetDaemonCache();
+      }
       return false;
     }
   }
@@ -108,6 +196,12 @@ export class DockerModelService implements vscode.Disposable {
   }
 
   async getModels(): Promise<DockerModel[]> {
+    // Fast-path: skip all Docker daemon commands if daemon is known to be down
+    const daemonUp = await this.isDockerDaemonAvailable();
+    if (!daemonUp) {
+      return [];
+    }
+
     let runnerModels: DockerModel[] = [];
     const ollamaModels: DockerModel[] = [];
 

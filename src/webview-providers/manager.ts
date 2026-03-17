@@ -517,16 +517,53 @@ export class WebViewProviderManager
   private async handleStreamError(event: IEventPayload) {
     if (this.webviewView?.webview) {
       const requestId = event.message?.requestId ?? event.message?.id;
+
       await this.webviewView.webview.postMessage({
         type: StreamEventType.ERROR,
         payload: {
           requestId,
           threadId: event.message?.threadId,
           timestamp: Date.now(),
-          error: event.message?.error || event.error || "An error occurred",
+          error:
+            event.message?.error ||
+            event.error ||
+            this.extractErrorFromContent(event.message?.content) ||
+            "An error occurred",
         },
       });
     }
+  }
+
+  /**
+   * Extract an error string from raw content only if it structurally
+   * looks like an error (JSON with message/error field, or a short
+   * single-line string with error-like phrasing). Avoids surfacing
+   * LLM response chunks as error text.
+   */
+  private extractErrorFromContent(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+
+    // Only extract from valid JSON with explicit error/message shape.
+    // Never reflect raw string content — it may be LLM output containing PII.
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed)
+      ) {
+        const obj = parsed as Record<string, unknown>;
+        if (typeof obj.message === "string" && obj.message.length < 200) {
+          return obj.message;
+        }
+        if (typeof obj.error === "string" && obj.error.length < 200) {
+          return obj.error;
+        }
+      }
+    } catch {
+      // Not JSON — do not reflect raw string content
+    }
+    return undefined;
   }
 
   private async handleStreamMetadata(event: IEventPayload) {

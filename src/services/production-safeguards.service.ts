@@ -34,7 +34,6 @@ export interface ResourceLimits {
  */
 export type RecoveryAction =
   | "CLEAR_CACHE"
-  | "FORCE_GC"
   | "REDUCE_BATCH_SIZE"
   | "PAUSE_INDEXING"
   | "RESTART_WORKER"
@@ -130,14 +129,6 @@ export class ProductionSafeguards implements vscode.Disposable {
         cooldownMs: 30000, // 30 seconds
         maxRetries: 3,
         priority: 1,
-      },
-      {
-        action: "FORCE_GC",
-        condition: (usage, limits) =>
-          usage.memoryUsage.heapUsed / 1024 / 1024 > limits.gcThresholdMB,
-        cooldownMs: 15000, // 15 seconds
-        maxRetries: 5,
-        priority: 2,
       },
       {
         action: "REDUCE_BATCH_SIZE",
@@ -453,16 +444,6 @@ export class ProductionSafeguards implements vscode.Disposable {
       case "CLEAR_CACHE":
         // Signal cache clearing to relevant services
         vscode.commands.executeCommand("codebuddy.clearVectorCache");
-        break;
-
-      case "FORCE_GC":
-        if (global.gc) {
-          global.gc();
-        } else {
-          this.logger.warn(
-            "Garbage collection not available (start with --expose-gc)",
-          );
-        }
         break;
 
       case "REDUCE_BATCH_SIZE":
