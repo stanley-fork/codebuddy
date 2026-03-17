@@ -50,6 +50,7 @@ import {
   classifyFailoverReason,
 } from "../../services/provider-failover.service";
 import { TOOL_NAMES } from "../constants/tool-names";
+import { SqlJsCheckpointSaver } from "../../services/sqljs-checkpoint-saver";
 
 /** Typed alias for the async iterator from a LangGraph agent stream. */
 type AgentStreamIterator = AsyncIterator<unknown>;
@@ -435,8 +436,6 @@ export class CodeBuddyAgentService {
     if (workspacePath) {
       // Primary: sql.js (WASM) — works reliably in bundled VS Code extensions
       try {
-        const { SqlJsCheckpointSaver } =
-          await import("../../services/sqljs-checkpoint-saver");
         const codeBuddyDir = path.join(workspacePath, ".codebuddy");
         await fs.promises.mkdir(codeBuddyDir, { recursive: true });
 
