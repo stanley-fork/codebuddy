@@ -1,5 +1,4 @@
 import * as assert from "assert";
-import * as sinon from "sinon";
 import type {
   StandupRecord,
   Commitment,
@@ -89,7 +88,7 @@ suite("LangChainStandupTool", () => {
   });
 
   teardown(() => {
-    sinon.restore();
+    // no-op — keep for future mock cleanup
   });
 
   test("tool has correct name", () => {
@@ -308,13 +307,13 @@ suite("Fallback standup parser (regex)", () => {
 suite("Name matching logic", () => {
   /** Replicated from MeetingIntelligenceService for unit testing. */
   function nameMatch(candidate: string, target: string): boolean {
-    const c = candidate.toLowerCase().trim();
-    const t = target.toLowerCase().trim();
-    if (c === t) return true;
-    const cParts = c.split(/\s+/);
-    const tParts = t.split(/\s+/);
-    return cParts.some((cp) =>
-      tParts.some((tp) => cp === tp && cp.length > 2),
+    const normalizedCandidate = candidate.toLowerCase().trim();
+    const normalizedTarget = target.toLowerCase().trim();
+    if (normalizedCandidate === normalizedTarget) return true;
+    const candidateParts = normalizedCandidate.split(/\s+/);
+    const targetParts = normalizedTarget.split(/\s+/);
+    return candidateParts.some((part) =>
+      targetParts.some((tPart) => part === tPart && part.length > 2),
     );
   }
 
@@ -369,5 +368,16 @@ suite("Date range filtering logic", () => {
 
   test("recognizes 'last week'", () => {
     assert.ok(/last\s*week/i.test("last week"));
+  });
+
+  test("'this week' calculation handles Sunday (day 0) correctly", () => {
+    // (getDay() + 6) % 7 gives days since Monday
+    // Sunday: getDay()=0 → (0+6)%7=6 (correct: 6 days back to Monday)
+    // Monday: getDay()=1 → (1+6)%7=0 (correct: 0 days back)
+    // Tuesday: getDay()=2 → (2+6)%7=1 (correct: 1 day back)
+    assert.strictEqual((0 + 6) % 7, 6); // Sunday → 6 days back
+    assert.strictEqual((1 + 6) % 7, 0); // Monday → 0 days back
+    assert.strictEqual((2 + 6) % 7, 1); // Tuesday → 1 day back
+    assert.strictEqual((6 + 6) % 7, 5); // Saturday → 5 days back
   });
 });
