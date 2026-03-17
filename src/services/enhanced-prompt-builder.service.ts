@@ -171,7 +171,19 @@ export class EnhancedPromptBuilderService {
     }
 
     // Inject persistent memories (user preferences + project knowledge)
-    const coreMemories = MemoryTool.getFormattedMemories();
+    const MAX_MEMORY_CHARS = 4_000;
+    const allMemories = MemoryTool.getFormattedMemories() ?? "";
+    const coreMemories =
+      allMemories.length <= MAX_MEMORY_CHARS
+        ? allMemories
+        : (() => {
+            const truncated = allMemories.slice(-MAX_MEMORY_CHARS);
+            const firstNewline = truncated.indexOf("\n");
+            return (
+              "[...older memories omitted...]\n" +
+              truncated.slice(firstNewline + 1)
+            );
+          })();
 
     const enhancedPrompt = `
       persona: |

@@ -718,10 +718,36 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                 typeof message.message === "string" &&
                 message.message.trim().toLowerCase().startsWith("/standup")
               ) {
+                // Validate input before dispatching (Issue 10)
+                const standupValidation = this.inputValidator.validateInput(
+                  message.message,
+                  "chat",
+                );
+                if (standupValidation.blocked) {
+                  this.logger.warn(
+                    "Standup input blocked due to security concerns",
+                    {
+                      originalLength: message.message.length,
+                      warnings: standupValidation.warnings,
+                    },
+                  );
+                  await this.sendResponse(
+                    "⚠️ Your message contains potentially unsafe content and has been blocked. Please rephrase your input.",
+                    "bot",
+                  );
+                  break;
+                }
                 const notes = message.message
                   .trim()
                   .substring("/standup".length)
                   .trim();
+                if (!notes) {
+                  await this.sendResponse(
+                    "Usage: `/standup <paste your meeting notes>`",
+                    "bot",
+                  );
+                  break;
+                }
                 const ctx: HandlerContext = {
                   webview: _view,
                   logger: this.logger,

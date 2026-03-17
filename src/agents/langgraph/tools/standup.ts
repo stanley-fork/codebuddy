@@ -3,6 +3,37 @@ import { StructuredTool } from "@langchain/core/tools";
 import { Logger, LogLevel } from "../../../infrastructure/logger/logger";
 import { MeetingIntelligenceService } from "../../../services/meeting-intelligence.service";
 
+const StandupToolSchema = z.object({
+  operation: z
+    .enum(["ingest", "my_tasks", "blockers", "history"])
+    .describe(
+      "The operation: 'ingest' (parse & store notes), 'my_tasks' (get commitments), 'blockers' (list blockers), 'history' (query past standups)",
+    ),
+  args: z
+    .object({
+      notes: z
+        .string()
+        .optional()
+        .describe("Raw meeting notes text (required for 'ingest')"),
+      person: z
+        .string()
+        .optional()
+        .describe("Person name to filter by (for 'my_tasks' and 'history')"),
+      dateRange: z
+        .string()
+        .optional()
+        .describe("Date range like 'last 3 days', 'this week' (for 'history')"),
+      ticketId: z
+        .string()
+        .optional()
+        .describe("Ticket/MR ID to filter by (for 'history')"),
+    })
+    .optional()
+    .describe("Arguments for the operation"),
+});
+
+type StandupToolInput = z.infer<typeof StandupToolSchema>;
+
 export class LangChainStandupTool extends StructuredTool<any> {
   private readonly logger: Logger;
 
@@ -21,46 +52,9 @@ export class LangChainStandupTool extends StructuredTool<any> {
   description =
     "Parse and query daily standup / meeting notes. Use 'ingest' to parse new meeting notes. Use 'my_tasks' to get a person's commitments. Use 'blockers' to list dependency chains. Use 'history' to query past standups by person, date, or ticket.";
 
-  schema = z.object({
-    operation: z
-      .enum(["ingest", "my_tasks", "blockers", "history"])
-      .describe(
-        "The operation: 'ingest' (parse & store notes), 'my_tasks' (get commitments), 'blockers' (list blockers), 'history' (query past standups)",
-      ),
-    args: z
-      .object({
-        notes: z
-          .string()
-          .optional()
-          .describe("Raw meeting notes text (required for 'ingest')"),
-        person: z
-          .string()
-          .optional()
-          .describe("Person name to filter by (for 'my_tasks' and 'history')"),
-        dateRange: z
-          .string()
-          .optional()
-          .describe(
-            "Date range like 'last 3 days', 'this week' (for 'history')",
-          ),
-        ticketId: z
-          .string()
-          .optional()
-          .describe("Ticket/MR ID to filter by (for 'history')"),
-      })
-      .optional()
-      .describe("Arguments for the operation"),
-  });
+  schema = StandupToolSchema;
 
-  async _call(input: {
-    operation: string;
-    args?: {
-      notes?: string;
-      person?: string;
-      dateRange?: string;
-      ticketId?: string;
-    };
-  }): Promise<string> {
+  async _call(input: StandupToolInput): Promise<string> {
     this.logger.info(`Executing standup_intelligence: ${input.operation}`);
 
     try {
