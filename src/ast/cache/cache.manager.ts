@@ -130,6 +130,7 @@ export class CacheManager {
    */
   clear(): void {
     this.cache.clear();
+    this.resetStats();
   }
 
   /**
@@ -143,6 +144,14 @@ export class CacheManager {
       size: this.cache.size,
       hitRate: total > 0 ? this.hits / total : 0,
     };
+  }
+
+  /**
+   * Resets hit/miss counters — call periodically or after a clear().
+   */
+  resetStats(): void {
+    this.hits = 0;
+    this.misses = 0;
   }
 
   /**

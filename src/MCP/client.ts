@@ -204,7 +204,6 @@ export class MCPClient {
       `Reconnect attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS} in ${delay}ms...`,
     );
     this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
       this.connect().catch((error) => {
         this.logger.error("Reconnection failed:", error);
       });

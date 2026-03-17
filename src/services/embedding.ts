@@ -39,7 +39,12 @@ export interface EmbeddingProviderConfig {
 export class EmbeddingService {
   private static readonly DEFAULT_OPTIONS: Required<EmbeddingServiceOptions> =
     EmbeddingsConfig;
-  private static readonly warnedProviders = new Set<string>();
+  private static warnedProviders = new Set<string>();
+
+  /** Reset the warned-providers dedup state (for test isolation). */
+  static _resetWarnedProviders(): void {
+    EmbeddingService.warnedProviders.clear();
+  }
 
   private readonly options: Required<EmbeddingServiceOptions>;
   private readonly requestInterval: number;
