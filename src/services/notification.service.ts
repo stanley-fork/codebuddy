@@ -33,6 +33,11 @@ export class NotificationService {
   private _onDidNotificationChange = new vscode.EventEmitter<void>();
   public readonly onDidNotificationChange = this._onDidNotificationChange.event;
 
+  // Dedup: track recent notifications to prevent duplicates within a time window
+  private static readonly DEDUP_WINDOW_MS = 30_000; // 30 seconds
+  private static readonly MAX_STORED_NOTIFICATIONS = 500;
+  private recentNotifications = new Map<string, number>();
+
   private constructor() {
     this.logger = Logger.initialize("NotificationService", {});
     this.dbService = SqliteDatabaseService.getInstance();
@@ -54,12 +59,37 @@ export class NotificationService {
     message: string,
     source: NotificationSource = NotificationSource.System,
   ): Promise<void> {
+    // Deduplicate: skip if the same type+title was added within the window
+    const dedupKey = `${type}:${title}`;
+    const now = Date.now();
+    const lastSeen = this.recentNotifications.get(dedupKey);
+    if (lastSeen && now - lastSeen < NotificationService.DEDUP_WINDOW_MS) {
+      return; // duplicate within window — suppress
+    }
+    this.recentNotifications.set(dedupKey, now);
+
+    // Prune stale dedup entries periodically (keep map bounded)
+    if (this.recentNotifications.size > 200) {
+      for (const [key, ts] of this.recentNotifications) {
+        if (now - ts >= NotificationService.DEDUP_WINDOW_MS) {
+          this.recentNotifications.delete(key);
+        }
+      }
+    }
+
     try {
       await this.dbService.initialize();
       this.dbService.executeSqlCommand(
         `INSERT INTO notifications (type, title, message, source, read_status, timestamp) 
          VALUES (?, ?, ?, ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
         [type, title, message, source],
+      );
+      // Prune oldest rows when table exceeds the retention cap
+      this.dbService.executeSqlCommand(
+        `DELETE FROM notifications WHERE id NOT IN (
+          SELECT id FROM notifications ORDER BY timestamp DESC LIMIT ?
+        )`,
+        [NotificationService.MAX_STORED_NOTIFICATIONS],
       );
       this.logger.info(`Added notification: ${title}`);
       this._onDidNotificationChange.fire();

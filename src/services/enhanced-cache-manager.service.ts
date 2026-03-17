@@ -43,6 +43,7 @@ export interface CacheConfig {
 export class EnhancedCacheManager implements vscode.Disposable {
   private logger: Logger;
   private config: CacheConfig;
+  private readonly instanceName: string;
 
   // Multi-level cache storage
   private embeddingCache = new Map<string, CacheEntry<number[]>>();
@@ -66,8 +67,13 @@ export class EnhancedCacheManager implements vscode.Disposable {
   private performanceProfiler?: any;
   private readonly disposables: vscode.Disposable[] = [];
 
-  constructor(config: Partial<CacheConfig> = {}, performanceProfiler?: any) {
-    this.logger = Logger.initialize("EnhancedCacheManager", {
+  constructor(
+    config: Partial<CacheConfig> = {},
+    performanceProfiler?: any,
+    instanceName = "default",
+  ) {
+    this.instanceName = instanceName;
+    this.logger = Logger.initialize(`EnhancedCacheManager:${instanceName}`, {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,
       enableFile: true,
@@ -87,7 +93,7 @@ export class EnhancedCacheManager implements vscode.Disposable {
     this.stats.maxSize = this.config.maxSize;
     this.startCleanupTimer();
 
-    this.logger.info("Enhanced cache manager initialized", {
+    this.logger.info(`Enhanced cache manager initialized [${instanceName}]`, {
       maxSize: this.config.maxSize,
       maxMemoryMB: this.config.maxMemoryMB,
       evictionPolicy: this.config.evictionPolicy,
