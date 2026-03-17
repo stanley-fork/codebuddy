@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as net from "net";
 import { Logger, LogLevel } from "../../infrastructure/logger/logger";
 import { Terminal } from "../../utils/terminal";
 
@@ -16,7 +18,7 @@ export class DockerModelService implements vscode.Disposable {
   // Cache Docker daemon availability to avoid repeated spawn failures
   private dockerDaemonAvailable: boolean | null = null;
   private lastDaemonCheck = 0;
-  private readonly DAEMON_CHECK_COOLDOWN_MS = 60_000; // Re-check at most once per minute
+  private static readonly DAEMON_CHECK_COOLDOWN_MS = 60_000; // Re-check at most once per minute
 
   constructor() {
     this.logger = Logger.initialize(DockerModelService.name, {
@@ -39,22 +41,53 @@ export class DockerModelService implements vscode.Disposable {
     const now = Date.now();
     if (
       this.dockerDaemonAvailable !== null &&
-      now - this.lastDaemonCheck < this.DAEMON_CHECK_COOLDOWN_MS
+      now - this.lastDaemonCheck < DockerModelService.DAEMON_CHECK_COOLDOWN_MS
     ) {
       return this.dockerDaemonAvailable;
     }
 
-    try {
-      // `docker ps` requires a running daemon — cheapest reachability check.
-      // getRunningOllamaContainer() runs `docker ps --filter ...` which will
-      // throw if the daemon socket is unavailable.
-      await this.terminal.getRunningOllamaContainer();
-      this.dockerDaemonAvailable = true;
-    } catch {
-      this.dockerDaemonAvailable = false;
-    }
-    this.lastDaemonCheck = now;
+    this.dockerDaemonAvailable = await this.probeDockerSocket();
+    this.lastDaemonCheck = Date.now();
     return this.dockerDaemonAvailable;
+  }
+
+  /**
+   * Probe the Docker socket directly without spawning a process.
+   * Returns true if the daemon socket is connectable.
+   */
+  private probeDockerSocket(): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socketPath =
+        process.platform === "win32"
+          ? "\\\\.\\pipe\\docker_engine"
+          : (process.env.DOCKER_HOST?.replace("unix://", "") ??
+            "/var/run/docker.sock");
+
+      // On Unix: check if socket file exists first (free, no process spawn)
+      if (process.platform !== "win32") {
+        try {
+          fs.accessSync(socketPath);
+        } catch {
+          return resolve(false);
+        }
+      }
+
+      const socket = net.createConnection({ path: socketPath });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, 1000);
+
+      socket.once("connect", () => {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once("error", () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
   }
 
   /**
@@ -105,7 +138,10 @@ export class DockerModelService implements vscode.Disposable {
     // Skip if we know Docker daemon is not available
     if (this.dockerDaemonAvailable === false) {
       const now = Date.now();
-      if (now - this.lastDaemonCheck < this.DAEMON_CHECK_COOLDOWN_MS) {
+      if (
+        now - this.lastDaemonCheck <
+        DockerModelService.DAEMON_CHECK_COOLDOWN_MS
+      ) {
         return false;
       }
     }

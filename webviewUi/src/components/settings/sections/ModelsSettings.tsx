@@ -96,8 +96,8 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({ searchQuery: _se
 
   // Track latest state via refs so the interval closure always reads current values
   // without requiring teardown/re-creation of the interval on every state change.
-  const dockerRunnerRef = useRef(dockerRunnerEnabled);
-  const composeStartedRef = useRef(composeStarted);
+  const dockerRunnerRef = useRef(dockerRunnerEnabled || false);
+  const composeStartedRef = useRef(composeStarted || false);
   dockerRunnerRef.current = dockerRunnerEnabled;
   composeStartedRef.current = composeStarted;
 

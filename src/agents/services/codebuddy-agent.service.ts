@@ -177,12 +177,12 @@ const TOOL_DESCRIPTIONS: Record<string, IToolDescription> = {
   [TOOL_NAMES.WRITE_TODOS]: {
     name: "Todo Manager",
     description: "Updating todo list...",
-    activityType: "working",
+    activityType: "planning",
   },
   [TOOL_NAMES.TASK]: {
     name: "Task Runner",
     description: "Running task...",
-    activityType: "executing",
+    activityType: "building",
   },
 };
 
@@ -445,7 +445,7 @@ export class CodeBuddyAgentService {
           vscode.extensions.getExtension("fiatinnovations.ola-code-buddy")
             ?.extensionPath ?? path.resolve(__dirname, "..", "..");
 
-        const saver = SqlJsCheckpointSaver.create({
+        const saver = await SqlJsCheckpointSaver.create({
           dbDir: codeBuddyDir,
           extensionPath,
         });
