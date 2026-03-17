@@ -523,7 +523,11 @@ export class WebViewProviderManager
           requestId,
           threadId: event.message?.threadId,
           timestamp: Date.now(),
-          error: event.message?.error || event.error || "An error occurred",
+          error:
+            event.message?.content ||
+            event.message?.error ||
+            event.error ||
+            "An error occurred",
         },
       });
     }

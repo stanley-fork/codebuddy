@@ -26,13 +26,47 @@ export class AstIndexingService {
       this.logger.error("Failed to initialize vector store", err);
     });
 
-    // Initialize embedding service
-    const provider = getGenerativeAiModel() || "Gemini";
-    const { apiKey, baseUrl } = getAPIKeyAndModel(provider);
+    // Initialize embedding service.
+    // Providers like Anthropic don't support embeddings — use Gemini as the
+    // dedicated embedding provider when the main provider can't do embeddings.
+    const mainProvider = (getGenerativeAiModel() || "Gemini").toLowerCase();
+    const embeddingCapableProviders = [
+      "gemini",
+      "openai",
+      "local",
+      "deepseek",
+      "groq",
+    ];
+
+    let embeddingProvider: string;
+    let embeddingApiKey: string;
+    let embeddingBaseUrl: string | undefined;
+
+    if (embeddingCapableProviders.includes(mainProvider)) {
+      embeddingProvider = mainProvider;
+      const resolved = getAPIKeyAndModel(mainProvider);
+      embeddingApiKey = resolved.apiKey;
+      embeddingBaseUrl = resolved.baseUrl;
+    } else {
+      // Fallback to Gemini for embeddings
+      embeddingProvider = "gemini";
+      try {
+        const resolved = getAPIKeyAndModel("gemini");
+        embeddingApiKey = resolved.apiKey;
+        embeddingBaseUrl = resolved.baseUrl;
+      } catch {
+        // No Gemini key configured — embeddings will be unavailable
+        this.logger.warn(
+          `Main provider "${mainProvider}" does not support embeddings and no Gemini API key is configured. Embedding-based features will be disabled.`,
+        );
+        embeddingApiKey = "";
+      }
+    }
+
     this.embeddingService = new EmbeddingService({
-      apiKey,
-      provider,
-      baseUrl,
+      apiKey: embeddingApiKey,
+      provider: embeddingProvider,
+      baseUrl: embeddingBaseUrl,
     });
 
     this.initializeWorker(context);

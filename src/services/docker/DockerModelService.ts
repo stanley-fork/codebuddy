@@ -13,6 +13,11 @@ export class DockerModelService implements vscode.Disposable {
   private readonly logger: Logger;
   private readonly terminal: Terminal;
 
+  // Cache Docker daemon availability to avoid repeated spawn failures
+  private dockerDaemonAvailable: boolean | null = null;
+  private lastDaemonCheck = 0;
+  private readonly DAEMON_CHECK_COOLDOWN_MS = 60_000; // Re-check at most once per minute
+
   constructor() {
     this.logger = Logger.initialize(DockerModelService.name, {
       minLevel: LogLevel.INFO,
@@ -25,6 +30,45 @@ export class DockerModelService implements vscode.Disposable {
 
   static getInstance(): DockerModelService {
     return (DockerModelService.instance ??= new DockerModelService());
+  }
+
+  /**
+   * Check if Docker daemon is reachable. Caches result to avoid repeated spawn failures.
+   */
+  private async isDockerDaemonAvailable(): Promise<boolean> {
+    const now = Date.now();
+    if (
+      this.dockerDaemonAvailable !== null &&
+      now - this.lastDaemonCheck < this.DAEMON_CHECK_COOLDOWN_MS
+    ) {
+      return this.dockerDaemonAvailable;
+    }
+
+    try {
+      // checkDockerModelRunner only tests if the CLI subcommand exists (--help),
+      // not if the daemon is running. Use a lightweight daemon check instead.
+      await this.terminal.getRunningOllamaContainer();
+      // If we get here without error, daemon is reachable
+      this.dockerDaemonAvailable = true;
+    } catch {
+      // Try one more lightweight check — docker ps is the cheapest daemon call
+      try {
+        await this.terminal.getRunningOllamaContainer();
+        this.dockerDaemonAvailable = true;
+      } catch {
+        this.dockerDaemonAvailable = false;
+      }
+    }
+    this.lastDaemonCheck = now;
+    return this.dockerDaemonAvailable;
+  }
+
+  /**
+   * Reset cached daemon status (e.g. when user explicitly retries).
+   */
+  resetDaemonCache(): void {
+    this.dockerDaemonAvailable = null;
+    this.lastDaemonCheck = 0;
   }
 
   async checkModelRunnerAvailable(): Promise<boolean> {
@@ -64,11 +108,31 @@ export class DockerModelService implements vscode.Disposable {
   }
 
   async checkOllamaRunning(): Promise<boolean> {
+    // Skip if we know Docker daemon is not available
+    if (this.dockerDaemonAvailable === false) {
+      const now = Date.now();
+      if (now - this.lastDaemonCheck < this.DAEMON_CHECK_COOLDOWN_MS) {
+        return false;
+      }
+    }
+
     try {
       const output = await this.terminal.getRunningOllamaContainer();
+      this.dockerDaemonAvailable = true;
+      this.lastDaemonCheck = Date.now();
       // output is JSON string or empty
       return output.trim().length > 0;
     } catch (e) {
+      // Mark daemon as unavailable if this looks like a daemon-not-running error
+      const msg = String(e);
+      if (
+        msg.includes("docker.sock") ||
+        msg.includes("connect:") ||
+        msg.includes("exit code 1")
+      ) {
+        this.dockerDaemonAvailable = false;
+        this.lastDaemonCheck = Date.now();
+      }
       return false;
     }
   }
@@ -108,6 +172,12 @@ export class DockerModelService implements vscode.Disposable {
   }
 
   async getModels(): Promise<DockerModel[]> {
+    // Fast-path: skip all Docker daemon commands if daemon is known to be down
+    const daemonUp = await this.isDockerDaemonAvailable();
+    if (!daemonUp) {
+      return [];
+    }
+
     let runnerModels: DockerModel[] = [];
     const ollamaModels: DockerModel[] = [];
 

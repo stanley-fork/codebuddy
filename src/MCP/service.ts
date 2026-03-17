@@ -14,11 +14,13 @@ import {
   MCPTool,
   MCPToolResult,
 } from "./types";
+import { CircuitBreaker, CircuitState } from "./circuit-breaker";
 
 export class MCPService implements vscode.Disposable {
   private static instance: MCPService;
   private clients = new Map<string, MCPClient>();
   private initialized = false;
+  private initializePromise: Promise<void> | null = null;
   private serverConfigs: MCPServersConfig = {};
   private toolsLoadedPerServer = new Map<string, boolean>();
 
@@ -38,6 +40,11 @@ export class MCPService implements vscode.Disposable {
   private dockerWarningShown = false;
   private dockerRetryInProgress = false;
 
+  // Circuit breakers: per-server failure tracking to prevent retry storms
+  private circuitBreakers = new Map<string, CircuitBreaker>();
+  // Connection mutex: prevent parallel connection attempts to the same server
+  private connectionInProgress = new Map<string, Promise<void>>();
+
   constructor(notificationService?: NotificationService) {
     this.logger = Logger.initialize("MCPService", {
       minLevel: LogLevel.INFO,
@@ -55,6 +62,15 @@ export class MCPService implements vscode.Disposable {
   }
 
   async initialize(): Promise<void> {
+    // Guard against double initialization — memoize the promise
+    if (this.initializePromise) {
+      return this.initializePromise;
+    }
+    this.initializePromise = this.doInitialize();
+    return this.initializePromise;
+  }
+
+  private async doInitialize(): Promise<void> {
     this.logger.info("Initializing MCP service...");
 
     const config = this.loadConfiguration();
@@ -239,12 +255,39 @@ export class MCPService implements vscode.Disposable {
     );
   }
 
+  /**
+   * Get or create a circuit breaker for a server.
+   */
+  private getCircuitBreaker(serverName: string): CircuitBreaker {
+    let cb = this.circuitBreakers.get(serverName);
+    if (!cb) {
+      cb = new CircuitBreaker(serverName, {
+        failureThreshold: 3,
+        resetTimeoutMs: 5 * 60 * 1000, // 5 minutes
+      });
+      this.circuitBreakers.set(serverName, cb);
+    }
+    return cb;
+  }
+
   async ensureServerConnected(serverName: string): Promise<void> {
     if (this.clients.has(serverName)) {
       const client = this.clients.get(serverName);
       if (client && client.isConnected && client.isConnected()) {
         return;
       }
+    }
+
+    // Check circuit breaker before attempting connection
+    const cb = this.getCircuitBreaker(serverName);
+    if (!cb.canAttempt()) {
+      const remaining = Math.ceil(cb.getRemainingCooldownMs() / 1000);
+      this.logger.warn(
+        `Circuit breaker OPEN for "${serverName}" — skipping connection (retry in ${remaining}s)`,
+      );
+      throw new Error(
+        `Connection to "${serverName}" is temporarily disabled after repeated failures. Retry in ${remaining}s.`,
+      );
     }
 
     const config = this.serverConfigs[serverName];
@@ -256,7 +299,23 @@ export class MCPService implements vscode.Disposable {
       throw new Error(`Server "${serverName}" is disabled`);
     }
 
-    await this.connectToServer(serverName, config);
+    // Connection mutex: if a connection attempt is already in progress, wait for it
+    const existing = this.connectionInProgress.get(serverName);
+    if (existing) {
+      this.logger.debug(
+        `Connection to "${serverName}" already in progress, waiting...`,
+      );
+      await existing;
+      return;
+    }
+
+    const connectionPromise = this.connectToServer(serverName, config);
+    this.connectionInProgress.set(serverName, connectionPromise);
+    try {
+      await connectionPromise;
+    } finally {
+      this.connectionInProgress.delete(serverName);
+    }
   }
 
   async ensureToolsLoaded(serverName: string): Promise<void> {
@@ -609,11 +668,60 @@ export class MCPService implements vscode.Disposable {
       if (await this.testDockerCommand(cmd)) {
         this.dockerPath = cmd;
         this.logger.info(`Found Docker executable at: ${cmd}`);
+
+        // Also verify the Docker daemon is actually running
+        const daemonRunning = await this.isDockerDaemonRunning(cmd);
+        if (!daemonRunning) {
+          this.logger.warn(
+            `Docker CLI found at ${cmd} but daemon is not running`,
+          );
+          return false;
+        }
+
         return true;
       }
     }
 
     return false;
+  }
+
+  /**
+   * Check if the Docker daemon is reachable (not just the CLI binary).
+   * Prevents spawning MCP gateway processes that immediately fail.
+   */
+  private isDockerDaemonRunning(command: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      try {
+        const env = {
+          ...process.env,
+          PATH:
+            process.env.PATH +
+            (process.platform === "darwin"
+              ? ":/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+              : ""),
+        };
+
+        const proc = spawn(
+          command,
+          ["info", "--format", "{{.ServerVersion}}"],
+          {
+            stdio: "pipe",
+            env,
+            shell: false,
+          },
+        );
+
+        proc.on("error", () => resolve(false));
+        proc.on("exit", (code: number | null) => resolve(code === 0));
+
+        setTimeout(() => {
+          proc.kill();
+          resolve(false);
+        }, 5000);
+      } catch {
+        resolve(false);
+      }
+    });
   }
 
   private testDockerCommand(command: string): Promise<boolean> {
@@ -655,6 +763,8 @@ export class MCPService implements vscode.Disposable {
     serverConfig: MCPServerConfig,
     maxRetries = 3,
   ): Promise<void> {
+    const cb = this.getCircuitBreaker(serverName);
+
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         const client = new MCPClient(
@@ -665,6 +775,7 @@ export class MCPService implements vscode.Disposable {
         await client.connect();
 
         this.clients.set(serverName, client);
+        cb.recordSuccess();
 
         if (this.isGatewayMode()) {
           this.logger.info(
@@ -690,16 +801,29 @@ export class MCPService implements vscode.Disposable {
         const isLastAttempt = attempt === maxRetries - 1;
 
         if (isLastAttempt) {
+          cb.recordFailure();
+          const cbState = cb.getState();
           this.logger.error(
-            `Failed to connect to ${serverName} after ${maxRetries} attempts`,
+            `Failed to connect to ${serverName} after ${maxRetries} attempts (circuit: ${cbState})`,
             error,
           );
-          this.notificationService.addNotification(
-            "error",
-            "MCP Connection Failed",
-            `Failed to connect to ${serverName} after ${maxRetries} attempts: ${error.message || error}`,
-            NotificationSource.MCP,
-          );
+
+          if (cbState === CircuitState.OPEN) {
+            const cooldown = Math.ceil(cb.getRemainingCooldownMs() / 1000);
+            this.notificationService.addNotification(
+              "error",
+              "MCP Connection Failed",
+              `Failed to connect to ${serverName}. Retries paused for ${cooldown}s to avoid resource waste.`,
+              NotificationSource.MCP,
+            );
+          } else {
+            this.notificationService.addNotification(
+              "error",
+              "MCP Connection Failed",
+              `Failed to connect to ${serverName} after ${maxRetries} attempts: ${error.message || error}`,
+              NotificationSource.MCP,
+            );
+          }
           throw error;
         }
 
@@ -714,6 +838,25 @@ export class MCPService implements vscode.Disposable {
 
   getToolCount(): number {
     return this.getAllToolsSync().length;
+  }
+
+  /**
+   * Reset the circuit breaker for a specific server (e.g. on manual retry from UI).
+   */
+  resetCircuitBreaker(serverName: string): void {
+    const cb = this.circuitBreakers.get(serverName);
+    if (cb) {
+      this.logger.info(`Circuit breaker reset for "${serverName}"`);
+      cb.reset();
+    }
+  }
+
+  /**
+   * Get circuit breaker state for a server (for UI/diagnostics).
+   */
+  getCircuitBreakerState(serverName: string): string {
+    const cb = this.circuitBreakers.get(serverName);
+    return cb ? cb.getState() : "none";
   }
 
   async dispose(): Promise<void> {
@@ -741,7 +884,10 @@ export class MCPService implements vscode.Disposable {
     this.toolsByServer.clear();
     this.toolsLoadedPerServer.clear();
     this.initialized = false;
+    this.initializePromise = null;
     this.dockerAvailable = false;
+    this.circuitBreakers.clear();
+    this.connectionInProgress.clear();
 
     this.logger.info("MCP service disposed");
   }

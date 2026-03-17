@@ -83,12 +83,13 @@ export class EmbeddingService {
         baseURL: baseURL,
       });
     } else {
-      // Fallback or default to Gemini if unknown, but better to warn
+      // Unsupported provider for embeddings — callers should pre-resolve to a
+      // capable provider. If we still arrive here, skip initialization and
+      // let generateEmbedding() fail gracefully instead of using a mismatched key.
       this.logger.warn(
-        `Unsupported provider for embeddings: ${this.provider}. Defaulting to Gemini logic if possible.`,
+        `Unsupported provider for embeddings: ${this.provider}. ` +
+          `Embedding generation will fail. Configure a Gemini API key or use an embedding-capable provider.`,
       );
-      this.genAI = new GoogleGenerativeAI(config.apiKey);
-      this.provider = "gemini";
     }
   }
 
