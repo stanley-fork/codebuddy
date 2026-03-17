@@ -98,6 +98,38 @@ function langGraphRoleToCompactionRole(
   return (m.role as CompactionMessage["role"]) ?? "user";
 }
 
+/**
+ * Heuristic-based token estimator that accounts for content type.
+ * More accurate than naive chars/4 for code, JSON, and non-Latin text.
+ */
+function estimateTokens(text: string): number {
+  if (!text) return 0;
+
+  // Detect code/JSON density
+  const codeBlocks = text.match(/```[\s\S]*?```/g) ?? [];
+  const jsonBlocks = text.match(/\{[\s\S]*?\}/g) ?? [];
+  const structuredLen =
+    codeBlocks.reduce((s, b) => s + b.length, 0) +
+    jsonBlocks.reduce((s, b) => s + b.length, 0);
+  const codeRatio = structuredLen / text.length;
+
+  // Detect non-ASCII density (CJK, Arabic, etc.)
+  const nonAscii = text.match(/[^\x00-\x7F]/g)?.length ?? 0;
+  const nonAsciiRatio = nonAscii / text.length;
+
+  let charsPerToken: number;
+  if (nonAsciiRatio > 0.3) {
+    charsPerToken = 1.5; // CJK-heavy content
+  } else if (codeRatio > 0.5) {
+    charsPerToken = 2.5; // Code/JSON heavy
+  } else {
+    charsPerToken = 3.5; // Natural language (English)
+  }
+
+  // 10% overhead for special tokens (BOS, EOS, role markers)
+  return Math.ceil((text.length / charsPerToken) * 1.1);
+}
+
 // Guaranteed fallback — extracted as a named constant for compile-time safety
 const DEFAULT_TOOL_DESCRIPTION: IToolDescription = Object.freeze({
   name: "Tool",
@@ -375,6 +407,7 @@ export class CodeBuddyAgentService {
   >();
   private static readonly COMPACTION_COOLDOWN_MS = 30_000;
   private static readonly MIN_NEW_MESSAGES_FOR_RECHECK = 3;
+  private static readonly MAX_COMPACTION_CACHE_ENTRIES = 100;
 
   /** Cached LLM client for summarization, keyed by provider:model. */
   private cachedSummarizationModel: {
@@ -480,8 +513,7 @@ export class CodeBuddyAgentService {
           }
         },
         async (text: string): Promise<number> => {
-          // Character-based estimation: ~4 chars per token
-          return Math.ceil(text.length / 4);
+          return estimateTokens(text);
         },
       );
       this.logger.log(
@@ -596,8 +628,9 @@ export class CodeBuddyAgentService {
   }
 
   /**
-   * Rate-limit compaction checks. Returns false if a recent check was done
-   * and not enough new messages have arrived to justify re-counting tokens.
+   * Rate-limit compaction checks with two-phase logic:
+   * - Within cooldown: only trigger if enough new messages arrived (burst protection).
+   * - After cooldown: always trigger (time-based refresh).
    */
   private shouldCheckCompaction(
     conversationId: string,
@@ -607,10 +640,35 @@ export class CodeBuddyAgentService {
     if (!cached) return true;
 
     const elapsed = Date.now() - cached.lastCompactionAt;
-    if (elapsed < CodeBuddyAgentService.COMPACTION_COOLDOWN_MS) return false;
-
     const newMessages = currentMessageCount - cached.messageCount;
-    return newMessages >= CodeBuddyAgentService.MIN_NEW_MESSAGES_FOR_RECHECK;
+
+    // Within cooldown — only check if enough new messages (burst override)
+    if (elapsed < CodeBuddyAgentService.COMPACTION_COOLDOWN_MS) {
+      return newMessages >= CodeBuddyAgentService.MIN_NEW_MESSAGES_FOR_RECHECK;
+    }
+
+    // After cooldown: always check (time-based refresh)
+    return true;
+  }
+
+  /**
+   * Bounded insertion into compactionCache. Evicts the oldest entry when at capacity.
+   */
+  private setCompactionCache(
+    conversationId: string,
+    value: { messageCount: number; lastCompactionAt: number },
+  ): void {
+    if (
+      !this.compactionCache.has(conversationId) &&
+      this.compactionCache.size >=
+        CodeBuddyAgentService.MAX_COMPACTION_CACHE_ENTRIES
+    ) {
+      const oldestKey = this.compactionCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.compactionCache.delete(oldestKey);
+      }
+    }
+    this.compactionCache.set(conversationId, value);
   }
 
   /**
@@ -1219,8 +1277,8 @@ export class CodeBuddyAgentService {
               },
             );
 
-            // Update rate-limit cache
-            this.compactionCache.set(conversationId, {
+            // Update rate-limit cache (bounded)
+            this.setCompactionCache(conversationId, {
               messageCount: existingMessages.length,
               lastCompactionAt: Date.now(),
             });

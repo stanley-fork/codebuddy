@@ -80,6 +80,22 @@ export interface CompactionMessage {
   _tokenCount?: number;
 }
 
+/** Named constants for compaction tiers — avoids magic number collisions. */
+export const CompactionTier = {
+  /** No compaction needed. */
+  NONE: 0,
+  /** Only tool results were stripped. */
+  TOOL_STRIP: 1,
+  /** Full multi-chunk summarization. */
+  MULTI_CHUNK: 2,
+  /** Partial summarization (oldest half). */
+  PARTIAL: 3,
+  /** No LLM — plain description fallback. */
+  PLAIN_FALLBACK: 4,
+} as const;
+export type CompactionTierValue =
+  (typeof CompactionTier)[keyof typeof CompactionTier];
+
 export interface CompactionResult {
   messages: CompactionMessage[];
   /** Whether compaction was performed */
@@ -92,8 +108,8 @@ export interface CompactionResult {
   originalTokens: number;
   /** Estimated tokens after compaction */
   finalTokens: number;
-  /** Which tier of compaction was used (0 = none, 1 = full, 2 = partial, 3 = description) */
-  tier: 0 | 1 | 2 | 3;
+  /** Which tier of compaction was used. */
+  tier: CompactionTierValue;
   /** Warning level based on token usage */
   warningLevel: "none" | "warning" | "critical";
 }
@@ -160,8 +176,14 @@ export function parseContextWindowSetting(setting: string): number {
 /**
  * Resolve the effective context window token limit.
  * Priority: user setting > model lookup > default 16k.
+ *
+ * @param modelName - Optional model name for lookup.
+ * @param logger - Optional logger for unknown-model warnings (avoids side effects).
  */
-export function resolveContextWindow(modelName?: string): number {
+export function resolveContextWindow(
+  modelName?: string,
+  logger?: Pick<Logger, "warn">,
+): number {
   // 1. Check user setting
   const configSetting = getConfigValue("codebuddy.contextWindow") as
     | string
@@ -177,13 +199,7 @@ export function resolveContextWindow(modelName?: string): number {
 
   // 3. Default — model not in known list
   if (modelName) {
-    const logger = Logger.initialize("resolveContextWindow", {
-      minLevel: LogLevel.INFO,
-      enableConsole: false,
-      enableFile: true,
-      enableTelemetry: false,
-    });
-    logger.warn(
+    logger?.warn(
       `Unknown model "${modelName}" — defaulting to ${DEFAULT_CONTEXT_WINDOW} token context window`,
     );
   }
@@ -195,6 +211,7 @@ export function resolveContextWindow(modelName?: string): number {
 export class ContextWindowCompactionService implements vscode.Disposable {
   private static _instance: ContextWindowCompactionService | undefined;
   private disposed = false;
+  private activeOperations = 0;
   private readonly logger: Logger;
 
   private constructor(
@@ -236,12 +253,19 @@ export class ContextWindowCompactionService implements vscode.Disposable {
     return inst?.disposed ? undefined : inst;
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.disposed = true;
+    // Wait briefly for in-flight operations before releasing
+    const deadline = Date.now() + 5000;
+    while (this.activeOperations > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
     if (ContextWindowCompactionService._instance === this) {
       ContextWindowCompactionService._instance = undefined;
     }
-    this.logger.info("ContextWindowCompactionService disposed");
+    this.logger.info(
+      `ContextWindowCompactionService disposed (pending ops: ${this.activeOperations})`,
+    );
   }
 
   // ── Public API ─────────────────────────────────────────────────────
@@ -264,7 +288,18 @@ export class ContextWindowCompactionService implements vscode.Disposable {
     if (this.disposed) {
       throw new Error("ContextWindowCompactionService has been disposed");
     }
+    this.activeOperations++;
+    try {
+      return await this._compactImpl(messages, options);
+    } finally {
+      this.activeOperations--;
+    }
+  }
 
+  private async _compactImpl(
+    messages: CompactionMessage[],
+    options: CompactionOptions,
+  ): Promise<CompactionResult> {
     const {
       maxContextTokens,
       systemPromptTokens,
@@ -301,7 +336,7 @@ export class ContextWindowCompactionService implements vscode.Disposable {
         finalCount: messages.length,
         originalTokens,
         finalTokens: originalTokens,
-        tier: 0,
+        tier: CompactionTier.NONE,
         warningLevel,
       };
     }
@@ -325,7 +360,7 @@ export class ContextWindowCompactionService implements vscode.Disposable {
         finalCount: strippedMessages.length,
         originalTokens,
         finalTokens: strippedTokens,
-        tier: 1,
+        tier: CompactionTier.TOOL_STRIP,
         warningLevel,
       };
     }
@@ -348,7 +383,7 @@ export class ContextWindowCompactionService implements vscode.Disposable {
           finalCount: tier1Result.length,
           originalTokens,
           finalTokens,
-          tier: 1,
+          tier: CompactionTier.MULTI_CHUNK,
           warningLevel,
         };
       }
@@ -376,7 +411,7 @@ export class ContextWindowCompactionService implements vscode.Disposable {
           finalCount: tier2Result.length,
           originalTokens,
           finalTokens,
-          tier: 2,
+          tier: CompactionTier.PARTIAL,
           warningLevel,
         };
       }
@@ -402,7 +437,7 @@ export class ContextWindowCompactionService implements vscode.Disposable {
       finalCount: tier3Result.length,
       originalTokens,
       finalTokens,
-      tier: 3,
+      tier: CompactionTier.PLAIN_FALLBACK,
       warningLevel,
     };
   }

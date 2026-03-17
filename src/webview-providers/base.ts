@@ -1204,7 +1204,12 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                   : (msg.role as CompactionMessage["role"])
                 : ("user" as const),
             content: msg.parts
-              ? (msg.parts[0]?.text ?? "")
+              ? msg.parts
+                  .filter(
+                    (p): p is { text: string } => typeof p.text === "string",
+                  )
+                  .map((p) => p.text)
+                  .join("\n")
               : (msg.content ?? ""),
           }),
         );
@@ -1234,9 +1239,15 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
           }
 
           // Convert back to the provider's message format
-          const converted: any[] = [];
+          type GeminiMsg = {
+            role: "user" | "model";
+            parts: Array<{ text: string }>;
+          };
+          type OpenAIMsg = { role: string; content: string };
+          const isGemini = !!history[0]?.parts;
+          const converted: Array<GeminiMsg | OpenAIMsg> = [];
           for (const m of result.messages) {
-            if (history[0]?.parts) {
+            if (isGemini) {
               // Google Generative AI format — "system" role is not supported
               if (m.role === "system") {
                 // Inject as user+model pair so the context is preserved
@@ -1249,8 +1260,10 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                   parts: [{ text: "Understood." }],
                 });
               } else {
+                const geminiRole: "user" | "model" =
+                  m.role === "assistant" ? "model" : "user";
                 converted.push({
-                  role: m.role === "assistant" ? "model" : m.role,
+                  role: geminiRole,
                   parts: [{ text: m.content }],
                 });
               }
