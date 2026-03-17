@@ -537,8 +537,8 @@ export class WebViewProviderManager
   /**
    * Extract an error string from raw content only if it structurally
    * looks like an error (JSON with message/error field, or a short
-   * single-line plain-text message). Avoids surfacing LLM response
-   * chunks as error text.
+   * single-line string with error-like phrasing). Avoids surfacing
+   * LLM response chunks as error text.
    */
   private extractErrorFromContent(value: unknown): string | undefined {
     if (typeof value !== "string") return undefined;
@@ -547,12 +547,22 @@ export class WebViewProviderManager
       if (parsed && typeof parsed.message === "string") return parsed.message;
       if (parsed && typeof parsed.error === "string") return parsed.error;
     } catch {
-      // Not JSON — treat as plain error text only if short and single-line
-      if (
-        value.length < 200 &&
-        !value.includes("\n") &&
-        !value.includes("```")
-      ) {
+      // Not JSON — only treat as error if it has error-like phrasing
+      const ERROR_PREFIXES = [
+        "error:",
+        "failed:",
+        "cannot ",
+        "could not ",
+        "unable to ",
+        "timeout",
+        "unauthorized",
+        "forbidden",
+        "not found",
+      ];
+      const lowerVal = value.toLowerCase().trimStart();
+      const isErrorLike = ERROR_PREFIXES.some((p) => lowerVal.startsWith(p));
+
+      if (isErrorLike && value.length < 300 && !value.includes("\n")) {
         return value;
       }
     }
