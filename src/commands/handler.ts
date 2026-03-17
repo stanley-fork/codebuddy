@@ -750,8 +750,25 @@ export abstract class CodeCommandHandler implements ICodeCommandHandler {
       },
     });
     try {
-      // Send command feedback immediately at the start
-      await this.sendCommandFeedback(commandAction);
+      // Get provider first to ensure consistent webview reference
+      const providerManager = WebViewProviderManager.getInstance(this.context);
+      const provider = providerManager.getCurrentProvider();
+
+      if (!provider) {
+        vscode.window.showErrorMessage("Provider not initialized");
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: "Provider not initialized",
+        });
+        return;
+      }
+
+      // Send command feedback using provider's webview
+      const feedback = this.getCommandFeedback(commandAction);
+      await provider.currentWebView?.webview.postMessage({
+        type: "codebuddy-commands",
+        message: feedback,
+      });
 
       this.logger.info(this.action);
       let prompt;
@@ -795,18 +812,6 @@ export abstract class CodeCommandHandler implements ICodeCommandHandler {
       }
 
       span.addEvent("prompt_created");
-
-      const providerManager = WebViewProviderManager.getInstance(this.context);
-      const provider = providerManager.getCurrentProvider();
-
-      if (!provider) {
-        vscode.window.showErrorMessage("Provider not initialized");
-        span.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: "Provider not initialized",
-        });
-        return;
-      }
 
       const requestId = generateUUID();
       await provider.currentWebView?.webview.postMessage({
