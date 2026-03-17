@@ -35,8 +35,11 @@ export class NotificationService {
 
   // Dedup: track recent notifications to prevent duplicates within a time window
   private static readonly DEDUP_WINDOW_MS = 30_000; // 30 seconds
+  private static readonly DEDUP_MAP_MAX_SIZE = 200;
   private static readonly MAX_STORED_NOTIFICATIONS = 500;
+  private static readonly PRUNE_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
   private recentNotifications = new Map<string, number>();
+  private lastPruneTime = 0;
 
   private constructor() {
     this.logger = Logger.initialize("NotificationService", {});
@@ -68,8 +71,10 @@ export class NotificationService {
     }
     this.recentNotifications.set(dedupKey, now);
 
-    // Prune stale dedup entries periodically (keep map bounded)
-    if (this.recentNotifications.size > 200) {
+    // Prune stale dedup entries when approaching the cap
+    if (
+      this.recentNotifications.size > NotificationService.DEDUP_MAP_MAX_SIZE
+    ) {
       for (const [key, ts] of this.recentNotifications) {
         if (now - ts >= NotificationService.DEDUP_WINDOW_MS) {
           this.recentNotifications.delete(key);
@@ -84,17 +89,42 @@ export class NotificationService {
          VALUES (?, ?, ?, ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
         [type, title, message, source],
       );
-      // Prune oldest rows when table exceeds the retention cap
-      this.dbService.executeSqlCommand(
-        `DELETE FROM notifications WHERE id NOT IN (
-          SELECT id FROM notifications ORDER BY timestamp DESC LIMIT ?
-        )`,
-        [NotificationService.MAX_STORED_NOTIFICATIONS],
-      );
+      await this.maybePruneNotifications();
       this.logger.info(`Added notification: ${title}`);
       this._onDidNotificationChange.fire();
     } catch (error) {
       this.logger.error("Failed to add notification", error);
+    }
+  }
+
+  /**
+   * Prune old notification rows from the DB, gated by an interval to avoid per-insert scans.
+   */
+  private async maybePruneNotifications(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastPruneTime < NotificationService.PRUNE_INTERVAL_MS) {
+      return;
+    }
+    this.lastPruneTime = now;
+    try {
+      const results = this.dbService.executeSql(
+        `SELECT COUNT(*) as count FROM notifications`,
+      );
+      const count = results[0]?.count ?? 0;
+      if (count <= NotificationService.MAX_STORED_NOTIFICATIONS) {
+        return;
+      }
+      this.dbService.executeSqlCommand(
+        `DELETE FROM notifications
+         WHERE id IN (
+           SELECT id FROM notifications
+           ORDER BY timestamp ASC
+           LIMIT ?
+         )`,
+        [count - NotificationService.MAX_STORED_NOTIFICATIONS],
+      );
+    } catch (pruneError) {
+      this.logger.warn("Failed to prune old notifications", pruneError);
     }
   }
 

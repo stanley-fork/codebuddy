@@ -72,7 +72,7 @@ export class EnhancedCacheManager implements vscode.Disposable {
     performanceProfiler?: any,
     instanceName = "default",
   ) {
-    this.instanceName = instanceName;
+    this.instanceName = instanceName?.trim() || "default";
     this.logger = Logger.initialize(`EnhancedCacheManager:${instanceName}`, {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,

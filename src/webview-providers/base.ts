@@ -1028,18 +1028,28 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
               }
               break;
 
-            default:
-              this.logger.warn(`Unhandled webview command: ${message.command}`);
+            default: {
+              // Sanitize command name before reflecting back — only allow safe chars
+              const VALID_COMMAND_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+              const safeCommand =
+                typeof message.command === "string" &&
+                VALID_COMMAND_PATTERN.test(message.command)
+                  ? message.command
+                  : "[invalid]";
+              this.logger.warn(`Unhandled webview command: ${safeCommand}`);
               // Notify the webview that the command was not recognized
-              if (_view.webview) {
+              if (_view?.webview) {
                 _view.webview.postMessage({
                   type: "error",
                   payload: {
-                    error: `Unknown command: ${message.command}`,
-                    command: message.command,
+                    error: "Unknown command received",
+                    code: "UNKNOWN_COMMAND",
+                    command: safeCommand,
                   },
                 });
               }
+              break;
+            }
           }
         }),
       );
