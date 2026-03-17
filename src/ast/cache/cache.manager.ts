@@ -18,6 +18,8 @@ interface CacheEntry {
 export class CacheManager {
   private static instance: CacheManager | null = null;
   private cache: LRUCache<string, CacheEntry>;
+  private hits = 0;
+  private misses = 0;
 
   private constructor(
     private outputChannel: vscode.OutputChannel,
@@ -58,6 +60,7 @@ export class CacheManager {
   ): Promise<IParsedFile | null> {
     const cached = this.cache.get(filePath);
     if (!cached) {
+      this.misses++;
       return null;
     }
 
@@ -66,10 +69,12 @@ export class CacheManager {
       this.outputChannel.appendLine(
         `Content changed for ${filePath}. Cache invalidated.`,
       );
+      this.misses++;
       this.invalidate(filePath);
       return null;
     }
 
+    this.hits++;
     return {
       tree: cached.tree,
       language: cached.language,
@@ -125,6 +130,28 @@ export class CacheManager {
    */
   clear(): void {
     this.cache.clear();
+    this.resetStats();
+  }
+
+  /**
+   * Returns cache hit/miss statistics.
+   */
+  getStats(): { hits: number; misses: number; size: number; hitRate: number } {
+    const total = this.hits + this.misses;
+    return {
+      hits: this.hits,
+      misses: this.misses,
+      size: this.cache.size,
+      hitRate: total > 0 ? this.hits / total : 0,
+    };
+  }
+
+  /**
+   * Resets hit/miss counters — call periodically or after a clear().
+   */
+  resetStats(): void {
+    this.hits = 0;
+    this.misses = 0;
   }
 
   /**

@@ -16,6 +16,29 @@ export class ObservabilityHandler implements WebviewMessageHandler {
     "get-dependency-graph",
   ];
 
+  // Change detection: only push traces to webview when new spans appear
+  private lastTraceHash = "";
+
+  /**
+   * Compute a lightweight structural hash over span identities and timestamps.
+   * Avoids false cache-hits from mid-array mutations or same-count replacements.
+   */
+  private computeTraceHash(traces: any[]): string {
+    if (traces.length === 0) return "empty";
+    let hash = 0;
+    for (const span of traces) {
+      const ctx = span.spanContext?.() ?? {};
+      const id = ctx.traceId ?? ctx.spanId ?? span.name ?? "";
+      const start = String(span.startTime ?? "");
+      const end = String(span.endTime ?? "");
+      const part = `${id}|${start}|${end}`;
+      for (let i = 0; i < part.length; i++) {
+        hash = (Math.imul(31, hash) + part.charCodeAt(i)) | 0;
+      }
+    }
+    return `${traces.length}:${hash >>> 0}`;
+  }
+
   private sanitizeTraces(traces: any[]) {
     return traces.map((span) => ({
       name: span.name,
@@ -58,6 +81,12 @@ export class ObservabilityHandler implements WebviewMessageHandler {
 
       case "observability-get-traces": {
         const traces = ObservabilityService.getInstance().getTraces();
+        // Skip posting if nothing changed since the last poll
+        const traceHash = this.computeTraceHash(traces);
+        if (traceHash === this.lastTraceHash) {
+          break;
+        }
+        this.lastTraceHash = traceHash;
         ctx.logger.debug(
           `[WEBVIEW] Sending ${traces.length} traces to webview`,
         );
@@ -70,6 +99,7 @@ export class ObservabilityHandler implements WebviewMessageHandler {
 
       case "observability-clear-traces": {
         ObservabilityService.getInstance().clearTraces();
+        this.lastTraceHash = "";
         await ctx.webview.webview.postMessage({
           type: "observability-traces",
           traces: [],
