@@ -63,8 +63,27 @@ export class StandupHandler implements WebviewMessageHandler {
             return;
           }
           await ctx.sendResponse("⏳ Parsing standup notes...");
-          const brief = await svc.ingest(message.notes);
-          await ctx.sendResponse(brief);
+          const { cardJson, record } = await svc.ingestStructured(
+            message.notes,
+          );
+          // Send structured JSON as a chat response — MessageRenderer
+          // detects `type: "standup_brief"` and renders a StandupCard.
+          await ctx.sendResponse(cardJson);
+          // Also notify the standup store in the CoWorker panel.
+          try {
+            await ctx.webview.webview.postMessage({
+              command: "standup-result",
+              summary: {
+                date: record.date,
+                teamName: record.teamName,
+                commitmentCount: record.commitments.length,
+                blockerCount: record.blockers.length,
+                participantCount: record.participants.length,
+              },
+            });
+          } catch {
+            // webview may not be ready
+          }
           break;
         }
 

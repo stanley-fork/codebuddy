@@ -4,6 +4,8 @@ import { BotMessage } from "./botMessage";
 import SearchResultCard from "./SearchResultCard";
 import CodeAnalysisCard from "./CodeAnalysisCard";
 import ErrorCard from "./ErrorCard";
+import StandupCard from "./standup/StandupCard";
+import type { StandupCardData } from "./standup/StandupCard";
 
 /**
  * Filters out JSON tool/command metadata that shouldn't be displayed to users
@@ -62,7 +64,7 @@ interface CodeAnalysis {
   keyPoints?: string[];
 }
 
-type StructuredContent = SynthesizedSearch | CodeAnalysis;
+type StructuredContent = SynthesizedSearch | CodeAnalysis | StandupCardData;
 
 interface MessageRendererProps {
   content: string;
@@ -80,6 +82,9 @@ function parseStructuredContent(content: string): StructuredContent | null {
     const parsed = JSON.parse(content);
     if (parsed.type === "synthesized_search" || parsed.type === "code_analysis") {
       return parsed as StructuredContent;
+    }
+    if (parsed.type === "standup_brief") {
+      return parsed as StandupCardData;
     }
   } catch {
     // Not pure JSON, continue checking
@@ -254,6 +259,9 @@ const MessageRenderer: React.FC<MessageRendererProps> = ({
             keyPoints={parsedContent.keyPoints}
           />
         );
+
+      case "standup_brief":
+        return <StandupCard data={parsedContent as StandupCardData} />;
 
       default:
         break;

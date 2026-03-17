@@ -1,6 +1,7 @@
 import React from "react";
 import styled from "styled-components";
 import { vscode } from "../../utils/vscode";
+import { useStandupStore } from "../../stores/standup.store";
 
 interface CoWorkerPanelProps {
   isOpen: boolean;
@@ -210,6 +211,120 @@ const triggerCommand = (commandId: string) => {
   vscode.postMessage({ command: "execute-command", commandId });
 };
 
+/* ─── Meeting Intelligence Styled Components ─── */
+
+const NotesTextArea = styled.textarea`
+  width: 100%;
+  min-height: 80px;
+  max-height: 200px;
+  resize: vertical;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.12));
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 12px;
+  font-family: var(--vscode-font-family);
+  line-height: 1.4;
+  box-sizing: border-box;
+
+  &::placeholder {
+    color: var(--vscode-input-placeholderForeground);
+  }
+
+  &:focus {
+    outline: none;
+    border-color: var(--vscode-focusBorder);
+  }
+`;
+
+const IngestButton = styled.button<{ $loading?: boolean }>`
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: ${(p) => (p.$loading ? "wait" : "pointer")};
+  font-size: 12px;
+  font-weight: 500;
+  width: 100%;
+  margin-top: 8px;
+  opacity: ${(p) => (p.$loading ? 0.7 : 1)};
+  transition: all 0.15s ease;
+
+  &:hover:not(:disabled) {
+    background: var(--vscode-button-hoverBackground);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+`;
+
+const QuickActions = styled.div`
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+`;
+
+const QuickActionButton = styled.button`
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--vscode-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+`;
+
+const RecentList = styled.div`
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+`;
+
+const RecentItem = styled.div`
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.08));
+  font-size: 11px;
+`;
+
+const RecentDate = styled.span`
+  color: var(--vscode-foreground);
+  font-weight: 500;
+`;
+
+const RecentMeta = styled.span`
+  color: var(--vscode-descriptionForeground);
+`;
+
+const ErrorText = styled.div`
+  color: var(--vscode-editorError-foreground, #f14c4c);
+  font-size: 11px;
+  margin-top: 4px;
+`;
+
 /* ─── Tasks Config ─── */
 interface TaskDef {
   section: string;
@@ -266,6 +381,15 @@ export const CoWorkerPanel: React.FC<CoWorkerPanelProps> = ({
   onGitWatchdogChange,
   onEndOfDaySummaryChange,
 }) => {
+  const [notesInput, setNotesInput] = React.useState("");
+  const { isIngesting, lastError, recentStandups, ingestNotes, requestMyTasks, requestBlockers, requestHistory } =
+    useStandupStore();
+  const handleIngest = () => {
+    if (!notesInput.trim()) return;
+    ingestNotes(notesInput.trim());
+    setNotesInput("");
+  };
+
   const toggleMap: Record<string, { checked: boolean; onChange: (v: boolean) => void }> = {
     "Daily Standup": { checked: dailyStandupEnabled, onChange: onDailyStandupChange },
     "Code Health Check": { checked: codeHealthEnabled, onChange: onCodeHealthChange },
@@ -315,6 +439,58 @@ export const CoWorkerPanel: React.FC<CoWorkerPanelProps> = ({
               })}
             </Section>
           ))}
+
+          {/* ── Meeting Intelligence Section ── */}
+          <Section>
+            <SectionTitle>Meeting Intelligence</SectionTitle>
+            <TaskDescription style={{ marginBottom: 8 }}>
+              Paste meeting or standup notes to extract action items, blockers,
+              and decisions automatically.
+            </TaskDescription>
+            <NotesTextArea
+              placeholder="Paste your standup / meeting notes here..."
+              value={notesInput}
+              onChange={(e) => setNotesInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  handleIngest();
+                }
+              }}
+            />
+            <IngestButton
+              $loading={isIngesting}
+              disabled={isIngesting || !notesInput.trim()}
+              onClick={handleIngest}
+            >
+              {isIngesting ? "⏳ Parsing..." : "📋 Parse Meeting Notes"}
+            </IngestButton>
+            {lastError && <ErrorText>{lastError}</ErrorText>}
+
+            <QuickActions>
+              <QuickActionButton onClick={() => requestMyTasks()}>
+                ✅ My Tasks
+              </QuickActionButton>
+              <QuickActionButton onClick={() => requestBlockers()}>
+                🔴 Blockers
+              </QuickActionButton>
+              <QuickActionButton onClick={() => requestHistory({ dateRange: "this week" })}>
+                📅 This Week
+              </QuickActionButton>
+            </QuickActions>
+
+            {recentStandups.length > 0 && (
+              <RecentList>
+                {recentStandups.map((s, i) => (
+                  <RecentItem key={i}>
+                    <RecentDate>{s.date} — {s.teamName}</RecentDate>
+                    <RecentMeta>
+                      {s.commitmentCount} tasks · {s.blockerCount} blockers
+                    </RecentMeta>
+                  </RecentItem>
+                ))}
+              </RecentList>
+            )}
+          </Section>
         </Content>
       </PanelContainer>
     </PanelOverlay>
