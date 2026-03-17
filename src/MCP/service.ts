@@ -14,7 +14,11 @@ import {
   MCPTool,
   MCPToolResult,
 } from "./types";
-import { CircuitBreaker, CircuitState } from "./circuit-breaker";
+import {
+  CircuitBreaker,
+  CircuitState,
+  CircuitBreakerOptions,
+} from "./circuit-breaker";
 
 export class MCPService implements vscode.Disposable {
   private static instance: MCPService;
@@ -255,16 +259,19 @@ export class MCPService implements vscode.Disposable {
     );
   }
 
+  private static readonly CIRCUIT_BREAKER_OPTIONS: CircuitBreakerOptions = {
+    failureThreshold: 3,
+    resetTimeoutMs: 5 * 60 * 1000, // 5 minutes
+  };
+
   /**
    * Get or create a circuit breaker for a server.
+   * Creates on first access — the name reflects the factory side-effect.
    */
-  private getCircuitBreaker(serverName: string): CircuitBreaker {
+  private getOrCreateCircuitBreaker(serverName: string): CircuitBreaker {
     let cb = this.circuitBreakers.get(serverName);
     if (!cb) {
-      cb = new CircuitBreaker(serverName, {
-        failureThreshold: 3,
-        resetTimeoutMs: 5 * 60 * 1000, // 5 minutes
-      });
+      cb = new CircuitBreaker(serverName, MCPService.CIRCUIT_BREAKER_OPTIONS);
       this.circuitBreakers.set(serverName, cb);
     }
     return cb;
@@ -279,7 +286,7 @@ export class MCPService implements vscode.Disposable {
     }
 
     // Check circuit breaker before attempting connection
-    const cb = this.getCircuitBreaker(serverName);
+    const cb = this.getOrCreateCircuitBreaker(serverName);
     if (!cb.canAttempt()) {
       const remaining = Math.ceil(cb.getRemainingCooldownMs() / 1000);
       this.logger.warn(
@@ -307,19 +314,20 @@ export class MCPService implements vscode.Disposable {
       );
       try {
         await existing;
-      } catch {
-        // The in-progress connection failed; check circuit breaker state
-        // before letting the caller retry or propagating the error.
-        const cbNow = this.getCircuitBreaker(serverName);
+      } catch (originalError: unknown) {
+        // The in-progress connection failed; check circuit breaker state.
+        // Preserve the original error for debugging via `cause`.
+        const cbNow = this.getOrCreateCircuitBreaker(serverName);
         if (!cbNow.canAttempt()) {
           const remaining = Math.ceil(cbNow.getRemainingCooldownMs() / 1000);
-          throw new Error(
+          const err = new Error(
             `Connection to "${serverName}" failed and circuit is now OPEN. Retry in ${remaining}s.`,
           );
+          (err as any).cause = originalError;
+          throw err;
         }
-        throw new Error(
-          `Connection to "${serverName}" failed. Circuit is still CLOSED; caller may retry.`,
-        );
+        // Re-throw original — let the caller decide whether to retry
+        throw originalError;
       }
       return;
     }
@@ -791,7 +799,7 @@ export class MCPService implements vscode.Disposable {
     serverConfig: MCPServerConfig,
     maxRetries = 3,
   ): Promise<void> {
-    const cb = this.getCircuitBreaker(serverName);
+    const cb = this.getOrCreateCircuitBreaker(serverName);
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {

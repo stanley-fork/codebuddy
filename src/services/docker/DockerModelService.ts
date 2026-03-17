@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
+import * as fsp from "fs/promises";
 import * as net from "net";
 import { Logger, LogLevel } from "../../infrastructure/logger/logger";
 import { Terminal } from "../../utils/terminal";
@@ -55,23 +56,23 @@ export class DockerModelService implements vscode.Disposable {
    * Probe the Docker socket directly without spawning a process.
    * Returns true if the daemon socket is connectable.
    */
-  private probeDockerSocket(): Promise<boolean> {
-    return new Promise((resolve) => {
-      const socketPath =
-        process.platform === "win32"
-          ? "\\\\.\\pipe\\docker_engine"
-          : (process.env.DOCKER_HOST?.replace("unix://", "") ??
-            "/var/run/docker.sock");
+  private async probeDockerSocket(): Promise<boolean> {
+    const socketPath =
+      process.platform === "win32"
+        ? "\\\\.\\pipe\\docker_engine"
+        : (process.env.DOCKER_HOST?.replace("unix://", "") ??
+          "/var/run/docker.sock");
 
-      // On Unix: check if socket file exists first (free, no process spawn)
-      if (process.platform !== "win32") {
-        try {
-          fs.accessSync(socketPath);
-        } catch {
-          return resolve(false);
-        }
+    // Non-blocking existence check on Unix
+    if (process.platform !== "win32") {
+      try {
+        await fsp.access(socketPath, fs.constants.R_OK);
+      } catch {
+        return false;
       }
+    }
 
+    return new Promise((resolve) => {
       const socket = net.createConnection({ path: socketPath });
       const timer = setTimeout(() => {
         socket.destroy();
@@ -135,33 +136,23 @@ export class DockerModelService implements vscode.Disposable {
   }
 
   async checkOllamaRunning(): Promise<boolean> {
-    // Skip if we know Docker daemon is not available
-    if (this.dockerDaemonAvailable === false) {
-      const now = Date.now();
-      if (
-        now - this.lastDaemonCheck <
-        DockerModelService.DAEMON_CHECK_COOLDOWN_MS
-      ) {
-        return false;
-      }
-    }
+    // Centralized cache check — no duplicated cooldown logic
+    const daemonUp = await this.isDockerDaemonAvailable();
+    if (!daemonUp) return false;
 
     try {
       const output = await this.terminal.getRunningOllamaContainer();
-      this.dockerDaemonAvailable = true;
-      this.lastDaemonCheck = Date.now();
       // output is JSON string or empty
       return output.trim().length > 0;
     } catch (e) {
-      // Mark daemon as unavailable if this looks like a daemon-not-running error
+      // Daemon was up during probe but failed now — invalidate cache
       const msg = String(e);
       if (
         msg.includes("docker.sock") ||
         msg.includes("connect:") ||
         msg.includes("exit code 1")
       ) {
-        this.dockerDaemonAvailable = false;
-        this.lastDaemonCheck = Date.now();
+        this.resetDaemonCache();
       }
       return false;
     }
