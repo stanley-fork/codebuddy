@@ -517,6 +517,15 @@ export class WebViewProviderManager
   private async handleStreamError(event: IEventPayload) {
     if (this.webviewView?.webview) {
       const requestId = event.message?.requestId ?? event.message?.id;
+
+      // Extract the error string: prefer explicit error fields, then fall back
+      // to content only if it is a short string (not a large LLM response chunk).
+      const rawContent = event.message?.content;
+      const contentAsError =
+        typeof rawContent === "string" && rawContent.length < 500
+          ? rawContent
+          : undefined;
+
       await this.webviewView.webview.postMessage({
         type: StreamEventType.ERROR,
         payload: {
@@ -524,9 +533,9 @@ export class WebViewProviderManager
           threadId: event.message?.threadId,
           timestamp: Date.now(),
           error:
-            event.message?.content ||
             event.message?.error ||
             event.error ||
+            contentAsError ||
             "An error occurred",
         },
       });

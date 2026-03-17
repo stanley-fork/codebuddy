@@ -38,29 +38,26 @@ export class AstIndexingService {
       "groq",
     ];
 
-    let embeddingProvider: string;
-    let embeddingApiKey: string;
+    let embeddingProvider = "gemini";
+    let embeddingApiKey = "";
     let embeddingBaseUrl: string | undefined;
 
-    if (embeddingCapableProviders.includes(mainProvider)) {
-      embeddingProvider = mainProvider;
-      const resolved = getAPIKeyAndModel(mainProvider);
-      embeddingApiKey = resolved.apiKey;
-      embeddingBaseUrl = resolved.baseUrl;
-    } else {
-      // Fallback to Gemini for embeddings
-      embeddingProvider = "gemini";
-      try {
+    try {
+      if (embeddingCapableProviders.includes(mainProvider)) {
+        embeddingProvider = mainProvider;
+        const resolved = getAPIKeyAndModel(mainProvider);
+        embeddingApiKey = resolved.apiKey;
+        embeddingBaseUrl = resolved.baseUrl;
+      } else {
+        // Fallback to Gemini for embeddings
         const resolved = getAPIKeyAndModel("gemini");
         embeddingApiKey = resolved.apiKey;
         embeddingBaseUrl = resolved.baseUrl;
-      } catch {
-        // No Gemini key configured — embeddings will be unavailable
-        this.logger.warn(
-          `Main provider "${mainProvider}" does not support embeddings and no Gemini API key is configured. Embedding-based features will be disabled.`,
-        );
-        embeddingApiKey = "";
       }
+    } catch {
+      this.logger.warn(
+        `Embeddings disabled: "${mainProvider}" does not support embeddings and no Gemini API key is configured.`,
+      );
     }
 
     this.embeddingService = new EmbeddingService({

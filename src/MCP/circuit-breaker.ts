@@ -27,6 +27,7 @@ export class CircuitBreaker {
   private state: CircuitState = CircuitState.CLOSED;
   private consecutiveFailures = 0;
   private lastFailureTime = 0;
+  private probeInFlight = false;
   private readonly failureThreshold: number;
   private readonly resetTimeoutMs: number;
 
@@ -41,6 +42,7 @@ export class CircuitBreaker {
 
   /**
    * Returns true if the request should be allowed through.
+   * In HALF_OPEN state, only the first caller gets the probe token.
    */
   canAttempt(): boolean {
     switch (this.state) {
@@ -50,16 +52,23 @@ export class CircuitBreaker {
         const elapsed = Date.now() - this.lastFailureTime;
         if (elapsed >= this.resetTimeoutMs) {
           this.state = CircuitState.HALF_OPEN;
-          return true;
+          this.probeInFlight = false;
+          return this.claimProbe();
         }
         return false;
       }
       case CircuitState.HALF_OPEN:
-        // Only one probe request is allowed; subsequent calls should wait
-        return true;
+        return this.claimProbe();
       default:
         return true;
     }
+  }
+
+  /** Claim the single probe slot. Returns false if already taken. */
+  private claimProbe(): boolean {
+    if (this.probeInFlight) return false;
+    this.probeInFlight = true;
+    return true;
   }
 
   /**
@@ -67,6 +76,7 @@ export class CircuitBreaker {
    */
   recordSuccess(): void {
     this.consecutiveFailures = 0;
+    this.probeInFlight = false;
     this.state = CircuitState.CLOSED;
   }
 
@@ -76,6 +86,7 @@ export class CircuitBreaker {
   recordFailure(): void {
     this.consecutiveFailures++;
     this.lastFailureTime = Date.now();
+    this.probeInFlight = false;
 
     if (this.consecutiveFailures >= this.failureThreshold) {
       this.state = CircuitState.OPEN;
@@ -89,14 +100,18 @@ export class CircuitBreaker {
     this.state = CircuitState.CLOSED;
     this.consecutiveFailures = 0;
     this.lastFailureTime = 0;
+    this.probeInFlight = false;
   }
 
+  /**
+   * Read the current state without side effects.
+   * OPEN → HALF_OPEN transition only happens in canAttempt().
+   */
   getState(): CircuitState {
-    // Re-evaluate OPEN → HALF_OPEN on read
     if (this.state === CircuitState.OPEN) {
       const elapsed = Date.now() - this.lastFailureTime;
       if (elapsed >= this.resetTimeoutMs) {
-        this.state = CircuitState.HALF_OPEN;
+        return CircuitState.HALF_OPEN;
       }
     }
     return this.state;

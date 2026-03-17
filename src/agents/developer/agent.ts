@@ -331,7 +331,6 @@ export class DeveloperAgent {
         createMemoryMiddleware({
           backend: backendFactory,
           sources: ["/workspace/.codebuddy/AGENTS.md", "/workspace/AGENTS.md"],
-          addCacheControl: true,
         }),
       );
     } catch (err) {
