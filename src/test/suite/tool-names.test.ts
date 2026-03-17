@@ -37,6 +37,8 @@ suite("TOOL_NAMES — Canonical Values", () => {
       WEB_SEARCH: "web_search",
       GREP: "grep",
       GLOB: "glob",
+      WRITE_TODOS: "write_todos",
+      TASK: "task",
     };
 
     for (const [key, value] of Object.entries(expected)) {
@@ -48,8 +50,8 @@ suite("TOOL_NAMES — Canonical Values", () => {
     }
   });
 
-  test("TOOL_NAMES has exactly 21 entries", () => {
-    assert.strictEqual(Object.keys(TOOL_NAMES).length, 21);
+  test("TOOL_NAMES has exactly 23 entries", () => {
+    assert.strictEqual(Object.keys(TOOL_NAMES).length, 23);
   });
 
   test("All values are unique (no duplicate tool name strings)", () => {

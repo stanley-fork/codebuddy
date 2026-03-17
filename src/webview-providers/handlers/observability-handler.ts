@@ -16,6 +16,35 @@ export class ObservabilityHandler implements WebviewMessageHandler {
     "get-dependency-graph",
   ];
 
+  // Change detection: only push traces to webview when new spans appear
+  private lastTraceHash = "";
+
+  /**
+   * Compute a monotonic cursor from span count + latest timestamps.
+   * Spans are append-only — if count and max timestamps haven't changed, nothing is new.
+   */
+  private computeTraceHash(traces: any[]): string {
+    if (traces.length === 0) return "empty";
+
+    let latestEndTime = 0;
+    let latestStartTime = 0;
+
+    for (const span of traces) {
+      // OpenTelemetry endTime is [seconds, nanos] tuple
+      const end = Array.isArray(span.endTime)
+        ? span.endTime[0] * 1e9 + span.endTime[1]
+        : Number(span.endTime ?? 0);
+      const start = Array.isArray(span.startTime)
+        ? span.startTime[0] * 1e9 + span.startTime[1]
+        : Number(span.startTime ?? 0);
+
+      if (end > latestEndTime) latestEndTime = end;
+      if (start > latestStartTime) latestStartTime = start;
+    }
+
+    return `${traces.length}:${latestStartTime}:${latestEndTime}`;
+  }
+
   private sanitizeTraces(traces: any[]) {
     return traces.map((span) => ({
       name: span.name,
@@ -58,6 +87,12 @@ export class ObservabilityHandler implements WebviewMessageHandler {
 
       case "observability-get-traces": {
         const traces = ObservabilityService.getInstance().getTraces();
+        // Skip posting if nothing changed since the last poll
+        const traceHash = this.computeTraceHash(traces);
+        if (traceHash === this.lastTraceHash) {
+          break;
+        }
+        this.lastTraceHash = traceHash;
         ctx.logger.debug(
           `[WEBVIEW] Sending ${traces.length} traces to webview`,
         );
@@ -70,6 +105,7 @@ export class ObservabilityHandler implements WebviewMessageHandler {
 
       case "observability-clear-traces": {
         ObservabilityService.getInstance().clearTraces();
+        this.lastTraceHash = "";
         await ctx.webview.webview.postMessage({
           type: "observability-traces",
           traces: [],

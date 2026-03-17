@@ -12,7 +12,7 @@ export class AstIndexingService {
   private worker: Worker | undefined;
   private readonly logger: Logger;
   private vectorStore: SqliteVectorStore;
-  private embeddingService: EmbeddingService;
+  private embeddingService: EmbeddingService | null;
   private isProcessing = false;
 
   private static instance: AstIndexingService;
@@ -26,14 +26,52 @@ export class AstIndexingService {
       this.logger.error("Failed to initialize vector store", err);
     });
 
-    // Initialize embedding service
-    const provider = getGenerativeAiModel() || "Gemini";
-    const { apiKey, baseUrl } = getAPIKeyAndModel(provider);
-    this.embeddingService = new EmbeddingService({
-      apiKey,
-      provider,
-      baseUrl,
-    });
+    // Initialize embedding service.
+    // Providers like Anthropic don't support embeddings — use Gemini as the
+    // dedicated embedding provider when the main provider can't do embeddings.
+    const mainProvider = (getGenerativeAiModel() || "Gemini").toLowerCase();
+    const embeddingCapableProviders = [
+      "gemini",
+      "openai",
+      "local",
+      "deepseek",
+      "groq",
+    ];
+
+    let embeddingProvider = "gemini";
+    let embeddingApiKey = "";
+    let embeddingBaseUrl: string | undefined;
+
+    try {
+      if (embeddingCapableProviders.includes(mainProvider)) {
+        embeddingProvider = mainProvider;
+        const resolved = getAPIKeyAndModel(mainProvider);
+        embeddingApiKey = resolved.apiKey;
+        embeddingBaseUrl = resolved.baseUrl;
+      } else {
+        // Fallback to Gemini for embeddings
+        const resolved = getAPIKeyAndModel("gemini");
+        embeddingApiKey = resolved.apiKey;
+        embeddingBaseUrl = resolved.baseUrl;
+      }
+    } catch {
+      this.logger.warn(
+        `Embeddings disabled: "${mainProvider}" does not support embeddings and no Gemini API key is configured.`,
+      );
+    }
+
+    if (embeddingApiKey) {
+      this.embeddingService = new EmbeddingService({
+        apiKey: embeddingApiKey,
+        provider: embeddingProvider,
+        baseUrl: embeddingBaseUrl,
+      });
+    } else {
+      this.embeddingService = null;
+      this.logger.warn(
+        "EmbeddingService not created: no valid API key. Vector search will be unavailable.",
+      );
+    }
 
     this.initializeWorker(context);
   }
@@ -122,7 +160,7 @@ export class AstIndexingService {
       for (const chunk of batch) {
         let embedding: number[] | undefined;
 
-        if (embeddingsAvailable) {
+        if (embeddingsAvailable && this.embeddingService) {
           try {
             embedding = await this.embeddingService.generateEmbedding(
               chunk.text,
@@ -193,6 +231,7 @@ export class AstIndexingService {
    * Pre-flight check: try a single embedding to see if the API is reachable.
    */
   private async checkEmbeddingAvailability(): Promise<boolean> {
+    if (!this.embeddingService) return false;
     try {
       await this.embeddingService.generateEmbedding("test");
       return true;

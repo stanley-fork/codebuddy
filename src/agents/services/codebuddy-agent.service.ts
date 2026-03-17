@@ -50,6 +50,7 @@ import {
   classifyFailoverReason,
 } from "../../services/provider-failover.service";
 import { TOOL_NAMES } from "../constants/tool-names";
+import { SqlJsCheckpointSaver } from "../../services/sqljs-checkpoint-saver";
 
 /** Typed alias for the async iterator from a LangGraph agent stream. */
 type AgentStreamIterator = AsyncIterator<unknown>;
@@ -153,6 +154,36 @@ const TOOL_DESCRIPTIONS: Record<string, IToolDescription> = {
     name: "Directory Listing",
     description: "Exploring directory structure...",
     activityType: "reading",
+  },
+  [TOOL_NAMES.GREP]: {
+    name: "Grep Search",
+    description: "Searching file contents...",
+    activityType: "searching",
+  },
+  [TOOL_NAMES.GLOB]: {
+    name: "File Search",
+    description: "Finding files by pattern...",
+    activityType: "searching",
+  },
+  [TOOL_NAMES.DELETE_FILE]: {
+    name: "File Delete",
+    description: "Deleting file...",
+    activityType: "working",
+  },
+  [TOOL_NAMES.GIT_STATUS]: {
+    name: "Git Status",
+    description: "Checking repository status...",
+    activityType: "reviewing",
+  },
+  [TOOL_NAMES.WRITE_TODOS]: {
+    name: "Todo Manager",
+    description: "Updating todo list...",
+    activityType: "planning",
+  },
+  [TOOL_NAMES.TASK]: {
+    name: "Task Runner",
+    description: "Running task...",
+    activityType: "building",
   },
 };
 
@@ -403,8 +434,35 @@ export class CodeBuddyAgentService {
   private async initCheckpointer(): Promise<BaseCheckpointSaver> {
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (workspacePath) {
+      // Primary: sql.js (WASM) — works reliably in bundled VS Code extensions
       try {
-        // Dynamic import to avoid native module loading issues when bundled
+        const codeBuddyDir = path.join(workspacePath, ".codebuddy");
+        await fs.promises.mkdir(codeBuddyDir, { recursive: true });
+
+        // Resolve extension path for WASM binary
+        const extensionPath =
+          vscode.extensions.getExtension("fiatinnovations.ola-code-buddy")
+            ?.extensionPath ?? path.resolve(__dirname, "..", "..");
+
+        const saver = await SqlJsCheckpointSaver.create({
+          dbDir: codeBuddyDir,
+          extensionPath,
+        });
+        this.checkpointer = saver;
+        this.logger.log(
+          LogLevel.INFO,
+          `Persistent sql.js checkpointer initialized at ${codeBuddyDir}/checkpoints.db`,
+        );
+        return saver;
+      } catch (error) {
+        this.logger.warn(
+          "Failed to initialize sql.js checkpointer, trying native SQLite fallback",
+          error,
+        );
+      }
+
+      // Secondary fallback: native better-sqlite3 (may work in dev mode)
+      try {
         const { SqliteSaver } =
           await import("@langchain/langgraph-checkpoint-sqlite");
         const codeBuddyDir = path.join(workspacePath, ".codebuddy");
@@ -414,15 +472,23 @@ export class CodeBuddyAgentService {
         this.checkpointer = saver;
         this.logger.log(
           LogLevel.INFO,
-          `Persistent checkpointer initialized at ${dbPath}`,
+          `Persistent native checkpointer initialized at ${dbPath}`,
         );
         return saver;
-      } catch (error) {
-        this.logger.warn(
-          "Failed to initialize SQLite checkpointer, falling back to in-memory",
-          error,
-        );
-        // Fall through to MemorySaver below
+      } catch (error: any) {
+        const isModuleError =
+          error?.code === "MODULE_NOT_FOUND" ||
+          String(error?.message ?? "").includes("native module");
+        if (isModuleError) {
+          this.logger.warn(
+            "SQLite native module unavailable (expected in bundled extension). Falling back to in-memory.",
+          );
+        } else {
+          this.logger.warn(
+            "Failed to initialize native SQLite checkpointer, falling back to in-memory",
+            error,
+          );
+        }
       }
     }
 
@@ -2267,14 +2333,15 @@ export class CodeBuddyAgentService {
 
     this.checkpointerPromise = null;
 
-    // Close the SQLite handle if it was opened
-    if (
-      checkpointerToClose &&
-      typeof (checkpointerToClose as unknown as Record<string, unknown>)
-        .close === "function"
-    ) {
+    // Close the checkpointer if it was opened (SqlJsCheckpointSaver has dispose(), others may have close())
+    if (checkpointerToClose) {
       try {
-        (checkpointerToClose as unknown as { close(): void }).close();
+        const saver = checkpointerToClose as unknown as Record<string, unknown>;
+        if (typeof saver.dispose === "function") {
+          await (saver as unknown as { dispose(): Promise<void> }).dispose();
+        } else if (typeof saver.close === "function") {
+          (saver as unknown as { close(): void }).close();
+        }
       } catch (e) {
         this.logger.warn("Failed to close checkpointer", e);
       }
