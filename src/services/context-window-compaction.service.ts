@@ -1,5 +1,6 @@
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import { getConfigValue } from "../utils/utils";
+import * as vscode from "vscode";
 
 /**
  * Context Window Compaction Service
@@ -36,9 +37,26 @@ const RECENT_MESSAGES_TO_KEEP = 4;
 /** Maximum tokens per summarization chunk to avoid LLM output truncation. */
 const MAX_CHUNK_TOKENS = 12_000;
 
+/** Minimum content length (chars) to consider a tool result "large" for stripping. */
+const LARGE_CONTENT_THRESHOLD = 200;
+
+/** Default context window fallback when no model or config is found. */
+const DEFAULT_CONTEXT_WINDOW = 16_000;
+
 /** Token usage percentage thresholds. */
 const WARNING_THRESHOLD = 0.8;
 const AUTO_COMPACT_THRESHOLD = 0.9;
+
+/** Maximum character length for a single message sent to the summarization LLM. */
+const MAX_SINGLE_MESSAGE_CHARS = 10_000;
+
+/** Role labels for structural wrapping in summarization prompts. */
+const ROLE_LABEL: Record<CompactionMessage["role"], string> = {
+  user: "User",
+  assistant: "Assistant",
+  system: "System",
+  tool: "Tool",
+};
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -157,18 +175,29 @@ export function resolveContextWindow(modelName?: string): number {
     return MODEL_CONTEXT_WINDOWS[modelName];
   }
 
-  // 3. Default
-  return 16_000;
+  // 3. Default — model not in known list
+  if (modelName) {
+    const logger = Logger.initialize("resolveContextWindow", {
+      minLevel: LogLevel.INFO,
+      enableConsole: false,
+      enableFile: true,
+      enableTelemetry: false,
+    });
+    logger.warn(
+      `Unknown model "${modelName}" — defaulting to ${DEFAULT_CONTEXT_WINDOW} token context window`,
+    );
+  }
+  return DEFAULT_CONTEXT_WINDOW;
 }
 
 // ── Service ──────────────────────────────────────────────────────────
 
-export class ContextWindowCompactionService {
-  private static instance: ContextWindowCompactionService | undefined;
-  private static isDisposed = false;
+export class ContextWindowCompactionService implements vscode.Disposable {
+  private static _instance: ContextWindowCompactionService | undefined;
+  private disposed = false;
   private readonly logger: Logger;
 
-  constructor(
+  private constructor(
     private readonly summarize: SummarizeFn,
     private readonly countTokens: TokenCountFn,
   ) {
@@ -180,32 +209,39 @@ export class ContextWindowCompactionService {
     });
   }
 
+  /**
+   * Create and register a new instance, disposing any existing one first.
+   * Optionally register with ExtensionContext.subscriptions for automatic cleanup.
+   */
   static createInstance(
     summarize: SummarizeFn,
     countTokens: TokenCountFn,
+    context?: vscode.ExtensionContext,
   ): ContextWindowCompactionService {
-    if (ContextWindowCompactionService.instance) {
-      ContextWindowCompactionService.instance.logger.warn(
-        "Replacing existing ContextWindowCompactionService instance",
-      );
-    }
-    const newInstance = new ContextWindowCompactionService(
-      summarize,
-      countTokens,
-    );
-    ContextWindowCompactionService.instance = newInstance;
-    ContextWindowCompactionService.isDisposed = false;
-    return newInstance;
-  }
+    // Clean up existing instance before replacing
+    ContextWindowCompactionService._instance?.dispose();
 
-  static disposeInstance(): void {
-    ContextWindowCompactionService.instance = undefined;
-    ContextWindowCompactionService.isDisposed = true;
+    const instance = new ContextWindowCompactionService(summarize, countTokens);
+    ContextWindowCompactionService._instance = instance;
+
+    if (context) {
+      context.subscriptions.push(instance);
+    }
+
+    return instance;
   }
 
   static getInstance(): ContextWindowCompactionService | undefined {
-    if (ContextWindowCompactionService.isDisposed) return undefined;
-    return ContextWindowCompactionService.instance;
+    const inst = ContextWindowCompactionService._instance;
+    return inst?.disposed ? undefined : inst;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    if (ContextWindowCompactionService._instance === this) {
+      ContextWindowCompactionService._instance = undefined;
+    }
+    this.logger.info("ContextWindowCompactionService disposed");
   }
 
   // ── Public API ─────────────────────────────────────────────────────
@@ -225,6 +261,10 @@ export class ContextWindowCompactionService {
     messages: CompactionMessage[],
     options: CompactionOptions,
   ): Promise<CompactionResult> {
+    if (this.disposed) {
+      throw new Error("ContextWindowCompactionService has been disposed");
+    }
+
     const {
       maxContextTokens,
       systemPromptTokens,
@@ -528,7 +568,11 @@ export class ContextWindowCompactionService {
 
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
-      if (i < cutoff && msg.role === "tool" && msg.content.length > 200) {
+      if (
+        i < cutoff &&
+        msg.role === "tool" &&
+        msg.content.length > LARGE_CONTENT_THRESHOLD
+      ) {
         // Preserve tool_call_id for message pairing but truncate content
         result.push({
           ...msg,
@@ -544,7 +588,8 @@ export class ContextWindowCompactionService {
         const strippedToolCalls = msg.tool_calls.map((tc) => ({
           ...tc,
           args:
-            typeof tc.args === "string" && tc.args.length > 200
+            typeof tc.args === "string" &&
+            tc.args.length > LARGE_CONTENT_THRESHOLD
               ? "[args truncated]"
               : tc.args,
         }));
@@ -559,6 +604,40 @@ export class ContextWindowCompactionService {
     }
 
     return result;
+  }
+
+  // ── Private: Summarization Prompt Builder ──────────────────────────
+
+  /**
+   * Build a structurally separated summarization prompt.
+   * Uses XML-like tags to isolate user content from instructions,
+   * making prompt injection significantly harder. Caps individual
+   * message length to prevent token overflow.
+   */
+  private buildSummarizationPrompt(
+    messages: CompactionMessage[],
+    instruction: string,
+  ): string {
+    const structuredMessages = messages
+      .map((m) => {
+        const label = ROLE_LABEL[m.role];
+        let content = this.extractText(m);
+        if (content.length > MAX_SINGLE_MESSAGE_CHARS) {
+          content =
+            content.substring(0, MAX_SINGLE_MESSAGE_CHARS) +
+            `\n[... ${content.length - MAX_SINGLE_MESSAGE_CHARS} chars truncated]`;
+        }
+        return `<message role="${label}">\n${content}\n</message>`;
+      })
+      .join("\n");
+
+    return [
+      instruction,
+      "",
+      "<conversation>",
+      structuredMessages,
+      "</conversation>",
+    ].join("\n");
   }
 
   // ── Private: Tier 1 — Multi-Chunk Summarization ────────────────────
@@ -615,11 +694,11 @@ export class ContextWindowCompactionService {
       }
       if (safeChunk.length === 0) continue;
 
-      const chunkText = safeChunk
-        .map((m) => `${m.role}: ${this.extractText(m)}`)
-        .join("\n");
       const summary = await this.summarize(
-        `Summarize this conversation segment concisely. Preserve key decisions, code changes, file paths, and technical context:\n\n${chunkText}`,
+        this.buildSummarizationPrompt(
+          safeChunk,
+          "Summarize this conversation segment concisely. Preserve key decisions, code changes, file paths, and technical context. Output only the summary.",
+        ),
       );
       if (!summary) return null; // LLM failure → escalate to Tier 2
       chunkSummaries.push(summary);
@@ -722,12 +801,11 @@ export class ContextWindowCompactionService {
 
     if (oldestHalf.length === 0) return null;
 
-    const chunkText = oldestHalf
-      .map((m) => `${m.role}: ${this.extractText(m)}`)
-      .join("\n");
-
     const summary = await this.summarize(
-      `Briefly summarize this conversation. Keep only essential facts, decisions, and file paths:\n\n${chunkText}`,
+      this.buildSummarizationPrompt(
+        oldestHalf,
+        "Briefly summarize this conversation. Keep only essential facts, decisions, and file paths. Output only the summary.",
+      ),
     );
     if (!summary) return null;
 

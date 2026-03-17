@@ -419,9 +419,8 @@ export class SessionHandler implements WebviewMessageHandler {
 
       // Convert DB history to CompactionMessage format
       const compactionMessages: CompactionMessage[] = history.map(
-        (msg: any) => ({
-          role:
-            msg.type === "user" || msg.role === "user" ? "user" : "assistant",
+        (msg): CompactionMessage => ({
+          role: msg.type === "user" ? "user" : "assistant",
           content: msg.content || "",
           timestamp: msg.timestamp,
         }),
@@ -462,13 +461,18 @@ export class SessionHandler implements WebviewMessageHandler {
           ? `Compacted ${result.originalCount} → ${result.finalCount} messages (saved ~${result.originalTokens - result.finalTokens} tokens)`
           : "No compaction needed — history is within budget.",
       });
-    } catch (error: any) {
-      ctx.logger.error("Compact history failed:", error);
-      await ctx.webview.webview.postMessage({
-        type: "compact-result",
-        success: false,
-        message: `Compaction failed: ${error.message}`,
-      });
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      ctx.logger.error("Compact history failed:", errMsg);
+      try {
+        await ctx.webview.webview.postMessage({
+          type: "compact-result",
+          success: false,
+          message: `Compaction failed: ${errMsg}`,
+        });
+      } catch {
+        ctx.logger.warn("Failed to notify webview of compaction error");
+      }
     }
   }
 }

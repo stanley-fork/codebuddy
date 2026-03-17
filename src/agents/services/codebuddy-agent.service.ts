@@ -55,12 +55,18 @@ import {
   ContextWindowCompactionService,
   resolveContextWindow,
   type CompactionMessage,
+  type CompactionToolCall,
 } from "../../services/context-window-compaction.service";
 import { ChatAnthropic } from "@langchain/anthropic";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { ChatGroq } from "@langchain/groq";
 import { ChatOpenAI } from "@langchain/openai";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import {
+  AIMessage,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage,
+} from "@langchain/core/messages";
 
 /** Typed alias for the async iterator from a LangGraph agent stream. */
 type AgentStreamIterator = AsyncIterator<unknown>;
@@ -69,6 +75,27 @@ type AgentStreamIterator = AsyncIterator<unknown>;
 interface TraceBundle {
   tracer: Tracer;
   parentCtx: Context;
+}
+
+/** Shape of a LangGraph BaseMessage as seen from checkpoint state. */
+interface LangGraphMessage {
+  _getType?: () => "human" | "ai" | "tool" | "system" | string;
+  content: string | Array<{ type: string; text?: string }>;
+  role?: string;
+  tool_call_id?: string;
+  tool_calls?: CompactionToolCall[];
+}
+
+/** Map a LangGraph message's type to a CompactionMessage role. */
+function langGraphRoleToCompactionRole(
+  m: LangGraphMessage,
+): CompactionMessage["role"] {
+  const t = m._getType?.();
+  if (t === "human") return "user";
+  if (t === "ai") return "assistant";
+  if (t === "tool") return "tool";
+  if (t === "system") return "system";
+  return (m.role as CompactionMessage["role"]) ?? "user";
 }
 
 // Guaranteed fallback — extracted as a named constant for compile-time safety
@@ -341,6 +368,20 @@ export class CodeBuddyAgentService {
   private static readonly MAX_CACHED_AGENTS = 3;
   private readonly warnedUnknownTools = new Set<string>();
 
+  /** Compaction rate-limiting cache: skip redundant token counting. */
+  private readonly compactionCache = new Map<
+    string,
+    { messageCount: number; lastCompactionAt: number }
+  >();
+  private static readonly COMPACTION_COOLDOWN_MS = 30_000;
+  private static readonly MIN_NEW_MESSAGES_FOR_RECHECK = 3;
+
+  /** Cached LLM client for summarization, keyed by provider:model. */
+  private cachedSummarizationModel: {
+    model: ChatAnthropic | ChatGroq | ChatOpenAI | ChatGoogleGenerativeAI;
+    cacheKey: string;
+  } | null = null;
+
   constructor() {
     this.logger = Logger.initialize("CodeBuddyAgentService", {
       minLevel: LogLevel.DEBUG,
@@ -378,6 +419,8 @@ export class CodeBuddyAgentService {
             "Agent cache cleared after model change",
           );
         }
+        // Invalidate cached summarization model so next compaction uses new provider
+        this.cachedSummarizationModel = null;
       });
 
     // Track every file the agent edits so checkpoints cover them
@@ -390,12 +433,19 @@ export class CodeBuddyAgentService {
   }
 
   /**
-   * Lazily initialize the compaction service. The summarize function
-   * creates a temporary chat model from current settings to generate summaries.
-   * Uses a raw LLM call (no agent.stream) to avoid recursive re-entrancy.
-   * Token counting uses a character-based estimator (chars / 4).
+   * Initialize the compaction service once. Subsequent calls are no-ops.
+   * The summarize function reads current provider settings lazily at call-time,
+   * so it stays up-to-date even without re-initialization.
    */
   private initCompactionService(): void {
+    if (ContextWindowCompactionService.getInstance()) {
+      this.logger.log(
+        LogLevel.DEBUG,
+        "Compaction service already initialized, skipping",
+      );
+      return;
+    }
+
     try {
       let isSummarizing = false;
 
@@ -446,8 +496,8 @@ export class CodeBuddyAgentService {
   }
 
   /**
-   * Create a lightweight chat model for summarization based on current provider settings.
-   * Returns undefined if configuration is invalid.
+   * Get or create a cached chat model for summarization.
+   * The model is cached by provider:modelName and invalidated when settings change.
    */
   private createSummarizationModel():
     | ChatAnthropic
@@ -460,36 +510,53 @@ export class CodeBuddyAgentService {
     try {
       const { apiKey, model: modelName, baseUrl } = getAPIKeyAndModel(provider);
       if (!apiKey) return undefined;
+
+      const cacheKey = `${provider}:${modelName ?? "default"}`;
+      if (this.cachedSummarizationModel?.cacheKey === cacheKey) {
+        return this.cachedSummarizationModel.model;
+      }
+
+      let model:
+        | ChatAnthropic
+        | ChatGroq
+        | ChatOpenAI
+        | ChatGoogleGenerativeAI
+        | undefined;
       switch (provider) {
         case "anthropic":
-          return new ChatAnthropic({
+          model = new ChatAnthropic({
             anthropicApiKey: apiKey,
             modelName: modelName || "claude-sonnet-4-20250514",
           });
+          break;
         case "openai":
-          return new ChatOpenAI({
+          model = new ChatOpenAI({
             openAIApiKey: apiKey,
             modelName: modelName || "gpt-4o",
             configuration: baseUrl ? { baseURL: baseUrl } : undefined,
           });
+          break;
         case "groq":
-          return new ChatGroq({
+          model = new ChatGroq({
             apiKey,
             model: modelName || "llama-3.3-70b-versatile",
           });
+          break;
         case "gemini":
-          return new ChatGoogleGenerativeAI({
+          model = new ChatGoogleGenerativeAI({
             apiKey,
             model: modelName || "gemini-2.0-flash",
           });
+          break;
         case "deepseek":
-          return new ChatOpenAI({
+          model = new ChatOpenAI({
             openAIApiKey: apiKey,
             modelName: modelName || "deepseek-chat",
             configuration: { baseURL: baseUrl || "https://api.deepseek.com" },
           });
+          break;
         case "qwen":
-          return new ChatOpenAI({
+          model = new ChatOpenAI({
             openAIApiKey: apiKey,
             modelName: modelName || "qwen-plus",
             configuration: {
@@ -498,26 +565,52 @@ export class CodeBuddyAgentService {
                 "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             },
           });
+          break;
         case "glm":
-          return new ChatOpenAI({
+          model = new ChatOpenAI({
             openAIApiKey: apiKey,
             modelName: modelName || "glm-4-plus",
             configuration: {
               baseURL: baseUrl || "https://open.bigmodel.cn/api/paas/v4",
             },
           });
+          break;
         case "local":
-          return new ChatOpenAI({
+          model = new ChatOpenAI({
             openAIApiKey: apiKey || "not-needed",
             modelName: modelName || "local-model",
             configuration: { baseURL: baseUrl || "http://localhost:11434/v1" },
           });
+          break;
         default:
           return undefined;
       }
+
+      if (model) {
+        this.cachedSummarizationModel = { model, cacheKey };
+      }
+      return model;
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Rate-limit compaction checks. Returns false if a recent check was done
+   * and not enough new messages have arrived to justify re-counting tokens.
+   */
+  private shouldCheckCompaction(
+    conversationId: string,
+    currentMessageCount: number,
+  ): boolean {
+    const cached = this.compactionCache.get(conversationId);
+    if (!cached) return true;
+
+    const elapsed = Date.now() - cached.lastCompactionAt;
+    if (elapsed < CodeBuddyAgentService.COMPACTION_COOLDOWN_MS) return false;
+
+    const newMessages = currentMessageCount - cached.messageCount;
+    return newMessages >= CodeBuddyAgentService.MIN_NEW_MESSAGES_FOR_RECHECK;
   }
 
   /**
@@ -1090,7 +1183,7 @@ export class CodeBuddyAgentService {
 
       // ── Context Window Compaction ────────────────────────────────
       // Check existing thread messages and compact if nearing the context
-      // window limit. This prevents LLM input overflow on long conversations.
+      // window limit. Uses a cache to skip redundant token counting.
       try {
         const compactionService = ContextWindowCompactionService.getInstance();
         if (compactionService && agent.getState) {
@@ -1098,26 +1191,20 @@ export class CodeBuddyAgentService {
             configurable: { thread_id: conversationId },
           };
           const state = await agent.getState(stateConfig);
-          const existingMessages = (state?.values?.messages ?? []) as any[];
+          const existingMessages = (state?.values?.messages ??
+            []) as LangGraphMessage[];
 
-          if (existingMessages.length > 0) {
+          if (
+            existingMessages.length > 0 &&
+            this.shouldCheckCompaction(conversationId, existingMessages.length)
+          ) {
             const contextWindowTokens = resolveContextWindow(currentModelName);
-            // Estimate system prompt at ~2000 tokens (conservative)
             const systemPromptTokens = 2000;
 
             const compactionResult = await compactionService.compact(
               existingMessages.map(
-                (m: any): CompactionMessage => ({
-                  role:
-                    m._getType?.() === "human"
-                      ? "user"
-                      : m._getType?.() === "ai"
-                        ? "assistant"
-                        : m._getType?.() === "tool"
-                          ? "tool"
-                          : m._getType?.() === "system"
-                            ? "system"
-                            : (m.role ?? "user"),
+                (m): CompactionMessage => ({
+                  role: langGraphRoleToCompactionRole(m),
                   content:
                     typeof m.content === "string"
                       ? m.content
@@ -1131,6 +1218,12 @@ export class CodeBuddyAgentService {
                 systemPromptTokens,
               },
             );
+
+            // Update rate-limit cache
+            this.compactionCache.set(conversationId, {
+              messageCount: existingMessages.length,
+              lastCompactionAt: Date.now(),
+            });
 
             // Emit context window warning/critical events
             if (compactionResult.warningLevel !== "none") {
@@ -1159,8 +1252,6 @@ export class CodeBuddyAgentService {
                   `(tier ${compactionResult.tier})`,
               );
               // Convert CompactionMessages back to LangGraph-compatible format
-              const { HumanMessage, AIMessage, SystemMessage, ToolMessage } =
-                await import("@langchain/core/messages");
               const langchainMessages = compactionResult.messages.map((m) => {
                 switch (m.role) {
                   case "user":
@@ -1168,7 +1259,8 @@ export class CodeBuddyAgentService {
                   case "assistant": {
                     const aiMsg = new AIMessage(m.content);
                     if (m.tool_calls?.length) {
-                      (aiMsg as any).tool_calls = m.tool_calls;
+                      (aiMsg as unknown as Record<string, unknown>).tool_calls =
+                        m.tool_calls;
                     }
                     return aiMsg;
                   }
