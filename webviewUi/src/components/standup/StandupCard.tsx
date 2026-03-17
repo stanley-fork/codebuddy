@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import styled, { keyframes } from "styled-components";
 
 /* ─── Types ─── */
@@ -304,18 +304,31 @@ const StandupCard: React.FC<StandupCardProps> = ({
   onToggleCommitment,
 }) => {
   const [expanded, setExpanded] = useState(false);
-  const [localStatuses, setLocalStatuses] = useState<Record<number, boolean>>(
+  const [localStatuses, setLocalStatuses] = useState<Record<string, boolean>>(
     {},
   );
 
+  /** Stable keys for commitments, blockers, and decisions. */
+  const stableKey = (prefix: string, text: string, index: number) =>
+    `${prefix}-${text.slice(0, 40)}-${index}`;
+
+  const commitmentKeys = useMemo(
+    () =>
+      data.myCommitments.map((c, i) =>
+        stableKey("mc", c.action, i),
+      ),
+    [data.myCommitments],
+  );
+
   const handleToggle = (index: number) => {
-    const current = localStatuses[index] ?? data.myCommitments[index]?.status === "done";
-    setLocalStatuses((prev) => ({ ...prev, [index]: !current }));
+    const key = commitmentKeys[index];
+    const current = localStatuses[key] ?? data.myCommitments[index]?.status === "done";
+    setLocalStatuses((prev) => ({ ...prev, [key]: !current }));
     onToggleCommitment?.(index, !current);
   };
 
   const isDone = (index: number) =>
-    localStatuses[index] ?? data.myCommitments[index]?.status === "done";
+    localStatuses[commitmentKeys[index]] ?? data.myCommitments[index]?.status === "done";
 
   // Group other commitments by person
   const byPerson = new Map<string, string[]>();
@@ -356,7 +369,7 @@ const StandupCard: React.FC<StandupCardProps> = ({
             Your Action Items ({data.myCommitments.length})
           </SectionHeader>
           {data.myCommitments.map((c, i) => (
-            <CommitmentRow key={i}>
+            <CommitmentRow key={commitmentKeys[i]}>
               <Checkbox
                 $done={isDone(i)}
                 onClick={() => handleToggle(i)}
@@ -386,7 +399,7 @@ const StandupCard: React.FC<StandupCardProps> = ({
             Blockers ({data.blockers.length})
           </SectionHeader>
           {data.blockers.map((b, i) => (
-            <BlockerRow key={i}>
+            <BlockerRow key={stableKey("bl", b.blocked + b.blockedBy, i)}>
               <div>
                 <BlockerText>
                   <strong>{b.blocked}</strong> → blocked by{" "}
@@ -409,7 +422,7 @@ const StandupCard: React.FC<StandupCardProps> = ({
             Key Decisions ({data.decisions.length})
           </SectionHeader>
           {data.decisions.map((d, i) => (
-            <DecisionRow key={i}>{d.summary}</DecisionRow>
+            <DecisionRow key={stableKey("dc", d.summary, i)}>{d.summary}</DecisionRow>
           ))}
         </>
       )}

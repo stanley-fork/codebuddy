@@ -39,40 +39,69 @@ interface StandupState {
   setError: (err: string | null) => void;
 }
 
-export const useStandupStore = create<StandupState>()((set) => ({
-  recentStandups: [],
-  isIngesting: false,
-  lastError: null,
+export const useStandupStore = create<StandupState>()((set, get) => {
+  let ingestTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  ingestNotes: (notes: string) => {
-    set({ isIngesting: true, lastError: null });
-    vscode.postMessage({ command: "standup-ingest", notes });
-  },
+  const clearIngestTimeout = () => {
+    if (ingestTimeout) {
+      clearTimeout(ingestTimeout);
+      ingestTimeout = null;
+    }
+  };
 
-  requestMyTasks: (person?: string) => {
-    vscode.postMessage({ command: "standup-my-tasks", person });
-  },
+  return {
+    recentStandups: [],
+    isIngesting: false,
+    lastError: null,
 
-  requestBlockers: () => {
-    vscode.postMessage({ command: "standup-blockers" });
-  },
+    ingestNotes: (notes: string) => {
+      clearIngestTimeout();
+      set({ isIngesting: true, lastError: null });
+      vscode.postMessage({ command: "standup-ingest", notes });
 
-  requestHistory: (filter) => {
-    vscode.postMessage({
-      command: "standup-history",
-      person: filter?.person,
-      dateRange: filter?.dateRange,
-      ticketId: filter?.ticketId,
-    });
-  },
+      // Safety-net timeout: reset isIngesting after 30 s
+      ingestTimeout = setTimeout(() => {
+        if (get().isIngesting) {
+          set({
+            isIngesting: false,
+            lastError: "Standup ingestion timed out — please try again.",
+          });
+        }
+      }, 30_000);
+    },
 
-  addStandupSummary: (summary: StandupSummary) => {
-    set((s) => ({
-      recentStandups: [summary, ...s.recentStandups].slice(0, 10),
-      isIngesting: false,
-    }));
-  },
+    requestMyTasks: (person?: string) => {
+      vscode.postMessage({ command: "standup-my-tasks", person });
+    },
 
-  setIngesting: (val: boolean) => set({ isIngesting: val }),
-  setError: (err: string | null) => set({ lastError: err, isIngesting: false }),
-}));
+    requestBlockers: () => {
+      vscode.postMessage({ command: "standup-blockers" });
+    },
+
+    requestHistory: (filter) => {
+      vscode.postMessage({
+        command: "standup-history",
+        person: filter?.person,
+        dateRange: filter?.dateRange,
+        ticketId: filter?.ticketId,
+      });
+    },
+
+    addStandupSummary: (summary: StandupSummary) => {
+      clearIngestTimeout();
+      set((s) => ({
+        recentStandups: [summary, ...s.recentStandups].slice(0, 10),
+        isIngesting: false,
+      }));
+    },
+
+    setIngesting: (val: boolean) => {
+      if (!val) clearIngestTimeout();
+      set({ isIngesting: val });
+    },
+    setError: (err: string | null) => {
+      clearIngestTimeout();
+      set({ lastError: err, isIngesting: false });
+    },
+  };
+});
