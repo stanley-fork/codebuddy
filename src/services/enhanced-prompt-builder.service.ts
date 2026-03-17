@@ -14,6 +14,7 @@ import {
   formatArchitectureContext,
   type ArchitectureSection,
 } from "../agents/langgraph/tools/architecture";
+import { MemoryTool } from "../tools/memory";
 
 export interface QuestionAnalysis {
   isCodebaseRelated: boolean;
@@ -169,6 +170,9 @@ export class EnhancedPromptBuilderService {
       architectureContext = await this.getArchitectureContext();
     }
 
+    // Inject persistent memories (user preferences + project knowledge)
+    const coreMemories = MemoryTool.getFormattedMemories();
+
     const enhancedPrompt = `
       persona: |
         You are CodeBuddy, an expert software engineer and architect with deep knowledge of the provided codebase context. Your goal is to provide comprehensive, accurate, and actionable responses.
@@ -182,7 +186,7 @@ export class EnhancedPromptBuilderService {
         codebase_snippets: |
           ${formattedContext}
         ${architectureContext ? `architecture_analysis: |\n          ${architectureContext.split("\n").join("\n          ")}` : ""}
-
+      ${coreMemories ? `${coreMemories}` : ""}
       rules:
         - Base your response *only* on the provided context. Do not invent APIs or file structures.
         - Be specific: Reference actual files, functions, and variables from the context.

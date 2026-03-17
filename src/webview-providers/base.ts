@@ -67,6 +67,7 @@ import {
   RulesHandler,
   SessionHandler,
   SettingsHandler,
+  StandupHandler,
 } from "./handlers";
 import { HandlerContext, MessageHandlerRegistry } from "./handlers/types";
 
@@ -255,6 +256,7 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
     this.handlerRegistry.register(new RulesHandler());
     this.handlerRegistry.register(new CheckpointHandler());
     this.handlerRegistry.register(new ComposerHandler());
+    this.handlerRegistry.register(new StandupHandler());
     this.handlerRegistry.register(
       new PerformanceHandler(
         () => this.performanceProfiler,
@@ -706,6 +708,28 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                 };
                 await this.handlerRegistry.dispatch(
                   { command: "compact-history" },
+                  ctx,
+                );
+                break;
+              }
+
+              // Handle /standup slash command
+              if (
+                typeof message.message === "string" &&
+                message.message.trim().toLowerCase().startsWith("/standup")
+              ) {
+                const notes = message.message
+                  .trim()
+                  .substring("/standup".length)
+                  .trim();
+                const ctx: HandlerContext = {
+                  webview: _view,
+                  logger: this.logger,
+                  extensionUri: this._extensionUri,
+                  sendResponse: this.sendResponse.bind(this),
+                };
+                await this.handlerRegistry.dispatch(
+                  { command: "standup-ingest", notes },
                   ctx,
                 );
                 break;
