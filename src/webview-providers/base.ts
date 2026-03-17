@@ -1190,15 +1190,19 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
         );
 
         const compactionMessages: CompactionMessage[] = history.map(
-          (msg: any) => ({
+          (msg: {
+            role?: string;
+            parts?: Array<{ text?: string }>;
+            content?: string;
+          }) => ({
             role:
               msg.role === "user" ||
               msg.role === "model" ||
               msg.role === "assistant"
                 ? msg.role === "model"
                   ? "assistant"
-                  : msg.role
-                : "user",
+                  : (msg.role as CompactionMessage["role"])
+                : ("user" as const),
             content: msg.parts
               ? (msg.parts[0]?.text ?? "")
               : (msg.content ?? ""),
