@@ -518,14 +518,6 @@ export class WebViewProviderManager
     if (this.webviewView?.webview) {
       const requestId = event.message?.requestId ?? event.message?.id;
 
-      // Extract the error string: prefer explicit error fields, then fall back
-      // to content only if it is a short string (not a large LLM response chunk).
-      const rawContent = event.message?.content;
-      const contentAsError =
-        typeof rawContent === "string" && rawContent.length < 500
-          ? rawContent
-          : undefined;
-
       await this.webviewView.webview.postMessage({
         type: StreamEventType.ERROR,
         payload: {
@@ -535,11 +527,36 @@ export class WebViewProviderManager
           error:
             event.message?.error ||
             event.error ||
-            contentAsError ||
+            this.extractErrorFromContent(event.message?.content) ||
             "An error occurred",
         },
       });
     }
+  }
+
+  /**
+   * Extract an error string from raw content only if it structurally
+   * looks like an error (JSON with message/error field, or a short
+   * single-line plain-text message). Avoids surfacing LLM response
+   * chunks as error text.
+   */
+  private extractErrorFromContent(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed.message === "string") return parsed.message;
+      if (parsed && typeof parsed.error === "string") return parsed.error;
+    } catch {
+      // Not JSON — treat as plain error text only if short and single-line
+      if (
+        value.length < 200 &&
+        !value.includes("\n") &&
+        !value.includes("```")
+      ) {
+        return value;
+      }
+    }
+    return undefined;
   }
 
   private async handleStreamMetadata(event: IEventPayload) {

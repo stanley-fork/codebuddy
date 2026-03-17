@@ -104,14 +104,15 @@ export class CircuitBreaker {
   }
 
   /**
-   * Read the current state without side effects.
-   * OPEN → HALF_OPEN transition only happens in canAttempt().
+   * Read the current state. Applies the OPEN → HALF_OPEN transition
+   * so all observers agree on state.
    */
   getState(): CircuitState {
     if (this.state === CircuitState.OPEN) {
       const elapsed = Date.now() - this.lastFailureTime;
       if (elapsed >= this.resetTimeoutMs) {
-        return CircuitState.HALF_OPEN;
+        this.state = CircuitState.HALF_OPEN;
+        this.probeInFlight = false;
       }
     }
     return this.state;
@@ -122,9 +123,9 @@ export class CircuitBreaker {
   }
 
   getRemainingCooldownMs(): number {
-    if (this.state !== CircuitState.OPEN) {
-      return 0;
-    }
+    // Ensure state is current before computing cooldown
+    this.getState();
+    if (this.state !== CircuitState.OPEN) return 0;
     const elapsed = Date.now() - this.lastFailureTime;
     return Math.max(0, this.resetTimeoutMs - elapsed);
   }

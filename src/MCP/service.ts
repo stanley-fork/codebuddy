@@ -305,7 +305,22 @@ export class MCPService implements vscode.Disposable {
       this.logger.debug(
         `Connection to "${serverName}" already in progress, waiting...`,
       );
-      await existing;
+      try {
+        await existing;
+      } catch {
+        // The in-progress connection failed; check circuit breaker state
+        // before letting the caller retry or propagating the error.
+        const cbNow = this.getCircuitBreaker(serverName);
+        if (!cbNow.canAttempt()) {
+          const remaining = Math.ceil(cbNow.getRemainingCooldownMs() / 1000);
+          throw new Error(
+            `Connection to "${serverName}" failed and circuit is now OPEN. Retry in ${remaining}s.`,
+          );
+        }
+        throw new Error(
+          `Connection to "${serverName}" failed. Circuit is still CLOSED; caller may retry.`,
+        );
+      }
       return;
     }
 
@@ -691,6 +706,13 @@ export class MCPService implements vscode.Disposable {
    */
   private isDockerDaemonRunning(command: string): Promise<boolean> {
     return new Promise((resolve) => {
+      let settled = false;
+      const settle = (result: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+
       try {
         const env = {
           ...process.env,
@@ -711,15 +733,21 @@ export class MCPService implements vscode.Disposable {
           },
         );
 
-        proc.on("error", () => resolve(false));
-        proc.on("exit", (code: number | null) => resolve(code === 0));
+        proc.on("error", () => settle(false));
+        proc.on("exit", (code: number | null) => settle(code === 0));
 
-        setTimeout(() => {
-          proc.kill();
-          resolve(false);
-        }, 5000);
+        const timer = setTimeout(() => {
+          try {
+            proc.kill();
+          } catch {
+            /* already exited */
+          }
+          settle(false);
+        }, 3000);
+
+        proc.on("exit", () => clearTimeout(timer));
       } catch {
-        resolve(false);
+        settle(false);
       }
     });
   }

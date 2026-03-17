@@ -8,6 +8,7 @@
  * TelemetryPersistenceService.
  */
 import * as fs from "fs";
+import * as fsp from "fs/promises";
 import * as path from "path";
 import {
   BaseCheckpointSaver,
@@ -85,7 +86,7 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
     this.dbPath = opts.dbPath;
     this.wasmLocator = opts.wasmLocator;
     this.logger = Logger.initialize("SqlJsCheckpointSaver", {
-      minLevel: LogLevel.DEBUG,
+      minLevel: LogLevel.INFO,
       enableConsole: true,
       enableFile: true,
       enableTelemetry: true,
@@ -96,10 +97,10 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
    * Factory: create from a directory + extensionPath for WASM resolution.
    * Enumerates candidate paths, validates existence, fails fast on missing WASM.
    */
-  static create(opts: {
+  static async create(opts: {
     dbDir: string;
     extensionPath: string;
-  }): SqlJsCheckpointSaver {
+  }): Promise<SqlJsCheckpointSaver> {
     const dbPath = path.join(opts.dbDir, "checkpoints.db");
 
     const candidatePaths = [
@@ -115,7 +116,16 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
       path.join(__dirname, "sql-wasm.wasm"),
     ];
 
-    const resolvedWasmPath = candidatePaths.find((p) => fs.existsSync(p));
+    let resolvedWasmPath: string | undefined;
+    for (const p of candidatePaths) {
+      try {
+        await fsp.access(p, fs.constants.R_OK);
+        resolvedWasmPath = p;
+        break;
+      } catch {
+        // candidate not found, try next
+      }
+    }
     if (!resolvedWasmPath) {
       throw new Error(
         `sql-wasm.wasm not found. Searched:\n${candidatePaths.join("\n")}`,
@@ -125,7 +135,7 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
     return new SqlJsCheckpointSaver({
       dbPath,
       wasmLocator: (file: string) =>
-        file.endsWith(".wasm") ? resolvedWasmPath : file,
+        file.endsWith(".wasm") ? resolvedWasmPath! : file,
     });
   }
 
@@ -218,6 +228,35 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
 
   // ── sql.js query helpers ────────────────────────────────────────────
 
+  /** Validate and map a raw sql.js row to CheckpointRow with runtime checks. */
+  private toCheckpointRow(raw: Record<string, SqlValue>): CheckpointRow {
+    if (typeof raw.thread_id !== "string") {
+      throw new Error(`Invalid checkpoint row: thread_id=${raw.thread_id}`);
+    }
+    if (typeof raw.checkpoint_id !== "string") {
+      throw new Error(
+        `Invalid checkpoint row: checkpoint_id=${raw.checkpoint_id}`,
+      );
+    }
+    return {
+      thread_id: raw.thread_id,
+      checkpoint_ns:
+        typeof raw.checkpoint_ns === "string" ? raw.checkpoint_ns : "",
+      checkpoint_id: raw.checkpoint_id,
+      parent_checkpoint_id:
+        typeof raw.parent_checkpoint_id === "string"
+          ? raw.parent_checkpoint_id
+          : null,
+      type: typeof raw.type === "string" ? raw.type : null,
+      checkpoint: raw.checkpoint as Uint8Array | string,
+      metadata: raw.metadata as Uint8Array | string,
+      pending_writes:
+        typeof raw.pending_writes === "string" ? raw.pending_writes : "[]",
+      pending_sends:
+        typeof raw.pending_sends === "string" ? raw.pending_sends : "[]",
+    };
+  }
+
   /** Run a query that returns a single row (or undefined). */
   private queryOne(sql: string, params: BindParams): CheckpointRow | undefined {
     const db = this.getDb();
@@ -225,7 +264,7 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
     stmt.bind(params);
     let row: CheckpointRow | undefined;
     if (stmt.step()) {
-      row = stmt.getAsObject() as unknown as CheckpointRow;
+      row = this.toCheckpointRow(stmt.getAsObject());
     }
     stmt.free();
     return row;
@@ -238,7 +277,7 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
     stmt.bind(params);
     const rows: CheckpointRow[] = [];
     while (stmt.step()) {
-      rows.push(stmt.getAsObject() as unknown as CheckpointRow);
+      rows.push(this.toCheckpointRow(stmt.getAsObject()));
     }
     stmt.free();
     return rows;
@@ -281,7 +320,7 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
           WHERE ps.thread_id = checkpoints.thread_id
             AND ps.checkpoint_ns = checkpoints.checkpoint_ns
             AND ps.checkpoint_id = checkpoints.parent_checkpoint_id
-            AND ps.channel = '${TASKS}'
+            AND ps.channel = ?
           ORDER BY ps.idx
         ) AS pending_sends
       FROM checkpoints
@@ -371,8 +410,8 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
 
     const sql = this.buildCheckpointQuery(!!checkpoint_id);
     const params: BindParams = checkpoint_id
-      ? [thread_id, checkpoint_ns, checkpoint_id]
-      : [thread_id, checkpoint_ns];
+      ? [TASKS, thread_id, checkpoint_ns, checkpoint_id]
+      : [TASKS, thread_id, checkpoint_ns];
 
     const row = this.queryOne(sql, params);
     if (!row) return undefined;
@@ -411,14 +450,14 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
           WHERE ps.thread_id = checkpoints.thread_id
             AND ps.checkpoint_ns = checkpoints.checkpoint_ns
             AND ps.checkpoint_id = checkpoints.parent_checkpoint_id
-            AND ps.channel = '${TASKS}'
+            AND ps.channel = ?
           ORDER BY ps.idx
         ) AS pending_sends
       FROM checkpoints
     `;
 
     const whereClauses: string[] = [];
-    const params: BindParams = [];
+    const params: BindParams = [TASKS];
 
     if (thread_id) {
       whereClauses.push("thread_id = ?");
@@ -433,13 +472,20 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
       params.push(before.configurable.checkpoint_id);
     }
 
-    // Apply metadata filters (keys validated against constant allowlist)
+    // Apply metadata filters — keys validated against compile-time allowlist,
+    // then interpolated as literal identifiers (json_extract path segments).
+    // The allowlist guarantees only [a-z]+ keys reach the query string.
     const sanitized = Object.entries(filter ?? {}).filter(
       ([key, value]) =>
         value !== undefined && VALID_METADATA_KEYS.includes(key as any),
     );
     for (const [key, value] of sanitized) {
-      whereClauses.push(`json_extract(CAST(metadata AS TEXT), '$.${key}') = ?`);
+      const safeKey = (VALID_METADATA_KEYS as readonly string[]).find(
+        (k) => k === key,
+      );
+      if (!safeKey) continue; // redundant guard — already filtered above
+      whereClauses.push(`json_extract(CAST(metadata AS TEXT), '$.' || ?) = ?`);
+      params.push(safeKey);
       params.push(JSON.stringify(value));
     }
 
@@ -604,7 +650,11 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
   // ── v3 → v4 migration helper ───────────────────────────────────────
 
   private async migratePendingSends(
-    checkpoint: any,
+    checkpoint: {
+      v: number;
+      channel_values?: Record<string, unknown>;
+      channel_versions: Record<string, string | number>;
+    },
     threadId: string,
     parentCheckpointId: string,
   ): Promise<void> {
@@ -613,9 +663,9 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
          json_object('type', ps.type, 'value', CAST(ps.value AS TEXT))
        ) AS pending_sends
        FROM writes AS ps
-       WHERE ps.thread_id = ? AND ps.checkpoint_id = ? AND ps.channel = '${TASKS}'
+       WHERE ps.thread_id = ? AND ps.checkpoint_id = ? AND ps.channel = ?
        ORDER BY ps.idx`,
-      [threadId, parentCheckpointId],
+      [threadId, parentCheckpointId, TASKS],
     );
 
     if (!row?.pending_sends) return;
@@ -623,23 +673,27 @@ export class SqlJsCheckpointSaver extends BaseCheckpointSaver {
     const sends: Array<{ type: string; value: string }> = JSON.parse(
       String(row.pending_sends),
     );
-    checkpoint.channel_values ??= {};
-    checkpoint.channel_values[TASKS] = await Promise.all(
+
+    // Work on a shallow copy to avoid mutating shared state
+    const migratedValues = { ...(checkpoint.channel_values ?? {}) };
+    migratedValues[TASKS] = await Promise.all(
       sends.map(({ type, value }) => this.serde.loadsTyped(type, value)),
     );
-    checkpoint.channel_versions[TASKS] =
-      Object.keys(checkpoint.channel_versions).length > 0
+    checkpoint.channel_values = migratedValues;
+
+    const migratedVersions = { ...checkpoint.channel_versions };
+    migratedVersions[TASKS] =
+      Object.keys(migratedVersions).length > 0
         ? maxChannelVersion(
-            ...(Object.values(checkpoint.channel_versions) as Array<
-              string | number
-            >),
+            ...(Object.values(migratedVersions) as Array<string | number>),
           )
         : this.getNextVersion(undefined);
+    checkpoint.channel_versions = migratedVersions;
   }
 
   // ── Cleanup (defensive dispose with error isolation) ────────────────
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
