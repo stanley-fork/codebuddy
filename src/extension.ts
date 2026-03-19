@@ -56,6 +56,7 @@ import { NotificationService } from "./services/notification.service";
 import { SqliteVectorStore } from "./services/sqlite-vector-store";
 import { StandupService } from "./services/standup.service";
 import { MeetingIntelligenceService } from "./services/meeting-intelligence.service";
+import { TeamGraphStore } from "./services/team-graph-store";
 import { CodeHealthTask } from "./services/tasks/code-health.task";
 import { DependencyCheckTask } from "./services/tasks/dependency-check.task";
 import { GitWatchdogTask } from "./services/tasks/git-watchdog.task";
@@ -1037,6 +1038,7 @@ export async function activate(context: vscode.ExtensionContext) {
       orchestrator,
       agentRunningGuard,
       MeetingIntelligenceService.getInstance(),
+      TeamGraphStore.getInstance(),
     );
 
     // Initialize Traceloop observability at the tail end as requested
