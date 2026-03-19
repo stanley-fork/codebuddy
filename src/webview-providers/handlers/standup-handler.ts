@@ -67,16 +67,17 @@ export class StandupHandler implements WebviewMessageHandler {
           ) {
             await ctx.sendResponse(
               "Error: No meeting notes provided. Usage: `/standup <paste your meeting notes>`",
+              "bot",
             );
             return;
           }
-          await ctx.sendResponse("⏳ Parsing standup notes...");
+          await ctx.sendResponse("⏳ Parsing standup notes...", "bot");
           const { cardJson, record } = await svc.ingestStructured(
             message.notes,
           );
           // Send structured JSON as a chat response — MessageRenderer
           // detects `type: "standup_brief"` and renders a StandupCard.
-          await ctx.sendResponse(cardJson);
+          await ctx.sendResponse(cardJson, "bot");
           // Also notify the standup store in the CoWorker panel.
           const posted = await ctx.webview.webview
             .postMessage({
@@ -111,13 +112,13 @@ export class StandupHandler implements WebviewMessageHandler {
 
         case "standup-my-tasks": {
           const result = await svc.getMyTasks(message.person);
-          await ctx.sendResponse(result);
+          await ctx.sendResponse(result, "bot");
           break;
         }
 
         case "standup-blockers": {
           const result = await svc.getBlockers();
-          await ctx.sendResponse(result);
+          await ctx.sendResponse(result, "bot");
           break;
         }
 
@@ -127,13 +128,16 @@ export class StandupHandler implements WebviewMessageHandler {
             dateRange: message.dateRange,
             ticketId: message.ticketId,
           });
-          await ctx.sendResponse(result);
+          await ctx.sendResponse(result, "bot");
           break;
         }
 
         case "standup-delete": {
           if (!message.date || typeof message.date !== "string") {
-            await ctx.sendResponse("Error: No date provided for deletion.");
+            await ctx.sendResponse(
+              "Error: No date provided for deletion.",
+              "bot",
+            );
             return;
           }
           const deleted = await svc.deleteStandup(
@@ -143,10 +147,12 @@ export class StandupHandler implements WebviewMessageHandler {
           if (deleted) {
             await ctx.sendResponse(
               `Deleted standup for ${message.date} — ${message.teamName || "Unknown Team"}.`,
+              "bot",
             );
           } else {
             await ctx.sendResponse(
               `No standup found for ${message.date} to delete.`,
+              "bot",
             );
           }
           break;
@@ -156,7 +162,10 @@ export class StandupHandler implements WebviewMessageHandler {
       const msg = error instanceof Error ? error.message : "Unknown error";
       ctx.logger.error(`StandupHandler error: ${msg}`);
       try {
-        await ctx.sendResponse(`Error processing standup command: ${msg}`);
+        await ctx.sendResponse(
+          `Error processing standup command: ${msg}`,
+          "bot",
+        );
         // Notify webview store so isIngesting spinner resets (Issue 1)
         await ctx.webview.webview.postMessage({
           command: "standup-error",

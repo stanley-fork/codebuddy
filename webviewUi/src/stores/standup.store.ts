@@ -61,7 +61,8 @@ export const useStandupStore = create<StandupState>()((set, get) => {
       set({ isIngesting: true, lastError: null });
       vscode.postMessage({ command: "standup-ingest", notes });
 
-      // Safety-net timeout: reset isIngesting after 30 s
+      // Safety-net timeout: reset isIngesting after 90 s
+      // (LLM call has its own 45 s timeout; this covers store + prune overhead)
       ingestTimeout = setTimeout(() => {
         if (get().isIngesting) {
           set({
@@ -69,7 +70,7 @@ export const useStandupStore = create<StandupState>()((set, get) => {
             lastError: "Standup ingestion timed out — please try again.",
           });
         }
-      }, 30_000);
+      }, 90_000);
     },
 
     requestMyTasks: (person?: string) => {

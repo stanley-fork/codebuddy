@@ -468,6 +468,9 @@ ${safeNotes}
 ${delimiter}_END`;
   }
 
+  /** Maximum time (ms) to wait for the LLM before falling back to regex. */
+  private static readonly LLM_TIMEOUT_MS = 45_000;
+
   private async parseStandup(rawNotes: string): Promise<StandupRecord> {
     const llm = this.getLLM();
     if (!llm) {
@@ -478,7 +481,15 @@ ${delimiter}_END`;
     const prompt = this.buildParsePrompt(rawNotes);
 
     try {
-      const response = await llm.generateText(prompt);
+      const response = await Promise.race([
+        llm.generateText(prompt),
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error("LLM request timed out")),
+            MeetingIntelligenceService.LLM_TIMEOUT_MS,
+          ),
+        ),
+      ]);
       if (!response) {
         throw new Error("Empty LLM response");
       }
