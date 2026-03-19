@@ -35,8 +35,16 @@ const CommitmentSchema = z.object({
 });
 
 const StandupRecordSchema = z.object({
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD"),
-  teamName: z.string().default("Unknown Team"),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD")
+    .nullable()
+    .transform((v) => v ?? new Date().toISOString().slice(0, 10)),
+  teamName: z
+    .string()
+    .nullable()
+    .default("Unknown Team")
+    .transform((v) => v ?? "Unknown Team"),
   participants: z.array(z.string()).default([]),
   commitments: z.array(CommitmentSchema).default([]),
   blockers: z
@@ -83,6 +91,8 @@ export class MeetingIntelligenceService {
   private standupCache: { data: StandupRecord[]; fetchedAt: number } | null =
     null;
   private static readonly CACHE_TTL_MS = 60_000;
+  private ingestQueue: Promise<unknown> = Promise.resolve();
+  private readonly configDisposable: vscode.Disposable;
 
   private constructor() {
     this.logger = Logger.initialize("MeetingIntelligenceService", {
@@ -94,19 +104,24 @@ export class MeetingIntelligenceService {
     this.memoryTool = new MemoryTool();
 
     // Invalidate LLM cache when user changes provider/key settings
-    vscode.workspace.onDidChangeConfiguration((e) => {
+    this.configDisposable = vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("codebuddy")) {
         this.llmCache = null;
-        this.logger.info("LLM config changed — cache invalidated");
+        this.logger.info("LLM config changed \u2014 cache invalidated");
       }
     });
+  }
+
+  /** Dispose the configuration listener. */
+  dispose(): void {
+    this.configDisposable.dispose();
   }
 
   /** Compute a lightweight hash of the current LLM config. */
   private getConfigHash(): string {
     const provider = (getGenerativeAiModel() || "groq").toLowerCase();
-    const { apiKey, model } = getAPIKeyAndModel(provider);
-    return `${provider}:${model ?? ""}:${apiKey?.slice(-6) ?? "none"}`;
+    const { model } = getAPIKeyAndModel(provider);
+    return `${provider}:${model ?? ""}`;
   }
 
   /** Resolve the configured LLM, re-initializing only when config changes. */
@@ -195,12 +210,16 @@ export class MeetingIntelligenceService {
    * formatted personal brief for the current user.
    */
   async ingest(rawNotes: string): Promise<string> {
-    const record = await this.parseStandup(rawNotes);
-    await this.store(record);
-    this.standupCache = null; // invalidate after write
-    await this.pruneOldStandups();
-    const myName = await this.resolveMyName();
-    return this.formatPersonalBrief(record, myName);
+    const result = this.ingestQueue.then(async () => {
+      const record = await this.parseStandup(rawNotes);
+      await this.store(record);
+      this.standupCache = null;
+      await this.pruneOldStandups();
+      const myName = await this.resolveMyName();
+      return this.formatPersonalBrief(record, myName);
+    });
+    this.ingestQueue = result.catch(() => undefined);
+    return result;
   }
 
   /**
@@ -210,32 +229,83 @@ export class MeetingIntelligenceService {
   async ingestStructured(
     rawNotes: string,
   ): Promise<{ cardJson: string; record: StandupRecord }> {
-    const record = await this.parseStandup(rawNotes);
-    await this.store(record);
-    this.standupCache = null; // invalidate after write
-    await this.pruneOldStandups();
-    const myName = await this.resolveMyName();
+    const result = this.ingestQueue.then(async () => {
+      const record = await this.parseStandup(rawNotes);
+      await this.store(record);
+      this.standupCache = null;
+      await this.pruneOldStandups();
+      const myName = await this.resolveMyName();
 
-    const myCommitments = record.commitments.filter((c) =>
-      this.nameMatch(c.person, myName),
-    );
-    const otherCommitments = record.commitments.filter(
-      (c) => !this.nameMatch(c.person, myName),
-    );
+      const myCommitments = record.commitments.filter((c) =>
+        this.nameMatch(c.person, myName),
+      );
+      const otherCommitments = record.commitments.filter(
+        (c) => !this.nameMatch(c.person, myName),
+      );
 
-    const cardData = {
-      type: "standup_brief" as const,
-      date: record.date,
-      teamName: record.teamName,
-      participants: record.participants,
-      myCommitments,
-      otherCommitments,
-      blockers: record.blockers,
-      decisions: record.decisions,
-      ticketMentions: record.ticketMentions,
-    };
+      const cardData = {
+        type: "standup_brief" as const,
+        date: record.date,
+        teamName: record.teamName,
+        participants: record.participants,
+        myCommitments,
+        otherCommitments,
+        blockers: record.blockers,
+        decisions: record.decisions,
+        ticketMentions: record.ticketMentions,
+      };
 
-    return { cardJson: JSON.stringify(cardData), record };
+      return { cardJson: JSON.stringify(cardData), record };
+    });
+    this.ingestQueue = result.catch(() => undefined);
+    return result;
+  }
+
+  /** Delete a standup record by date (and optionally team name). */
+  async deleteStandup(date: string, teamName?: string): Promise<boolean> {
+    try {
+      const raw = await this.memoryTool.execute(
+        "search",
+        undefined,
+        STANDUP_KEYWORD_PREFIX,
+      );
+      const entries: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (!Array.isArray(entries)) return false;
+
+      for (const e of entries) {
+        if (
+          typeof e !== "object" ||
+          e === null ||
+          !("id" in e) ||
+          !("content" in e)
+        )
+          continue;
+        try {
+          const record = JSON.parse(
+            (e as { content: string }).content,
+          ) as Partial<StandupRecord>;
+          if (
+            record.date === date &&
+            (!teamName || record.teamName === teamName)
+          ) {
+            await this.memoryTool.execute("delete", {
+              id: (e as { id: string }).id,
+            });
+            this.standupCache = null;
+            this.logger.info(`Deleted standup for ${date}`);
+            return true;
+          }
+        } catch {
+          continue;
+        }
+      }
+      return false;
+    } catch (error: unknown) {
+      const msg =
+        error instanceof Error ? error.message : "Unknown delete error";
+      this.logger.error(`Failed to delete standup: ${msg}`);
+      return false;
+    }
   }
 
   /** Return the specified person's (or current user's) commitments. */
@@ -419,7 +489,18 @@ ${delimiter}_END`;
         .trim();
 
       // Validate LLM output against Zod schema
-      const parseResult = StandupRecordSchema.safeParse(JSON.parse(cleaned));
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (jsonErr: unknown) {
+        const snippet = cleaned.slice(0, 80);
+        this.logger.warn(
+          `LLM returned non-JSON response (first 80 chars): ${snippet}`,
+        );
+        return this.fallbackParse(rawNotes);
+      }
+
+      const parseResult = StandupRecordSchema.safeParse(parsed);
       if (!parseResult.success) {
         this.logger.warn(
           `LLM output failed schema validation: ${parseResult.error.message}`,
@@ -427,11 +508,11 @@ ${delimiter}_END`;
         return this.fallbackParse(rawNotes);
       }
 
-      const parsed = parseResult.data as StandupRecord;
+      const record = parseResult.data as StandupRecord;
       this.logger.info(
-        `Parsed standup: ${parsed.date}, ${parsed.commitments.length} commitments, ${parsed.blockers.length} blockers`,
+        `Parsed standup: ${record.date}, ${record.commitments.length} commitments, ${record.blockers.length} blockers`,
       );
-      return parsed;
+      return record;
     } catch (error: unknown) {
       const msg =
         error instanceof Error ? error.message : "Unknown parse error";
@@ -457,18 +538,146 @@ ${delimiter}_END`;
       ),
     ];
 
+    // ── Team name: look for lines with "Stand Up", "Standup", "Daily", etc.
+    const teamNameMatch = rawNotes.match(
+      /^(.+?(?:Stand\s*Up|Standup|Daily|Sync|Scrum|Retro).*)$/im,
+    );
+    const teamName = teamNameMatch
+      ? teamNameMatch[1]
+          .replace(/^(?:Attachments|Invited)\s+/i, "")
+          .trim()
+          .slice(0, 100)
+      : "Unknown Team";
+
+    // ── Participants: "Invited Name1 Name2 ..." line
+    const invitedMatch = rawNotes.match(
+      /Invited\s+([A-Z][A-Za-z\s]+?)(?:\n|Attachments)/,
+    );
+    let participants: string[] = [];
+    if (invitedMatch) {
+      participants = this.splitParticipantNames(invitedMatch[1].trim());
+    }
+    if (participants.length === 0) {
+      // Fallback: "Name Surname" patterns before colons/dashes
+      const nameColonMatches = rawNotes.match(
+        /^\s*(?:[-\u2022*]\s*)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)?)\s*[:\u2014\u2013]/gm,
+      );
+      participants = [
+        ...new Set(
+          (nameColonMatches ?? []).map((line) =>
+            line
+              .replace(/^\s*[-\u2022*]\s*/, "")
+              .replace(/\s*[:\u2014\u2013]\s*$/, "")
+              .trim(),
+          ),
+        ),
+      ];
+    }
+
+    // ── Commitments: prefer "Suggested next steps" section
+    const commitments: Commitment[] = [];
+    const nextStepsMatch = rawNotes.match(
+      /Suggested\s+next\s+steps\s*\n([\s\S]*?)(?:\n\s*\n(?:You should|Please provide)|$)/i,
+    );
+    if (nextStepsMatch) {
+      const stepsBlock = nextStepsMatch[1];
+      const stepLines = stepsBlock.split("\n").filter((l) => l.trim());
+      for (const line of stepLines) {
+        const trimmed = line.replace(/^\s*[-\u2022*]\s*/, "").trim();
+        // Extract person: first 2-5 capitalized words before "will"/"should"/"to"
+        const personAction = trimmed.match(
+          /^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\s+(?:will|should|to|is going to|needs to|committed to|plans to)\s+(.+)/,
+        );
+        if (personAction) {
+          commitments.push({
+            person: personAction[1].trim(),
+            action: personAction[2].trim(),
+            ticketIds: this.extractTicketIdsFromText(personAction[2]),
+            status: "pending" as const,
+          });
+        } else if (trimmed.length > 15) {
+          commitments.push({
+            person: "Unknown",
+            action: trimmed,
+            ticketIds: this.extractTicketIdsFromText(trimmed),
+            status: "pending" as const,
+          });
+        }
+      }
+    }
+
+    // ── Only extract blockers from explicit blocking sentences
+    const blockers: Blocker[] = [];
+    const blockerExplicit =
+      /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:is\s+)?blocked\s+(?:by|on)\s+(.+?)(?:\.|$)/gi;
+    let bm: RegExpExecArray | null;
+    while ((bm = blockerExplicit.exec(rawNotes)) !== null) {
+      blockers.push({
+        blocked: bm[1].trim(),
+        blockedBy: bm[2].trim().slice(0, 200),
+        owner: bm[1].trim(),
+        reason: bm[0].trim().slice(0, 200),
+      });
+    }
+    // Also match "ticket X depends on Y"
+    const depPattern =
+      /(?:ticket|MR|capital)\s*(\d+)\s+(?:has\s+a\s+)?depend(?:s|ency)\s+on\s+(?:ticket|MR|capital)?\s*(\d+)/gi;
+    let dm: RegExpExecArray | null;
+    while ((dm = depPattern.exec(rawNotes)) !== null) {
+      blockers.push({
+        blocked: `Ticket ${dm[1]}`,
+        blockedBy: `Ticket ${dm[2]}`,
+        owner: "Unknown",
+        reason: `Ticket ${dm[1]} depends on Ticket ${dm[2]}`,
+      });
+    }
+
     return {
       date,
-      teamName: "Unknown Team",
-      participants: [],
-      commitments: [],
-      blockers: [],
+      teamName,
+      participants,
+      commitments: commitments.slice(0, 20),
+      blockers,
       decisions: [],
       ticketMentions: ticketIds.map((id) => ({
         id,
         context: "mentioned in standup",
       })),
     };
+  }
+
+  /** Extract ticket IDs from a text fragment. */
+  private extractTicketIdsFromText(text: string): string[] {
+    return (
+      text.match(/(?:#|!|ticket\s*|MR\s*|capital[- ]?)(\d{2,})/gi) || []
+    ).map((m) => m.replace(/^(?:#|!|ticket\s*|MR\s*|capital[- ]?)/i, ""));
+  }
+
+  /**
+   * Split a concatenated participant string into individual names.
+   * Heuristic: each name is 2-5 words, all starting with uppercase.
+   */
+  private splitParticipantNames(raw: string): string[] {
+    const words = raw.split(/\s+/);
+    const names: string[] = [];
+    let i = 0;
+    while (i < words.length) {
+      let matched = false;
+      for (let len = Math.min(5, words.length - i); len >= 2; len--) {
+        if (
+          words
+            .slice(i, i + len)
+            .every((w) => w.length > 0 && w[0] === w[0].toUpperCase())
+        ) {
+          names.push(words.slice(i, i + len).join(" "));
+          i += len;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) i++;
+    }
+    return names;
   }
 
   // ── Storage (via MemoryTool) ───────────────────────────────────
@@ -507,23 +716,50 @@ ${delimiter}_END`;
         undefined,
         STANDUP_KEYWORD_PREFIX,
       );
-      const entries = JSON.parse(raw);
-      if (!Array.isArray(entries)) return [];
+
+      // Handle both pre-parsed and stringified returns defensively (Issue 3)
+      const entries: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (!Array.isArray(entries)) {
+        this.logger.warn(
+          `loadStandups: unexpected entries shape, got ${typeof entries}`,
+        );
+        return [];
+      }
+
+      const MemoryEntrySchema = z.object({ content: z.string() });
 
       const parsed = entries
-        .map((e: { content: string }) => {
+        .flatMap((e: unknown) => {
+          const entryResult = MemoryEntrySchema.safeParse(e);
+          if (!entryResult.success) return [];
+
+          let contentParsed: unknown;
           try {
-            return JSON.parse(e.content) as StandupRecord;
+            contentParsed = JSON.parse(entryResult.data.content);
           } catch {
-            return null;
+            this.logger.warn(
+              "loadStandups: malformed content JSON in memory entry",
+            );
+            return [];
           }
+
+          const recordResult = StandupRecordSchema.safeParse(contentParsed);
+          if (!recordResult.success) {
+            this.logger.warn(
+              `loadStandups: invalid StandupRecord: ${recordResult.error.message}`,
+            );
+            return [];
+          }
+          return [recordResult.data as StandupRecord];
         })
-        .filter((r): r is StandupRecord => r !== null)
         .sort((a, b) => b.date.localeCompare(a.date));
 
       this.standupCache = { data: parsed, fetchedAt: now };
       return parsed;
-    } catch {
+    } catch (err: unknown) {
+      this.logger.error(
+        `loadStandups failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return [];
     }
   }
@@ -535,19 +771,37 @@ ${delimiter}_END`;
         undefined,
         STANDUP_KEYWORD_PREFIX,
       );
-      const entries = JSON.parse(raw);
+      const entries: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
       if (!Array.isArray(entries) || entries.length <= MAX_STORED_STANDUPS)
         return;
 
-      const sorted = entries.sort(
-        (a: { timestamp: number }, b: { timestamp: number }) =>
-          b.timestamp - a.timestamp,
-      );
-      for (let i = MAX_STORED_STANDUPS; i < sorted.length; i++) {
-        await this.memoryTool.execute("delete", { id: sorted[i].id });
+      // Sort by the standup date we control, not an assumed timestamp field
+      const withDates = entries.flatMap((e: unknown) => {
+        if (
+          typeof e !== "object" ||
+          e === null ||
+          !("id" in e) ||
+          !("content" in e)
+        )
+          return [];
+        try {
+          const record = JSON.parse(
+            (e as { content: string }).content,
+          ) as Partial<StandupRecord>;
+          const date = record.date ?? "0000-00-00";
+          return [{ id: (e as { id: string }).id, date }];
+        } catch {
+          return [{ id: (e as { id: string }).id, date: "0000-00-00" }];
+        }
+      });
+
+      // Newest first — keep first MAX_STORED_STANDUPS, delete the rest
+      withDates.sort((a, b) => b.date.localeCompare(a.date));
+      for (let i = MAX_STORED_STANDUPS; i < withDates.length; i++) {
+        await this.memoryTool.execute("delete", { id: withDates[i].id });
       }
       this.logger.info(
-        `Pruned ${sorted.length - MAX_STORED_STANDUPS} old standup(s)`,
+        `Pruned ${withDates.length - MAX_STORED_STANDUPS} old standup(s)`,
       );
     } catch (error: unknown) {
       const msg =
@@ -699,7 +953,12 @@ ${delimiter}_END`;
     try {
       const d = new Date(raw);
       if (isNaN(d.getTime())) return raw;
-      return d.toISOString().slice(0, 10);
+      // Use local date parts to avoid timezone shift
+      // (toISOString() converts to UTC, shifting the date in UTC+ timezones)
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
     } catch {
       return raw;
     }

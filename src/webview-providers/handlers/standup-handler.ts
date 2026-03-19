@@ -12,17 +12,25 @@ type StandupHistoryMessage = {
   ticketId?: string;
 };
 
+type StandupDeleteMessage = {
+  command: "standup-delete";
+  date: string;
+  teamName: string;
+};
+
 type StandupMessage =
   | StandupIngestMessage
   | StandupMyTasksMessage
   | StandupBlockersMessage
-  | StandupHistoryMessage;
+  | StandupHistoryMessage
+  | StandupDeleteMessage;
 
 const STANDUP_COMMANDS = [
   "standup-ingest",
   "standup-my-tasks",
   "standup-blockers",
   "standup-history",
+  "standup-delete",
 ] as const;
 
 function isStandupMessage(msg: unknown): msg is StandupMessage {
@@ -70,8 +78,8 @@ export class StandupHandler implements WebviewMessageHandler {
           // detects `type: "standup_brief"` and renders a StandupCard.
           await ctx.sendResponse(cardJson);
           // Also notify the standup store in the CoWorker panel.
-          try {
-            await ctx.webview.webview.postMessage({
+          const posted = await ctx.webview.webview
+            .postMessage({
               command: "standup-result",
               summary: {
                 date: record.date,
@@ -80,9 +88,23 @@ export class StandupHandler implements WebviewMessageHandler {
                 blockerCount: record.blockers.length,
                 participantCount: record.participants.length,
               },
-            });
-          } catch {
-            // webview may not be ready
+            })
+            .then(
+              () => true,
+              (err: unknown) => {
+                // Non-critical — card is already rendered via sendResponse
+                ctx.logger.warn(
+                  "standup-result postMessage failed (webview may be disposed)",
+                  err instanceof Error ? err.message : String(err),
+                );
+                return false;
+              },
+            );
+
+          if (!posted) {
+            ctx.logger.info(
+              "standup-result not delivered to store — UI may show stale state",
+            );
           }
           break;
         }
@@ -106,6 +128,27 @@ export class StandupHandler implements WebviewMessageHandler {
             ticketId: message.ticketId,
           });
           await ctx.sendResponse(result);
+          break;
+        }
+
+        case "standup-delete": {
+          if (!message.date || typeof message.date !== "string") {
+            await ctx.sendResponse("Error: No date provided for deletion.");
+            return;
+          }
+          const deleted = await svc.deleteStandup(
+            message.date,
+            message.teamName,
+          );
+          if (deleted) {
+            await ctx.sendResponse(
+              `Deleted standup for ${message.date} — ${message.teamName || "Unknown Team"}.`,
+            );
+          } else {
+            await ctx.sendResponse(
+              `No standup found for ${message.date} to delete.`,
+            );
+          }
           break;
         }
       }

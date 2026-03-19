@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import styled from "styled-components";
 import { vscode } from "../../utils/vscode";
 import { useStandupStore } from "../../stores/standup.store";
@@ -319,6 +319,27 @@ const RecentMeta = styled.span`
   color: var(--vscode-descriptionForeground);
 `;
 
+const DeleteButton = styled.button`
+  background: none;
+  border: none;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 12px;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+
+  ${RecentItem}:hover & {
+    opacity: 1;
+  }
+
+  &:hover {
+    color: var(--vscode-editorError-foreground, #f14c4c);
+    background: rgba(241, 76, 76, 0.1);
+  }
+`;
+
 const ErrorText = styled.div`
   color: var(--vscode-editorError-foreground, #f14c4c);
   font-size: 11px;
@@ -381,8 +402,8 @@ export const CoWorkerPanel: React.FC<CoWorkerPanelProps> = ({
   onGitWatchdogChange,
   onEndOfDaySummaryChange,
 }) => {
-  const [notesInput, setNotesInput] = React.useState("");
-  const { isIngesting, lastError, recentStandups, ingestNotes, requestMyTasks, requestBlockers, requestHistory } =
+  const [notesInput, setNotesInput] = useState("");
+  const { isIngesting, lastError, recentStandups, ingestNotes, requestMyTasks, requestBlockers, requestHistory, deleteStandup } =
     useStandupStore();
   const handleIngest = () => {
     if (!notesInput.trim()) return;
@@ -482,10 +503,19 @@ export const CoWorkerPanel: React.FC<CoWorkerPanelProps> = ({
               <RecentList>
                 {recentStandups.map((s) => (
                   <RecentItem key={`${s.date}-${s.teamName}`}>
-                    <RecentDate>{s.date} — {s.teamName}</RecentDate>
-                    <RecentMeta>
-                      {s.commitmentCount} tasks · {s.blockerCount} blockers
-                    </RecentMeta>
+                    <div>
+                      <RecentDate>{s.date} — {s.teamName}</RecentDate>
+                      <RecentMeta>
+                        {s.commitmentCount} tasks · {s.blockerCount} blockers
+                      </RecentMeta>
+                    </div>
+                    <DeleteButton
+                      onClick={() => deleteStandup(s.date, s.teamName)}
+                      title={`Delete standup for ${s.date}`}
+                      aria-label={`Delete standup for ${s.date}`}
+                    >
+                      🗑
+                    </DeleteButton>
                   </RecentItem>
                 ))}
               </RecentList>

@@ -37,6 +37,8 @@ interface StandupState {
   setIngesting: (val: boolean) => void;
   /** Set error. */
   setError: (err: string | null) => void;
+  /** Delete a standup by date+team. */
+  deleteStandup: (date: string, teamName: string) => void;
 }
 
 export const useStandupStore = create<StandupState>()((set, get) => {
@@ -102,6 +104,14 @@ export const useStandupStore = create<StandupState>()((set, get) => {
     setError: (err: string | null) => {
       clearIngestTimeout();
       set({ lastError: err, isIngesting: false });
+    },
+    deleteStandup: (date: string, teamName: string) => {
+      vscode.postMessage({ command: "standup-delete", date, teamName });
+      set((s) => ({
+        recentStandups: s.recentStandups.filter(
+          (r) => !(r.date === date && r.teamName === teamName),
+        ),
+      }));
     },
   };
 });

@@ -1,45 +1,19 @@
 import React, { useMemo, useState } from "react";
 import styled, { keyframes } from "styled-components";
+import { sanitizeText } from "../../utils/sanitize";
 
-/* ─── Types ─── */
+/* ─── Types (canonical definitions in src/shared/standup.types.ts) ─── */
+/* Re-exported here so existing imports from MessageRenderer keep working. */
 
-export interface StandupCommitment {
-  person: string;
-  action: string;
-  deadline?: string | null;
-  ticketIds: string[];
-  status: "pending" | "done";
-}
+export type {
+  StandupCommitment,
+  StandupBlocker,
+  StandupDecision,
+  StandupTicketMention,
+  StandupCardData,
+} from "../../../../src/shared/standup.types";
 
-export interface StandupBlocker {
-  blocked: string;
-  blockedBy: string;
-  owner: string;
-  reason: string;
-}
-
-export interface StandupDecision {
-  summary: string;
-  participants: string[];
-}
-
-export interface StandupTicketMention {
-  id: string;
-  context: string;
-  assignee?: string;
-}
-
-export interface StandupCardData {
-  type: "standup_brief";
-  date: string;
-  teamName: string;
-  participants: string[];
-  myCommitments: StandupCommitment[];
-  otherCommitments: StandupCommitment[];
-  blockers: StandupBlocker[];
-  decisions: StandupDecision[];
-  ticketMentions: StandupTicketMention[];
-}
+import type { StandupCardData } from "../../../../src/shared/standup.types";
 
 interface StandupCardProps {
   data: StandupCardData;
@@ -308,35 +282,71 @@ const StandupCard: React.FC<StandupCardProps> = ({
     {},
   );
 
+  // ── Sanitize LLM-derived content at the trust boundary (Issue 1) ──
+  const safeData = useMemo(() => ({
+    ...data,
+    participants: data.participants.map(p => sanitizeText(p, 100)),
+    myCommitments: data.myCommitments.map(c => ({
+      ...c,
+      person: sanitizeText(c.person, 100),
+      action: sanitizeText(c.action),
+      deadline: c.deadline ? sanitizeText(c.deadline, 100) : c.deadline,
+    })),
+    otherCommitments: data.otherCommitments.map(c => ({
+      ...c,
+      person: sanitizeText(c.person, 100),
+      action: sanitizeText(c.action),
+    })),
+    blockers: data.blockers.map(b => ({
+      blocked: sanitizeText(b.blocked),
+      blockedBy: sanitizeText(b.blockedBy),
+      owner: sanitizeText(b.owner),
+      reason: sanitizeText(b.reason),
+    })),
+    decisions: data.decisions.map(d => ({
+      ...d,
+      summary: sanitizeText(d.summary, 300),
+    })),
+    ticketMentions: data.ticketMentions.map(t => ({
+      ...t,
+      id: sanitizeText(t.id, 20),
+      context: sanitizeText(t.context, 200),
+      assignee: t.assignee ? sanitizeText(t.assignee, 100) : t.assignee,
+    })),
+  }), [data]);
+
   /** Stable keys for commitments, blockers, and decisions. */
   const stableKey = (prefix: string, text: string, index: number) =>
     `${prefix}-${text.slice(0, 40)}-${index}`;
 
   const commitmentKeys = useMemo(
     () =>
-      data.myCommitments.map((c, i) =>
+      safeData.myCommitments.map((c, i) =>
         stableKey("mc", c.action, i),
       ),
-    [data.myCommitments],
+    [safeData.myCommitments],
   );
 
   const handleToggle = (index: number) => {
     const key = commitmentKeys[index];
-    const current = localStatuses[key] ?? data.myCommitments[index]?.status === "done";
+    const current = localStatuses[key] ?? safeData.myCommitments[index]?.status === "done";
     setLocalStatuses((prev) => ({ ...prev, [key]: !current }));
     onToggleCommitment?.(index, !current);
   };
 
   const isDone = (index: number) =>
-    localStatuses[commitmentKeys[index]] ?? data.myCommitments[index]?.status === "done";
+    localStatuses[commitmentKeys[index]] ?? safeData.myCommitments[index]?.status === "done";
 
-  // Group other commitments by person
-  const byPerson = new Map<string, string[]>();
-  for (const c of data.otherCommitments) {
-    const actions = byPerson.get(c.person) ?? [];
-    actions.push(c.action);
-    byPerson.set(c.person, actions);
-  }
+  // Group other commitments by person (memoized — Issue 15)
+  const byPerson = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const c of safeData.otherCommitments) {
+      const actions = map.get(c.person) ?? [];
+      actions.push(c.action);
+      map.set(c.person, actions);
+    }
+    return map;
+  }, [safeData.otherCommitments]);
 
   const visibleOthers = expanded
     ? [...byPerson.entries()]
@@ -349,26 +359,26 @@ const StandupCard: React.FC<StandupCardProps> = ({
         <HeaderLeft>
           <HeaderIcon>📋</HeaderIcon>
           <HeaderTitle>Standup Summary</HeaderTitle>
-          <TeamBadge>{data.teamName}</TeamBadge>
+          <TeamBadge>{safeData.teamName}</TeamBadge>
         </HeaderLeft>
-        <DateBadge>{data.date}</DateBadge>
+        <DateBadge>{safeData.date}</DateBadge>
       </CardHeader>
 
       {/* Participants */}
       <ParticipantsList>
-        {data.participants.map((p) => (
+        {safeData.participants.map((p) => (
           <ParticipantChip key={p}>{p}</ParticipantChip>
         ))}
       </ParticipantsList>
 
       {/* My Action Items */}
-      {data.myCommitments.length > 0 && (
+      {safeData.myCommitments.length > 0 && (
         <>
           <SectionHeader>
             <SectionIcon>✅</SectionIcon>
-            Your Action Items ({data.myCommitments.length})
+            Your Action Items ({safeData.myCommitments.length})
           </SectionHeader>
-          {data.myCommitments.map((c, i) => (
+          {safeData.myCommitments.map((c, i) => (
             <CommitmentRow key={commitmentKeys[i]}>
               <Checkbox
                 $done={isDone(i)}
@@ -392,13 +402,13 @@ const StandupCard: React.FC<StandupCardProps> = ({
       )}
 
       {/* Blockers */}
-      {data.blockers.length > 0 && (
+      {safeData.blockers.length > 0 && (
         <>
           <SectionHeader>
             <SectionIcon>🔴</SectionIcon>
-            Blockers ({data.blockers.length})
+            Blockers ({safeData.blockers.length})
           </SectionHeader>
-          {data.blockers.map((b, i) => (
+          {safeData.blockers.map((b, i) => (
             <BlockerRow key={stableKey("bl", b.blocked + b.blockedBy, i)}>
               <div>
                 <BlockerText>
@@ -415,13 +425,13 @@ const StandupCard: React.FC<StandupCardProps> = ({
       )}
 
       {/* Decisions */}
-      {data.decisions.length > 0 && (
+      {safeData.decisions.length > 0 && (
         <>
           <SectionHeader>
             <SectionIcon>🤝</SectionIcon>
-            Key Decisions ({data.decisions.length})
+            Key Decisions ({safeData.decisions.length})
           </SectionHeader>
-          {data.decisions.map((d, i) => (
+          {safeData.decisions.map((d, i) => (
             <DecisionRow key={stableKey("dc", d.summary, i)}>{d.summary}</DecisionRow>
           ))}
         </>
@@ -432,7 +442,7 @@ const StandupCard: React.FC<StandupCardProps> = ({
         <>
           <SectionHeader>
             <SectionIcon>👥</SectionIcon>
-            Team Commitments ({data.otherCommitments.length})
+            Team Commitments ({safeData.otherCommitments.length})
           </SectionHeader>
           {visibleOthers.map(([person, actions]) => (
             <PersonGroup key={person}>
@@ -451,13 +461,13 @@ const StandupCard: React.FC<StandupCardProps> = ({
       )}
 
       {/* Tickets Referenced */}
-      {data.ticketMentions.length > 0 && (
+      {safeData.ticketMentions.length > 0 && (
         <>
           <SectionHeader>
             <SectionIcon>🎫</SectionIcon>
-            Tickets Referenced ({data.ticketMentions.length})
+            Tickets Referenced ({safeData.ticketMentions.length})
           </SectionHeader>
-          {data.ticketMentions.map((t) => (
+          {safeData.ticketMentions.map((t) => (
             <TicketRow key={t.id}>
               <TicketId>#{t.id}</TicketId>
               <TicketContext>
