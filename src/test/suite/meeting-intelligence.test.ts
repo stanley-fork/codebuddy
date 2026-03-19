@@ -394,3 +394,51 @@ suite("Date range filtering logic", () => {
     assert.strictEqual((6 + 6) % 7, 5); // Saturday → 5 days back
   });
 });
+
+// ── normalizePersonName ──────────────────────────────────────────
+
+import { normalizePersonName } from "../../shared/standup.types";
+
+suite("normalizePersonName", () => {
+  test("lowercases input", () => {
+    assert.strictEqual(normalizePersonName("Alice Smith"), "alice smith");
+  });
+
+  test("trims leading and trailing whitespace", () => {
+    assert.strictEqual(normalizePersonName("  Alice Smith  "), "alice smith");
+  });
+
+  test("collapses internal whitespace", () => {
+    assert.strictEqual(
+      normalizePersonName("Alice   Smith"),
+      "alice smith",
+    );
+  });
+
+  test("handles tabs and mixed whitespace", () => {
+    assert.strictEqual(
+      normalizePersonName("  Alice\t  Smith\n"),
+      "alice smith",
+    );
+  });
+
+  test("handles single name", () => {
+    assert.strictEqual(normalizePersonName("Alice"), "alice");
+  });
+
+  test("handles empty string", () => {
+    assert.strictEqual(normalizePersonName(""), "");
+  });
+
+  test("preserves hyphenated names", () => {
+    assert.strictEqual(
+      normalizePersonName("Mary-Jane Watson"),
+      "mary-jane watson",
+    );
+  });
+
+  test("idempotent on already-normalized input", () => {
+    const name = "alice smith";
+    assert.strictEqual(normalizePersonName(name), name);
+  });
+});

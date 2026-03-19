@@ -2,7 +2,7 @@
 
 > How the Team Graph evolves from passive storage into an intelligent system that knows your team.
 
-## Current State (v1 — Shipped)
+## Current State (v2 — Phases 1–4 Shipped + Hardened)
 
 The `TeamGraphStore` persists standup data in SQLite with 7 tables. On each ingest:
 
@@ -10,14 +10,64 @@ The `TeamGraphStore` persists standup data in SQLite with 7 tables. On each inge
 - **Collaboration edges** are built: every pair of standup participants → `collaborates_with` (weight increments per co-occurrence)
 - **Blocking edges** are built: blocker owner → person committed on the blocked ticket → `blocks`
 - **Commitments, blockers, decisions, ticket mentions** are stored relationally with foreign keys
+- **LLM-detected relationships** are persisted: `reviews_for`, `reports_to`, `mentors`, `depends_on`
 
-The agent can answer: `/standup-my-tasks`, `/standup-blockers`, `/standup-history`.
+### Post-Ingest Trait Extraction (Phase 1 — Shipped)
+
+After every standup ingest, a background LLM pass extracts role, expertise, and work-style signals:
+- Serial queue with bounded depth (`MAX_TRAIT_QUEUE_DEPTH = 20`)
+- Exponential backoff with jitter on consecutive failures (capped at 30 s)
+- Role confidence voting (threshold = 3) before promoting to official role
+- Frequency-scored expertise (capped at 20 tags)
+- Work style constrained to enum: `fast-mover`, `methodical`, `proactive-unblocker`, `specialist`, `generalist`
+
+### Team Context in Prompts (Phase 2 — Shipped)
+
+- **Ask mode:** `EnhancedPromptBuilderService` injects `getTeamSummary()` into the system prompt with a keyword gate (`isTeamRelatedQuery()`). Output is sanitized and cached (60 s TTL, 4 K character cap).
+- **Agent mode:** The agent uses the `team_graph` LangGraph tool on-demand (no blind injection).
+
+### Graph Query Tools (Phase 3 — Shipped)
+
+A single `team_graph` `StructuredTool` with 7 operations registered in the LangGraph agent:
+
+| Operation | Description |
+|-----------|-------------|
+| `person_profile` | Full profile: role, expertise, stats, collaborators, recent commitments |
+| `top_collaborators` | Strongest collaboration edges for a person |
+| `recurring_blockers` | People/tickets that appear in blockers repeatedly |
+| `completion_trends` | Weekly commitment completion rate over time windows |
+| `ticket_history` | All standups, commitments, blockers mentioning a ticket |
+| `team_health` | Aggregate team health dashboard |
+| `team_summary` | Brief overview of all team members |
+
+### Enhanced Relationship Detection (Phase 4 — Shipped)
+
+The LLM parse prompt extracts a `relationships` array from meeting notes:
+- `reviews_for`, `reports_to`, `mentors`, `depends_on`
+- Persisted as weighted edges via `upsertRelationship()`
+
+### Security & Correctness Hardening (7 PR Review Rounds)
+
+Multiple review rounds hardened the implementation:
+
+- **Shared LLM safety module** (`src/services/llm-safety.ts`): centralized `sanitizeForLLM()` with Unicode NFKC normalization, 14 prompt-injection regex patterns, hard character cap. Used at all egress points (tool output to agent, prompt builder to LLM).
+- **Runtime Zod validation**: `PersonTraitsSchema` validates the traits JSON blob with `.catch()` fallback on every `rowToPerson()` call. `TeamGraphToolSchema.safeParse()` validates all tool input. `TraitExtractionSchema` validates LLM extraction output.
+- **Type-safe traits**: `PersonProfile.traits` is typed as `PersonTraits` (Zod-inferred) — no more `as Record<string, unknown>` casts.
+- **Correct SQL**: `json_each()` replaces `LIKE` for ticket-ID lookups in commitments. `GROUP_CONCAT` bounded with `SUBSTR(..., 1, 500)`. Blocker owner column indexed.
+- **Name normalization**: Centralized `normalizePersonName()` in `src/shared/standup.types.ts` — used across all person lookups to handle whitespace/casing variations.
+- **Bounded growth**: Role candidates capped to top 10 (normalized names). Expertise capped at 20 tags. Trait queue capped at 20.
+- **Resilience**: `isReady()` guards on all public query methods. Exponential backoff with jitter in drain queue. `drainPromise` pattern prevents concurrent drain races.
+- **Prompt-injection defense**: Multi-layer — NFKC normalization → regex redaction (14 patterns) → XML delimiters → hard character cap. Team context gated by keyword matching in ask mode.
+
+The agent can answer: `/standup-my-tasks`, `/standup-blockers`, `/standup-history`, plus natural language team questions in both Ask and Agent modes.
 
 ---
 
-## Phase 1: Post-Ingest Trait Extraction
+## Phase 1: Post-Ingest Trait Extraction ✅ Shipped
 
 **Goal:** After every standup ingest, run a lightweight LLM pass to extract role and expertise signals from the commitments and context.
+
+**Status:** Implemented and hardened. Traits are extracted via a serial background queue with bounded depth, exponential backoff, Zod-validated LLM output, frequency-scored expertise with cap, role confidence voting, and constrained work-style enum.
 
 ### How It Works
 
@@ -59,9 +109,11 @@ The extraction prompt would receive the person's commitments across the last N s
 
 ---
 
-## Phase 2: Team Summary as Agent Context
+## Phase 2: Team Summary as Agent Context ✅ Shipped
 
 **Goal:** Inject the team graph summary into the agent's system prompt so it can answer natural language questions about the team.
+
+**Status:** Implemented. Ask mode uses `EnhancedPromptBuilderService` with keyword-gated injection and 60 s TTL cache. Agent mode uses the `team_graph` tool on-demand. All output is sanitized via the shared `llm-safety.ts` module.
 
 ### How It Works
 
@@ -94,9 +146,11 @@ user asks "Who should review my Kubernetes PR?"
 
 ---
 
-## Phase 3: Graph Query Tools for the Agent
+## Phase 3: Graph Query Tools for the Agent ✅ Shipped
 
 **Goal:** Register dedicated query methods as LangGraph tools so the agent can answer open-ended questions by querying the graph.
+
+**Status:** Implemented as a single `team_graph` `StructuredTool` with 7 operations. Runtime Zod input validation, `isReady()` guards, and egress sanitization via `sanitizeForLLM()`. Registered in doc-writer, architect, and reviewer role mappings.
 
 ### Tools to Build
 
@@ -164,9 +218,11 @@ LIMIT 8;
 
 ---
 
-## Phase 4: Enhanced Relationship Detection
+## Phase 4: Enhanced Relationship Detection ✅ Shipped
 
 **Goal:** Extract richer relationship types from meeting notes beyond collaboration and blocking.
+
+**Status:** Implemented. The LLM parse prompt extracts `reviews_for`, `reports_to`, `mentors`, and `depends_on` relationships. `DetectedRelationship` type defined in `src/shared/standup.types.ts`. Persisted via `upsertRelationship()` in `storeStandup()`.
 
 ### New Relationship Types
 
@@ -255,14 +311,14 @@ CREATE TABLE IF NOT EXISTS person_aliases (
 
 ## Priority Order
 
-| Phase | Effort | Impact | Dependencies |
-|-------|--------|--------|-------------|
-| **Phase 2** — Team summary in agent context | Small | High | None |
-| **Phase 1** — Post-ingest trait extraction | Medium | High | None |
-| **Phase 3** — Graph query tools | Medium | Very High | Phase 1 (for richer data) |
-| **Phase 4** — Enhanced relationships | Small | Medium | None |
-| **Phase 6** — Proactive patterns | Medium | High | Phase 1 |
-| **Phase 5** — Identity resolution | Large | Medium | Phase 3 |
+| Phase | Effort | Impact | Status |
+|-------|--------|--------|--------|
+| **Phase 2** — Team summary in agent context | Small | High | ✅ Shipped |
+| **Phase 1** — Post-ingest trait extraction | Medium | High | ✅ Shipped |
+| **Phase 3** — Graph query tools | Medium | Very High | ✅ Shipped |
+| **Phase 4** — Enhanced relationships | Small | Medium | ✅ Shipped |
+| **Phase 6** — Proactive patterns | Medium | High | ⬜ Planned |
+| **Phase 5** — Identity resolution | Large | Medium | ⬜ Planned |
 
 ---
 
@@ -272,41 +328,60 @@ CREATE TABLE IF NOT EXISTS person_aliases (
 Daily Standup Notes
        │
        ▼
-┌─────────────────────┐
-│  MeetingIntelligence │
-│     Service          │
-│  (LLM parse + store) │
-└──────┬──────────────┘
+┌──────────────────────────┐
+│  MeetingIntelligence     │
+│     Service              │
+│  (LLM parse + store)    │
+│  extractTraitsFor...()   │  ◀── Phase 1: background LLM trait extraction
+│  normalizePersonName()   │      (serial queue, bounded, exp backoff)
+└──────┬───────────────────┘
        │
-       ├── storeStandup() ─────────┐
-       │                           ▼
-       │                  ┌─────────────────┐
-       │                  │ TeamGraphStore   │
-       │                  │ (SQLite)         │
-       │                  │                  │
-       │                  │  people ────┐    │
-       │                  │  standups   │    │
-       │                  │  commitments│    │
-       │                  │  blockers   │    │
-       │                  │  decisions  │    │
-       │                  │  tickets    │    │
-       │                  │  relationships   │
-       │                  └──────┬──────────┘
-       │                         │
-       ├─ extractTraits() ───────┤  (Phase 1)
-       │                         │
-       ▼                         ▼
-┌──────────────┐      ┌──────────────────┐
-│ Agent Tools  │◀─────│  Query Methods   │  (Phase 3)
-│ (LangGraph)  │      │  getPersonProfile│
-│              │      │  getTeamHealth   │
-│ Natural      │      │  getTicketHistory│
-│ Language Q&A │      └──────────────────┘
-└──────────────┘
+       ├── storeStandup()          ◀── relationships[] included (Phase 4)
+       │        │
+       │        ▼
+       │  ┌─────────────────────┐
+       │  │  TeamGraphStore     │
+       │  │  (sql.js WASM)      │
+       │  │                     │
+       │  │  people ──────┐     │
+       │  │  standups     │     │
+       │  │  commitments  │     │  PersonTraitsSchema (Zod)
+       │  │  blockers     │     │  json_each() for tickets
+       │  │  decisions    │     │  normalizePersonName()
+       │  │  tickets      │     │
+       │  │  relationships│     │
+       │  └──────┬────────┘     │
+       │         │              │
+       │         ▼              │
+       │  ┌──────────────────┐  │
+       │  │  Query Methods   │  │  (Phase 3)
+       │  │  getPersonProfile│  │
+       │  │  getTeamHealth   │  │
+       │  │  getTicketHistory│  │
+       │  │  getTeamSummary  │  │
+       │  │  + 3 more        │  │
+       │  └──────┬───────────┘  │
+       │         │              │
+       ▼         ▼              │
+┌────────────────────────┐      │
+│  LangGraph Agent       │      │
+│  team_graph tool       │◀─────┘
+│  (7 operations)        │
+│  Zod safeParse input   │
+│  sanitizeForLLM output │  ◀── llm-safety.ts (egress)
+└────────────────────────┘
        │
        ▼
-┌──────────────┐
-│ Team Summary │──▶ Agent System Prompt  (Phase 2)
-│ (Markdown)   │
-└──────────────┘
+┌────────────────────────┐
+│ EnhancedPromptBuilder  │  ◀── Phase 2 (Ask mode only)
+│  isTeamRelatedQuery()  │      keyword gate
+│  fetchTeamContextCached│      60s TTL cache
+│  sanitizeForLLM()      │  ◀── llm-safety.ts (egress)
+└────────────────────────┘
+
+┌────────────────────────┐
+│  llm-safety.ts         │  Shared sanitization module
+│  INJECTION_PATTERNS[]  │  14 regex patterns
+│  sanitizeForLLM()      │  NFKC + redact + cap
+└────────────────────────┘
 ```

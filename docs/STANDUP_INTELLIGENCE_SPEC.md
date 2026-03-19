@@ -1,5 +1,7 @@
 # Standup Intelligence — Feature Spec
 
+> **Status: MVP Shipped + Team Intelligence Extension (Phases 1–4)**
+
 ## Problem
 
 Standup meeting notes (from Gemini, Otter, etc.) are unstructured walls of text. Engineers waste time mentally parsing who's doing what, which tickets are blocked, and what they committed to. The notes die in a Google Doc — never connected to the actual code, MRs, or tickets.
@@ -115,21 +117,15 @@ This lets the agent answer natural language queries:
 
 ### 4. Standup Memory (Persistence)
 
-**Storage:** Project-scoped memory entries via `MemoryTool`.
+**Storage:** SQLite-backed `TeamGraphStore` (`.codebuddy/team_graph.db`) using sql.js WASM.
 
-**Format per standup:**
+> **Note:** The original spec called for `MemoryTool` with JSON entries. This was replaced by the relational graph store — see [TEAM_GRAPH_STORE_PLAN.md](TEAM_GRAPH_STORE_PLAN.md).
 
-```
-Title: "Daily Standup — 2026-03-17"
-Category: "Experience"
-Keywords: "standup|2026-03-17|daily|capital-product-tech"
-Content: JSON.stringify(StandupRecord)
-Scope: "project"
-```
+**Schema:** 7 normalized tables — `people`, `standups`, `commitments`, `blockers`, `decisions`, `ticket_mentions`, `relationships`.
 
 **Retention:** Keep last 30 standups. Auto-prune older entries on ingest.
 
-**Queryable by:** Date, person name, ticket ID (via keyword search on `content`).
+**Queryable by:** Date, person name (normalized via `normalizePersonName()`), ticket ID (via `json_each()`), person relationships.
 
 ---
 
@@ -142,17 +138,25 @@ Scope: "project"
 │  /standup cmd    │  standup_intelligence     │
 │  (Ask Mode)      │  tool (Agent Mode)        │
 ├──────────────────┴───────────────────────────┤
-│            StandupService (singleton)        │
+│       MeetingIntelligenceService (singleton)  │
 │  ┌──────────────────────────────────────┐    │
 │  │  parseStandup(notes) → StandupRecord │    │
+│  │  ingest() + extractTraits() (bg LLM) │    │
 │  │  getMyTasks(name) → Commitment[]     │    │
 │  │  getBlockers() → Blocker[]           │    │
-│  │  trackCommitments() → StatusReport   │    │
 │  │  queryHistory(filter) → StandupRec[] │    │
 │  └──────────────────────────────────────┘    │
 ├──────────────────────────────────────────────┤
 │              Storage Layer                   │
-│  MemoryTool (project-scoped JSON entries)    │
+│  TeamGraphStore (SQLite via sql.js WASM)     │
+│  7 tables: people, standups, commitments,    │
+│  blockers, decisions, ticket_mentions,        │
+│  relationships                                │
+├──────────────────────────────────────────────┤
+│              Query Layer                     │
+│  team_graph tool (LangGraph, 7 operations)   │
+│  EnhancedPromptBuilder (Ask mode injection)  │
+│  llm-safety.ts (shared sanitization)         │
 ├──────────────────────────────────────────────┤
 │          Optional Enrichment (v2)            │
 │  GitLab MCP ─── Jira MCP ─── git_ops tool   │
@@ -160,18 +164,22 @@ Scope: "project"
 └──────────────────────────────────────────────┘
 ```
 
-## Files to Create/Modify
+## Files Created/Modified
 
 | File | Action | Purpose |
 |------|--------|---------|
-| `src/services/standup.service.ts` | **Create** | Core service: parse, store, query |
-| `src/services/standup.interfaces.ts` | **Create** | Types: StandupRecord, Commitment, etc. |
-| `src/agents/langgraph/tools/standup.ts` | **Create** | Agent tool wrapper |
-| `src/agents/langgraph/tools/provider.ts` | **Modify** | Register StandupToolFactory |
-| `src/webview-providers/base.ts` | **Modify** | Add `/standup` slash command |
-| `src/webview-providers/handlers/standup-handler.ts` | **Create** | Handler for Ask mode |
-| `src/webview-providers/handlers/index.ts` | **Modify** | Export handler |
-| `src/test/suite/standup.service.test.ts` | **Create** | Unit tests |
+| `src/services/meeting-intelligence.service.ts` | **Created** | Core service: parse, store, query, trait extraction |
+| `src/services/standup.interfaces.ts` | **Created** | Service-layer type re-exports |
+| `src/shared/standup.types.ts` | **Created** | Shared types + `normalizePersonName()` utility |
+| `src/services/team-graph-store.ts` | **Created** | SQLite graph store (7 tables, Zod-validated traits) |
+| `src/services/llm-safety.ts` | **Created** | Shared `sanitizeForLLM()` + injection patterns |
+| `src/services/enhanced-prompt-builder.service.ts` | **Modified** | Team context injection for Ask mode |
+| `src/agents/langgraph/tools/standup.ts` | **Created** | `standup_intelligence` agent tool wrapper |
+| `src/agents/langgraph/tools/team-graph.ts` | **Created** | `team_graph` StructuredTool (7 operations) |
+| `src/agents/langgraph/tools/provider.ts` | **Modified** | Register tool factories + role mappings |
+| `src/webview-providers/base.ts` | **Modified** | Add `/standup` slash command |
+| `src/webview-providers/handlers/standup-handler.ts` | **Created** | Handler for Ask mode |
+| `src/extension.ts` | **Modified** | Register TeamGraphStore for init + disposal |
 
 ## Settings
 
@@ -229,4 +237,7 @@ Scope: "project"
 - **Commitment completion tracking** — compare standup promises with git log
 - **Webview dashboard** — visual standup summary with cards per person
 - **Auto-ingest** — Google Calendar integration to pull notes automatically
-- **Team analytics** — commitment completion rates, blocker frequency, velocity
+- ~~**Team analytics**~~ — ✅ **Shipped** as `team_health`, `completion_trends`, `recurring_blockers` operations
+- **Identity resolution** — merge duplicate person records (Phase 5)
+- **Proactive pattern detection** — auto-surface chronic blockers, velocity drops, overload (Phase 6)
+- **Relationship graph visualization** — D3 force graph in the webview
