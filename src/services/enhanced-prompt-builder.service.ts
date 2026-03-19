@@ -198,14 +198,7 @@ export class EnhancedPromptBuilderService {
         codebase_snippets: |
           ${formattedContext}
         ${architectureContext ? `architecture_analysis: |\n          ${architectureContext.split("\n").join("\n          ")}` : ""}
-      ${
-        coreMemories
-          ? `user_memories: |\n        ${coreMemories
-              .replace(/[`$\\]/g, "\\$&")
-              .split("\n")
-              .join("\n        ")}`
-          : ""
-      }
+      ${coreMemories ? `user_memories: ${JSON.stringify(coreMemories)}` : ""}
       rules:
         - Base your response *only* on the provided context. Do not invent APIs or file structures.
         - Be specific: Reference actual files, functions, and variables from the context.

@@ -737,27 +737,58 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                   );
                   break;
                 }
-                const notes = message.message
+                const standup_rest = message.message
                   .trim()
                   .substring("/standup".length)
                   .trim();
-                if (!notes) {
-                  await this.sendResponse(
-                    "Usage: `/standup <paste your meeting notes>`",
-                    "bot",
-                  );
-                  break;
-                }
                 const ctx: HandlerContext = {
                   webview: _view,
                   logger: this.logger,
                   extensionUri: this._extensionUri,
                   sendResponse: this.sendResponse.bind(this),
                 };
-                await this.handlerRegistry.dispatch(
-                  { command: "standup-ingest", notes },
-                  ctx,
-                );
+
+                // Route sub-commands to their respective handlers
+                const subLower = standup_rest.toLowerCase();
+                if (
+                  subLower === "my-tasks" ||
+                  subLower.startsWith("my-tasks ")
+                ) {
+                  const person =
+                    standup_rest.substring("my-tasks".length).trim() ||
+                    undefined;
+                  await this.handlerRegistry.dispatch(
+                    { command: "standup-my-tasks", person },
+                    ctx,
+                  );
+                } else if (subLower === "blockers") {
+                  await this.handlerRegistry.dispatch(
+                    { command: "standup-blockers" },
+                    ctx,
+                  );
+                } else if (
+                  subLower === "history" ||
+                  subLower.startsWith("history ")
+                ) {
+                  const filter =
+                    standup_rest.substring("history".length).trim() ||
+                    undefined;
+                  await this.handlerRegistry.dispatch(
+                    { command: "standup-history", dateRange: filter },
+                    ctx,
+                  );
+                } else if (!standup_rest) {
+                  await this.sendResponse(
+                    "Usage: `/standup <paste your meeting notes>`\n\nSub-commands:\n- `/standup my-tasks` — your commitments\n- `/standup blockers` — active blockers\n- `/standup history` — past standups",
+                    "bot",
+                  );
+                } else {
+                  // Treat everything else as raw meeting notes to ingest
+                  await this.handlerRegistry.dispatch(
+                    { command: "standup-ingest", notes: standup_rest },
+                    ctx,
+                  );
+                }
                 break;
               }
 
