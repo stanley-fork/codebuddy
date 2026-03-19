@@ -20,6 +20,7 @@ import type {
   Commitment,
   Blocker,
 } from "./standup.interfaces";
+import { normalizePersonName } from "../shared/standup.types";
 
 const STANDUP_KEYWORD_PREFIX = "standup";
 const MAX_STORED_STANDUPS = 30;
@@ -84,7 +85,6 @@ const StandupRecordSchema = z.object({
         context: z.string(),
       }),
     )
-    .optional()
     .default([]),
 });
 
@@ -850,6 +850,7 @@ Extract the standup data from the notes above into the JSON schema provided.`;
   private static readonly TRAIT_EXTRACTION_DELAY_MS = 500;
   private static readonly ROLE_CONFIDENCE_THRESHOLD = 3;
   private static readonly MAX_EXPERTISE_TAGS = 20;
+  private static readonly MAX_ROLE_CANDIDATES = 10;
 
   /** Enqueue a trait extraction task (serial execution, rate-limit friendly). */
   private enqueueTraitExtraction(record: StandupRecord): void {
@@ -871,15 +872,30 @@ Extract the standup data from the notes above into the JSON schema provided.`;
     }
   }
 
+  private static readonly MAX_BACKOFF_MS = 30_000;
+
   private async drainTraitQueue(): Promise<void> {
+    let consecutiveFailures = 0;
     while (this.traitExtractionQueue.length > 0) {
       const task = this.traitExtractionQueue.shift()!;
       try {
         await task();
+        consecutiveFailures = 0;
       } catch (err) {
+        consecutiveFailures++;
+        const errMsg = err instanceof Error ? err.message : String(err);
         this.logger.warn(
-          `Trait extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+          `Trait extraction failed (attempt ${consecutiveFailures}): ${errMsg}`,
         );
+        // Exponential backoff with jitter on repeated failures
+        const backoff = Math.min(
+          MeetingIntelligenceService.TRAIT_EXTRACTION_DELAY_MS *
+            Math.pow(2, consecutiveFailures),
+          MeetingIntelligenceService.MAX_BACKOFF_MS,
+        );
+        const jitter = Math.random() * backoff * 0.2;
+        await new Promise((r) => setTimeout(r, backoff + jitter));
+        continue;
       }
       await new Promise((r) =>
         setTimeout(r, MeetingIntelligenceService.TRAIT_EXTRACTION_DELAY_MS),
@@ -904,7 +920,7 @@ Extract the standup data from the notes above into the JSON schema provided.`;
     const personSummaries = record.participants.map((name) => {
       const commitments = record.commitments
         .filter(
-          (c) => c.person.toLowerCase().trim() === name.toLowerCase().trim(),
+          (c) => normalizePersonName(c.person) === normalizePersonName(name),
         )
         .map((c) => c.action)
         .join("; ");
@@ -961,13 +977,25 @@ JSON array:`;
         if (!person) continue;
 
         if (entry.role) {
-          // Accumulate role votes — promote to official role after confidence threshold
-          const candidates =
-            (person.traits.roleCandidates as Record<string, number>) ?? {};
-          candidates[entry.role] = (candidates[entry.role] ?? 0) + 1;
-          const topRole = Object.entries(candidates).sort(
+          // Normalize role name and accumulate votes — promote after confidence threshold
+          const normalizedRole = entry.role
+            .toLowerCase()
+            .trim()
+            .replace(/\s+/g, " ");
+          const candidates: Record<string, number> = {
+            ...person.traits.roleCandidates,
+          };
+          candidates[normalizedRole] = (candidates[normalizedRole] ?? 0) + 1;
+
+          // Cap to top N role candidates by vote count
+          const sorted = Object.entries(candidates).sort(
             ([, a], [, b]) => b - a,
-          )[0];
+          );
+          const capped = Object.fromEntries(
+            sorted.slice(0, MeetingIntelligenceService.MAX_ROLE_CANDIDATES),
+          );
+
+          const topRole = sorted[0];
           if (
             topRole &&
             topRole[1] >= MeetingIntelligenceService.ROLE_CONFIDENCE_THRESHOLD
@@ -975,15 +1003,16 @@ JSON array:`;
             this.teamGraph.updateRole(person.id, topRole[0]);
           }
           this.teamGraph.updateTraits(person.id, {
-            roleCandidates: candidates,
+            roleCandidates: capped,
           });
         }
 
         const newTraits: Record<string, unknown> = {};
         if (entry.expertise.length > 0) {
           // Frequency-scored, capped expertise: track counts, keep top N
-          const existingScores =
-            (person.traits.expertiseScores as Record<string, number>) ?? {};
+          const existingScores: Record<string, number> = {
+            ...person.traits.expertiseScores,
+          };
           for (const tag of entry.expertise) {
             const normalized = tag.toLowerCase().trim();
             if (normalized) {
@@ -1152,8 +1181,8 @@ JSON array:`;
 
   /** Fuzzy name matching — handles first name, last name, partial. */
   private nameMatch(candidate: string, target: string): boolean {
-    const normalizedCandidate = candidate.toLowerCase().trim();
-    const normalizedTarget = target.toLowerCase().trim();
+    const normalizedCandidate = normalizePersonName(candidate);
+    const normalizedTarget = normalizePersonName(target);
     if (normalizedCandidate === normalizedTarget) return true;
     const candidateParts = normalizedCandidate.split(/\s+/);
     const targetParts = normalizedTarget.split(/\s+/);

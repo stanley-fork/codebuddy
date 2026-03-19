@@ -75,3 +75,10 @@ export interface StandupCardData {
   decisions: Decision[];
   ticketMentions: TicketMention[];
 }
+
+// ── Shared utilities ────────────────────────────────────────────
+
+/** Canonical person name — lowercase, trimmed, collapsed whitespace. */
+export function normalizePersonName(name: string): string {
+  return name.toLowerCase().trim().replace(/\s+/g, " ");
+}

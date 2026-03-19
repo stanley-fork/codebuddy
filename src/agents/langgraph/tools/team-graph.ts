@@ -2,6 +2,7 @@ import { z } from "zod";
 import { StructuredTool } from "@langchain/core/tools";
 import { Logger, LogLevel } from "../../../infrastructure/logger/logger";
 import { TeamGraphStore } from "../../../services/team-graph-store";
+import { sanitizeForLLM } from "../../../services/llm-safety";
 
 const TeamGraphToolSchema = z.object({
   operation: z
@@ -102,13 +103,15 @@ export class LangChainTeamGraphTool extends StructuredTool<any> {
       }
 
       const args = input.args ?? {};
+      let result: string;
 
       switch (input.operation) {
         case "person_profile": {
           if (!args.person) {
             return "Error: 'person' argument is required for the 'person_profile' operation.";
           }
-          return store.getPersonProfile(args.person);
+          result = store.getPersonProfile(args.person);
+          break;
         }
         case "top_collaborators": {
           if (!args.person) {
@@ -123,10 +126,12 @@ export class LangChainTeamGraphTool extends StructuredTool<any> {
           for (const { person: p, weight } of collabs) {
             out += `- ${p.name} (${weight} meetings together)\n`;
           }
-          return out;
+          result = out;
+          break;
         }
         case "recurring_blockers": {
-          return store.getRecurringBlockers(args.minCount ?? 2);
+          result = store.getRecurringBlockers(args.minCount ?? 2);
+          break;
         }
         case "completion_trends": {
           if (!args.person) {
@@ -134,23 +139,30 @@ export class LangChainTeamGraphTool extends StructuredTool<any> {
           }
           const person = store.getPersonByName(args.person);
           if (!person) return `No profile found for "${args.person}".`;
-          return store.getCompletionTrends(person.id, args.limit ?? 8);
+          result = store.getCompletionTrends(person.id, args.limit ?? 8);
+          break;
         }
         case "ticket_history": {
           if (!args.ticketId) {
             return "Error: 'ticketId' argument is required for the 'ticket_history' operation.";
           }
-          return store.getTicketHistory(args.ticketId);
+          result = store.getTicketHistory(args.ticketId);
+          break;
         }
         case "team_health": {
-          return store.getTeamHealth();
+          result = store.getTeamHealth();
+          break;
         }
         case "team_summary": {
-          return store.getTeamSummary();
+          result = store.getTeamSummary();
+          break;
         }
         default:
           return `Error: Unknown operation '${input.operation}'.`;
       }
+
+      // Sanitize all store output before returning to the agent
+      return sanitizeForLLM(result);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : "Unknown error";
       this.logger.error(`team_graph error: ${msg}`);
