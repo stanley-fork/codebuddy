@@ -56,6 +56,7 @@ import { NotificationService } from "./services/notification.service";
 import { SqliteVectorStore } from "./services/sqlite-vector-store";
 import { StandupService } from "./services/standup.service";
 import { MeetingIntelligenceService } from "./services/meeting-intelligence.service";
+import { TeamGraphStore } from "./services/team-graph-store";
 import { CodeHealthTask } from "./services/tasks/code-health.task";
 import { DependencyCheckTask } from "./services/tasks/dependency-check.task";
 import { GitWatchdogTask } from "./services/tasks/git-watchdog.task";
@@ -1030,6 +1031,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     agentEventEmmitter = new EventEmitter();
     const agentRunningGuard = AgentRunningGuardService.getInstance();
+    const teamGraph = TeamGraphStore.getInstance();
     context.subscriptions.push(
       ...subscriptions,
       quickFixCodeAction,
@@ -1037,7 +1039,16 @@ export async function activate(context: vscode.ExtensionContext) {
       orchestrator,
       agentRunningGuard,
       MeetingIntelligenceService.getInstance(),
+      teamGraph,
     );
+
+    // Eagerly initialize team graph DB (non-blocking)
+    teamGraph.initialize().catch((err) => {
+      logger.warn(
+        "TeamGraphStore eager init failed (will retry lazily)",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
 
     // Initialize Traceloop observability at the tail end as requested
     try {
