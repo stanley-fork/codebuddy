@@ -203,7 +203,7 @@ suite("LangChainTeamGraphTool — _call", () => {
     store.storeStandup(makeSampleRecord());
 
     const result = await tool._call({ operation: "team_summary" });
-    assert.ok(result.includes("Team Summary"));
+    assert.ok(result.includes("Team Profile"));
     assert.ok(result.includes("Alice Smith"));
     // Verify no injection patterns survive
     assert.ok(!result.includes("<system>"));
