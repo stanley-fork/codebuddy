@@ -1041,7 +1041,7 @@ export class TeamGraphStore implements vscode.Disposable {
 
     // Validate ticket ID: strip optional # prefix, allow only alphanumeric + dash/underscore
     const normalized = ticketId.replace(/^#/, "").trim();
-    if (!/^[A-Za-z0-9_\-]+$/.test(normalized)) {
+    if (!/^[A-Za-z0-9_-]+$/.test(normalized)) {
       return `Invalid ticket ID format: "${ticketId}". Use alphanumeric characters, dashes, or underscores only.`;
     }
 
