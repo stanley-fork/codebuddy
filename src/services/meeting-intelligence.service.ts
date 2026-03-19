@@ -12,6 +12,7 @@ import { QwenLLM } from "../llms/qwen/qwen";
 import { GLMLLM } from "../llms/glm/glm";
 import { LocalLLM } from "../llms/local/local";
 import { getAPIKeyAndModel, getGenerativeAiModel } from "../utils/utils";
+import { TeamGraphStore } from "./team-graph-store";
 import { MemoryTool } from "../tools/memory";
 import type {
   StandupRecord,
@@ -84,15 +85,13 @@ const StandupRecordSchema = z.object({
 export class MeetingIntelligenceService {
   private static instance: MeetingIntelligenceService | undefined;
   private readonly logger: Logger;
-  private readonly memoryTool: MemoryTool;
+  private readonly teamGraph: TeamGraphStore;
   private cachedMyName: string | undefined;
   private llmCache: { configHash: string; llm: BaseLLM<any> | null } | null =
     null;
-  private standupCache: { data: StandupRecord[]; fetchedAt: number } | null =
-    null;
-  private static readonly CACHE_TTL_MS = 60_000;
   private ingestQueue: Promise<unknown> = Promise.resolve();
   private readonly configDisposable: vscode.Disposable;
+  private migrated = false;
 
   private constructor() {
     this.logger = Logger.initialize("MeetingIntelligenceService", {
@@ -101,7 +100,7 @@ export class MeetingIntelligenceService {
       enableFile: true,
       enableTelemetry: true,
     });
-    this.memoryTool = new MemoryTool();
+    this.teamGraph = TeamGraphStore.getInstance();
 
     // Invalidate LLM cache when user changes provider/key settings
     this.configDisposable = vscode.workspace.onDidChangeConfiguration((e) => {
@@ -212,10 +211,10 @@ export class MeetingIntelligenceService {
    */
   async ingest(rawNotes: string): Promise<string> {
     const result = this.ingestQueue.then(async () => {
+      await this.ensureGraph();
       const record = await this.parseStandup(rawNotes);
-      await this.store(record);
-      this.standupCache = null;
-      await this.pruneOldStandups();
+      this.teamGraph.storeStandup(record);
+      this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
       const myName = await this.resolveMyName();
       return this.formatPersonalBrief(record, myName);
     });
@@ -231,10 +230,10 @@ export class MeetingIntelligenceService {
     rawNotes: string,
   ): Promise<{ cardJson: string; record: StandupRecord }> {
     const result = this.ingestQueue.then(async () => {
+      await this.ensureGraph();
       const record = await this.parseStandup(rawNotes);
-      await this.store(record);
-      this.standupCache = null;
-      await this.pruneOldStandups();
+      this.teamGraph.storeStandup(record);
+      this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
       const myName = await this.resolveMyName();
 
       const myCommitments = record.commitments.filter((c) =>
@@ -265,42 +264,12 @@ export class MeetingIntelligenceService {
   /** Delete a standup record by date (and optionally team name). */
   async deleteStandup(date: string, teamName?: string): Promise<boolean> {
     try {
-      const raw = await this.memoryTool.execute(
-        "search",
-        undefined,
-        STANDUP_KEYWORD_PREFIX,
-      );
-      const entries: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
-      if (!Array.isArray(entries)) return false;
-
-      for (const e of entries) {
-        if (
-          typeof e !== "object" ||
-          e === null ||
-          !("id" in e) ||
-          !("content" in e)
-        )
-          continue;
-        try {
-          const record = JSON.parse(
-            (e as { content: string }).content,
-          ) as Partial<StandupRecord>;
-          if (
-            record.date === date &&
-            (!teamName || record.teamName === teamName)
-          ) {
-            await this.memoryTool.execute("delete", {
-              id: (e as { id: string }).id,
-            });
-            this.standupCache = null;
-            this.logger.info(`Deleted standup for ${date}`);
-            return true;
-          }
-        } catch {
-          continue;
-        }
+      await this.ensureGraph();
+      const deleted = this.teamGraph.deleteStandup(date, teamName);
+      if (deleted) {
+        this.logger.info(`Deleted standup for ${date}`);
       }
-      return false;
+      return deleted;
     } catch (error: unknown) {
       const msg =
         error instanceof Error ? error.message : "Unknown delete error";
@@ -319,23 +288,15 @@ export class MeetingIntelligenceService {
       participantCount: number;
     }>
   > {
-    const standups = await this.loadStandups();
-    return standups
-      .sort((a, b) => b.date.localeCompare(a.date))
-      .slice(0, limit)
-      .map((s) => ({
-        date: s.date,
-        teamName: s.teamName,
-        commitmentCount: s.commitments.length,
-        blockerCount: s.blockers.length,
-        participantCount: s.participants.length,
-      }));
+    await this.ensureGraph();
+    return this.teamGraph.getRecentSummaries(limit);
   }
 
   /** Return the specified person's (or current user's) commitments. */
   async getMyTasks(person?: string): Promise<string> {
     const name = person ?? (await this.resolveMyName());
-    const standups = await this.loadStandups();
+    await this.ensureGraph();
+    const standups = this.teamGraph.loadStandups();
     const commitments: Array<Commitment & { date: string }> = [];
     for (const s of standups) {
       for (const c of s.commitments) {
@@ -359,7 +320,8 @@ export class MeetingIntelligenceService {
 
   /** Return all active blockers from recent standups. */
   async getBlockers(): Promise<string> {
-    const standups = await this.loadStandups();
+    await this.ensureGraph();
+    const standups = this.teamGraph.loadStandups();
     const blockers: Array<Blocker & { date: string }> = [];
     for (const s of standups) {
       for (const b of s.blockers) {
@@ -378,7 +340,16 @@ export class MeetingIntelligenceService {
 
   /** Query standup history by filter. */
   async queryHistory(filter: StandupFilter): Promise<string> {
-    let standups = await this.loadStandups();
+    await this.ensureGraph();
+    let standups: StandupRecord[];
+
+    // Use SQL-backed range query when a date range is specified
+    if (filter.dateRange) {
+      const since = this.dateRangeToCutoff(filter.dateRange);
+      standups = this.teamGraph.getStandupsByDateRange(since);
+    } else {
+      standups = this.teamGraph.loadStandups();
+    }
 
     if (filter.person) {
       standups = standups.filter(
@@ -388,15 +359,17 @@ export class MeetingIntelligenceService {
       );
     }
     if (filter.ticketId) {
-      const tid = filter.ticketId;
-      standups = standups.filter(
-        (s) =>
-          s.ticketMentions.some((t) => t.id === tid) ||
-          s.commitments.some((c) => c.ticketIds.includes(tid)),
-      );
-    }
-    if (filter.dateRange) {
-      standups = this.filterByDateRange(standups, filter.dateRange);
+      // Use SQL index when only ticket filter
+      if (!filter.person && !filter.dateRange) {
+        standups = this.teamGraph.getStandupsByTicket(filter.ticketId);
+      } else {
+        const tid = filter.ticketId;
+        standups = standups.filter(
+          (s) =>
+            s.ticketMentions.some((t) => t.id === tid) ||
+            s.commitments.some((c) => c.ticketIds.includes(tid)),
+        );
+      }
     }
     if (standups.length === 0) {
       return "No standups matched the filter.";
@@ -730,133 +703,66 @@ Extract the standup data from the notes above into the JSON schema provided.`;
     return names;
   }
 
-  // ── Storage (via MemoryTool) ───────────────────────────────────
+  // ── Storage (via TeamGraphStore) ─────────────────────────────────
 
-  private async store(record: StandupRecord): Promise<void> {
-    const keyword = `${STANDUP_KEYWORD_PREFIX}|${record.date}|daily|${record.teamName.toLowerCase().replace(/\s+/g, "-")}`;
-    try {
-      await this.memoryTool.execute("add", {
-        category: "Experience",
-        title: `Daily Standup — ${record.date}`,
-        content: JSON.stringify(record),
-        keywords: keyword,
-        scope: "project",
-      });
-      this.logger.info(`Stored standup for ${record.date}`);
-    } catch (error: unknown) {
-      const msg =
-        error instanceof Error ? error.message : "Unknown store error";
-      this.logger.error(`Failed to store standup: ${msg}`);
+  /** Ensure the graph database is initialised and legacy data migrated. */
+  private async ensureGraph(): Promise<void> {
+    await this.teamGraph.ensureInitialized();
+    if (!this.migrated) {
+      await this.migrateFromMemoryTool();
+      this.migrated = true;
     }
   }
 
-  private async loadStandups(): Promise<StandupRecord[]> {
-    const now = Date.now();
-    if (
-      this.standupCache &&
-      now - this.standupCache.fetchedAt <
-        MeetingIntelligenceService.CACHE_TTL_MS
-    ) {
-      return this.standupCache.data;
-    }
+  /**
+   * One-time migration: read standup records from MemoryTool and re-store
+   * them in the TeamGraphStore. Only runs when the SQLite store is empty.
+   */
+  private async migrateFromMemoryTool(): Promise<void> {
+    // Skip if SQLite already has data
+    const existing = this.teamGraph.loadStandups(1);
+    if (existing.length > 0) return;
 
     try {
-      const raw = await this.memoryTool.execute(
+      const memoryTool = new MemoryTool();
+      const raw = await memoryTool.execute(
         "search",
         undefined,
         STANDUP_KEYWORD_PREFIX,
       );
-
-      // Handle both pre-parsed and stringified returns defensively (Issue 3)
       const entries: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
-      if (!Array.isArray(entries)) {
-        this.logger.warn(
-          `loadStandups: unexpected entries shape, got ${typeof entries}`,
-        );
-        return [];
-      }
+      if (!Array.isArray(entries) || entries.length === 0) return;
 
       const MemoryEntrySchema = z.object({ content: z.string() });
+      let migrated = 0;
 
-      const parsed = entries
-        .flatMap((e: unknown) => {
-          const entryResult = MemoryEntrySchema.safeParse(e);
-          if (!entryResult.success) return [];
+      for (const e of entries) {
+        const entryResult = MemoryEntrySchema.safeParse(e);
+        if (!entryResult.success) continue;
 
-          let contentParsed: unknown;
-          try {
-            contentParsed = JSON.parse(entryResult.data.content);
-          } catch {
-            this.logger.warn(
-              "loadStandups: malformed content JSON in memory entry",
-            );
-            return [];
-          }
-
-          const recordResult = StandupRecordSchema.safeParse(contentParsed);
-          if (!recordResult.success) {
-            this.logger.warn(
-              `loadStandups: invalid StandupRecord: ${recordResult.error.message}`,
-            );
-            return [];
-          }
-          return [recordResult.data as StandupRecord];
-        })
-        .sort((a, b) => b.date.localeCompare(a.date));
-
-      this.standupCache = { data: parsed, fetchedAt: now };
-      return parsed;
-    } catch (err: unknown) {
-      this.logger.error(
-        `loadStandups failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return [];
-    }
-  }
-
-  private async pruneOldStandups(): Promise<void> {
-    try {
-      const raw = await this.memoryTool.execute(
-        "search",
-        undefined,
-        STANDUP_KEYWORD_PREFIX,
-      );
-      const entries: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
-      if (!Array.isArray(entries) || entries.length <= MAX_STORED_STANDUPS)
-        return;
-
-      // Sort by the standup date we control, not an assumed timestamp field
-      const withDates = entries.flatMap((e: unknown) => {
-        if (
-          typeof e !== "object" ||
-          e === null ||
-          !("id" in e) ||
-          !("content" in e)
-        )
-          return [];
+        let contentParsed: unknown;
         try {
-          const record = JSON.parse(
-            (e as { content: string }).content,
-          ) as Partial<StandupRecord>;
-          const date = record.date ?? "0000-00-00";
-          return [{ id: (e as { id: string }).id, date }];
+          contentParsed = JSON.parse(entryResult.data.content);
         } catch {
-          return [{ id: (e as { id: string }).id, date: "0000-00-00" }];
+          continue;
         }
-      });
 
-      // Newest first — keep first MAX_STORED_STANDUPS, delete the rest
-      withDates.sort((a, b) => b.date.localeCompare(a.date));
-      for (let i = MAX_STORED_STANDUPS; i < withDates.length; i++) {
-        await this.memoryTool.execute("delete", { id: withDates[i].id });
+        const recordResult = StandupRecordSchema.safeParse(contentParsed);
+        if (!recordResult.success) continue;
+
+        this.teamGraph.storeStandup(recordResult.data as StandupRecord);
+        migrated++;
       }
-      this.logger.info(
-        `Pruned ${withDates.length - MAX_STORED_STANDUPS} old standup(s)`,
+
+      if (migrated > 0) {
+        this.logger.info(
+          `Migrated ${migrated} standup(s) from MemoryTool to TeamGraphStore`,
+        );
+      }
+    } catch (err: unknown) {
+      this.logger.warn(
+        `MemoryTool migration failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
       );
-    } catch (error: unknown) {
-      const msg =
-        error instanceof Error ? error.message : "Unknown prune error";
-      this.logger.warn(`Failed to prune old standups: ${msg}`);
     }
   }
 
@@ -1026,10 +932,8 @@ Extract the standup data from the notes above into the JSON schema provided.`;
     }
   }
 
-  private filterByDateRange(
-    standups: StandupRecord[],
-    range: string,
-  ): StandupRecord[] {
+  /** Convert a human-readable date range to a YYYY-MM-DD cutoff string. */
+  private dateRangeToCutoff(range: string): string {
     const now = new Date();
     let daysBack = 7;
     let recognized = false;
@@ -1038,7 +942,6 @@ Extract the standup data from the notes above into the JSON schema provided.`;
       daysBack = parseInt(match[1], 10);
       recognized = true;
     } else if (/this\s*week/i.test(range)) {
-      // getDay() returns 0 for Sunday; treat Monday as start of week
       daysBack = (now.getDay() + 6) % 7;
       recognized = true;
     } else if (/last\s*week/i.test(range)) {
@@ -1052,7 +955,6 @@ Extract the standup data from the notes above into the JSON schema provided.`;
     }
     const cutoff = new Date(now);
     cutoff.setDate(cutoff.getDate() - daysBack);
-    const cutoffStr = cutoff.toISOString().slice(0, 10);
-    return standups.filter((s) => s.date >= cutoffStr);
+    return cutoff.toISOString().slice(0, 10);
   }
 }
