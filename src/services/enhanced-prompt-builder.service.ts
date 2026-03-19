@@ -16,6 +16,7 @@ import {
 } from "../agents/langgraph/tools/architecture";
 import { MemoryTool } from "../tools/memory";
 import { TeamGraphStore } from "./team-graph-store";
+import { sanitizeForLLM } from "./llm-safety";
 
 export interface QuestionAnalysis {
   isCodebaseRelated: boolean;
@@ -202,17 +203,7 @@ export class EnhancedPromptBuilderService {
       .getConfiguration("codebuddy.standup")
       .get<boolean>("injectTeamContext", true);
     if (injectTeamContext && this.isTeamRelatedQuery(message)) {
-      try {
-        const teamGraph = TeamGraphStore.getInstance();
-        if (teamGraph.isReady()) {
-          const raw = teamGraph.getTeamSummary();
-          if (raw && raw !== "No team members tracked yet.") {
-            teamContext = this.sanitizeTeamContext(raw);
-          }
-        }
-      } catch {
-        // TeamGraphStore not initialized yet — skip silently
-      }
+      teamContext = this.fetchTeamContextCached();
     }
 
     const enhancedPrompt = `
@@ -420,6 +411,36 @@ export class EnhancedPromptBuilderService {
 
   /** Hard cap on team context injected into the prompt (in characters). */
   private static readonly MAX_TEAM_CONTEXT_CHARS = 4_000;
+  private static readonly TEAM_SUMMARY_TTL_MS = 60_000;
+  private teamSummaryCache: { value: string; expiresAt: number } | null = null;
+
+  /** Fetch team context with a 1-minute TTL cache. */
+  private fetchTeamContextCached(): string {
+    const now = Date.now();
+    if (this.teamSummaryCache && this.teamSummaryCache.expiresAt > now) {
+      return this.teamSummaryCache.value;
+    }
+    let result = "";
+    try {
+      const teamGraph = TeamGraphStore.getInstance();
+      if (teamGraph.isReady()) {
+        const raw = teamGraph.getTeamSummary();
+        if (raw && raw !== "No team members tracked yet.") {
+          result = sanitizeForLLM(
+            raw,
+            EnhancedPromptBuilderService.MAX_TEAM_CONTEXT_CHARS,
+          );
+        }
+      }
+    } catch {
+      // TeamGraphStore not initialized yet — skip silently
+    }
+    this.teamSummaryCache = {
+      value: result,
+      expiresAt: now + EnhancedPromptBuilderService.TEAM_SUMMARY_TTL_MS,
+    };
+    return result;
+  }
 
   /** Patterns to redact from team context before prompt injection. */
   private static readonly INJECTION_PATTERNS: ReadonlyArray<[RegExp, string]> =
@@ -466,7 +487,7 @@ export class EnhancedPromptBuilderService {
 
   /** Keywords that indicate the user is asking about team, people, or standup topics. */
   private static readonly TEAM_KEYWORDS =
-    /\b(standup|stand-up|stand up|daily scrum|scrum meeting|coworker|colleague|team\s+(member|health|velocity|graph|summary|overview)|meeting\s+(note|summary|update)|blocked\s+(by|on)|collaborat\w+\s+(with|on)|completion\s+rate|ticket\s+history|who\s+(is|are|does|works\s+on)\s+\w+\s+(working|doing|blocked|assigned|responsible))\b/i;
+    /\b(standup|stand-up|stand up|daily scrum|scrum meeting|coworker|colleague|team\s+(member|health|velocity|graph|summary|overview)|meeting\s+(note|summary|update)|blocked\s+(by|on)|collaborat\w+\s+(with|on)|completion\s+rate|ticket\s+history|merge\s+request|\bMR\b|\bPR\b|who\s+(is|are|does|works\s+on)\s+\w+\s+(working|doing|blocked|assigned|responsible))\b/i;
 
   private isTeamRelatedQuery(message: string): boolean {
     return EnhancedPromptBuilderService.TEAM_KEYWORDS.test(message);

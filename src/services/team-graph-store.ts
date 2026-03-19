@@ -18,6 +18,7 @@
 import * as path from "path";
 import * as fs from "fs";
 import * as vscode from "vscode";
+import { z } from "zod";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import type {
   StandupRecord,
@@ -27,6 +28,26 @@ import type {
   TicketMention,
   DetectedRelationship,
 } from "../shared/standup.types";
+import { normalizePersonName } from "../shared/standup.types";
+
+// ── Zod schema for runtime-safe access to the traits JSON blob ──
+
+const PersonTraitsSchema = z
+  .object({
+    expertise: z.array(z.string()).default([]),
+    expertiseScores: z.record(z.string(), z.number()).default({}),
+    workStyle: z.string().nullable().optional(),
+    roleCandidates: z.record(z.string(), z.number()).default({}),
+  })
+  .passthrough()
+  .catch({
+    expertise: [],
+    expertiseScores: {},
+    workStyle: null,
+    roleCandidates: {},
+  });
+
+export type PersonTraits = z.infer<typeof PersonTraitsSchema>;
 
 // ── Minimal sql.js type definitions ─────────────────────────────
 
@@ -66,7 +87,7 @@ export interface PersonProfile {
   /** Inferred role from meeting context (e.g. "Frontend Engineer"). */
   role: string | null;
   /** JSON-serialised personality/behavior traits object. */
-  traits: Record<string, unknown>;
+  traits: PersonTraits;
   /** Total standups this person appeared in. */
   standup_count: number;
   /** Total commitments made. */
@@ -340,7 +361,7 @@ export class TeamGraphStore implements vscode.Disposable {
    * Increments standup_count and updates last_seen on repeat encounters.
    */
   upsertPerson(name: string, date: string): number {
-    const canonical = name.toLowerCase().trim();
+    const canonical = normalizePersonName(name);
     const existing = this._db.exec(
       "SELECT id FROM people WHERE canonical_name = ?",
       [canonical],
@@ -390,7 +411,7 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Get a person by canonical name. */
   getPersonByName(name: string): PersonProfile | null {
-    const canonical = name.toLowerCase().trim();
+    const canonical = normalizePersonName(name);
     const rows = this._db.exec(
       "SELECT * FROM people WHERE canonical_name = ?",
       [canonical],
@@ -416,7 +437,9 @@ export class TeamGraphStore implements vscode.Disposable {
       name: obj.name as string,
       canonical_name: obj.canonical_name as string,
       role: (obj.role as string | null) ?? null,
-      traits: JSON.parse((obj.traits as string) || "{}"),
+      traits: PersonTraitsSchema.parse(
+        JSON.parse((obj.traits as string) || "{}"),
+      ),
       standup_count: obj.standup_count as number,
       commitment_count: obj.commitment_count as number,
       completion_count: obj.completion_count as number,
@@ -562,14 +585,14 @@ export class TeamGraphStore implements vscode.Disposable {
       const personIds = new Map<string, number>();
       for (const name of record.participants) {
         personIds.set(
-          name.toLowerCase().trim(),
+          normalizePersonName(name),
           this.upsertPerson(name, record.date),
         );
       }
 
       // Store commitments
       for (const c of record.commitments) {
-        const canonical = c.person.toLowerCase().trim();
+        const canonical = normalizePersonName(c.person);
         let pid = personIds.get(canonical);
         if (!pid) {
           pid = this.upsertPerson(c.person, record.date);
@@ -601,7 +624,7 @@ export class TeamGraphStore implements vscode.Disposable {
 
       // Store blockers
       for (const b of record.blockers) {
-        const ownerId = personIds.get(b.owner.toLowerCase().trim()) ?? null;
+        const ownerId = personIds.get(normalizePersonName(b.owner)) ?? null;
         db.run(
           `INSERT INTO blockers (standup_id, blocked, blocked_by, owner_id, reason)
            VALUES (?, ?, ?, ?, ?)`,
@@ -621,7 +644,7 @@ export class TeamGraphStore implements vscode.Disposable {
       // Store ticket mentions
       for (const t of record.ticketMentions) {
         const assigneeId = t.assignee
-          ? (personIds.get(t.assignee.toLowerCase().trim()) ?? null)
+          ? (personIds.get(normalizePersonName(t.assignee)) ?? null)
           : null;
         db.run(
           `INSERT INTO ticket_mentions (standup_id, ticket_id, context, assignee_id)
@@ -642,17 +665,17 @@ export class TeamGraphStore implements vscode.Disposable {
 
       // Build blocking edges — only to people committed on the blocked item
       for (const b of record.blockers) {
-        const ownerId = personIds.get(b.owner.toLowerCase().trim());
+        const ownerId = personIds.get(normalizePersonName(b.owner));
         if (!ownerId) continue;
 
         const affectedCommitments = record.commitments.filter((c) => {
-          if (c.person.toLowerCase().trim() === b.owner.toLowerCase().trim())
+          if (normalizePersonName(c.person) === normalizePersonName(b.owner))
             return false;
           return c.ticketIds.some((tid) => b.blocked.includes(tid));
         });
 
         for (const c of affectedCommitments) {
-          const targetId = personIds.get(c.person.toLowerCase().trim());
+          const targetId = personIds.get(normalizePersonName(c.person));
           if (targetId && targetId !== ownerId) {
             this.upsertRelationship(ownerId, targetId, "blocks", {
               blocked: b.blocked,
@@ -666,8 +689,8 @@ export class TeamGraphStore implements vscode.Disposable {
       // Build LLM-detected relationship edges (reviews_for, reports_to, mentors)
       if (record.relationships?.length) {
         for (const rel of record.relationships) {
-          const fromId = personIds.get(rel.from.toLowerCase().trim());
-          const toId = personIds.get(rel.to.toLowerCase().trim());
+          const fromId = personIds.get(normalizePersonName(rel.from));
+          const toId = personIds.get(normalizePersonName(rel.to));
           if (fromId && toId && fromId !== toId) {
             this.upsertRelationship(fromId, toId, rel.kind, {
               context: rel.context,
@@ -926,10 +949,10 @@ export class TeamGraphStore implements vscode.Disposable {
 
     let profile = `## ${person.name}\n`;
     if (person.role) profile += `**Role:** ${person.role}\n`;
-    const expertise = person.traits.expertise as string[] | undefined;
+    const expertise = person.traits.expertise;
     if (expertise?.length)
       profile += `**Expertise:** ${expertise.join(", ")}\n`;
-    const workStyle = person.traits.workStyle as string | undefined;
+    const workStyle = person.traits.workStyle;
     if (workStyle) profile += `**Work Style:** ${workStyle}\n`;
     profile += `**Stats:** ${person.standup_count} standups, ${person.commitment_count} commitments (${completionRate}% completed)\n`;
     profile += `**Active since:** ${person.first_seen} — last seen ${person.last_seen}\n\n`;
@@ -1033,16 +1056,15 @@ export class TeamGraphStore implements vscode.Disposable {
       [normalized],
     );
 
-    // Commitments referencing this ticket
-    const likePattern = `%"${normalized}"%`;
+    // Commitments referencing this ticket (use json_each for correctness)
     const commitRows = this._db.exec(
       `SELECT s.date, p.name, c.action, c.status
        FROM commitments c
        JOIN standups s ON c.standup_id = s.id
        JOIN people p ON c.person_id = p.id
-       WHERE c.ticket_ids LIKE ?
+       WHERE EXISTS (SELECT 1 FROM json_each(c.ticket_ids) WHERE json_each.value = ?)
        ORDER BY s.date DESC`,
-      [likePattern],
+      [normalized],
     );
 
     if (
