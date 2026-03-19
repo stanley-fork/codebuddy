@@ -3,6 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
+import { ISecurityPolicy } from "./security-policy.interface";
 
 // ─── Schema ──────────────────────────────────────────────────────────
 
@@ -90,9 +91,16 @@ const DEFAULT_NETWORK_DENY_PATTERNS: readonly string[] = [
 
 // ─── Service ─────────────────────────────────────────────────────────
 
-export class ExternalSecurityConfigService implements vscode.Disposable {
+export class ExternalSecurityConfigService
+  implements vscode.Disposable, ISecurityPolicy
+{
   private static instance: ExternalSecurityConfigService;
   private readonly logger: Logger;
+
+  /** Maximum number of user-supplied patterns per category. */
+  private static readonly MAX_USER_PATTERNS = 50;
+  /** Maximum input length for regex testing (ReDoS mitigation). */
+  private static readonly MAX_INPUT_LENGTH = 10_000;
 
   private config: ExternalSecurityConfig = {};
   private compiledCommandDenyPatterns: RegExp[] = [];
@@ -105,7 +113,8 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
   private configDir = "";
   private configFile = "";
   private workspaceRoot = "";
-  private watcher: fs.FSWatcher | undefined;
+  private vsCodeWatcher: vscode.FileSystemWatcher | undefined;
+  private reloadDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
   private constructor() {
     this.logger = Logger.initialize("ExternalSecurityConfigService", {
@@ -156,9 +165,6 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
       );
     }
 
-    // Auto-create security.json if it doesn't exist
-    await this.scaffoldDefaultConfig();
-
     await this.loadConfig();
     this.startWatcher();
     this.logger.info(
@@ -167,8 +173,9 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
   }
 
   public dispose(): void {
-    this.watcher?.close();
-    this.watcher = undefined;
+    clearTimeout(this.reloadDebounceTimer);
+    this.vsCodeWatcher?.dispose();
+    this.vsCodeWatcher = undefined;
   }
 
   // ── Config loading ───────────────────────────────────────────────
@@ -243,25 +250,54 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
    * (logged as warnings) so a typo doesn't disable security.
    */
   private compilePatterns(): void {
+    const limit = ExternalSecurityConfigService.MAX_USER_PATTERNS;
+
+    const userCommandPatterns = this.truncatePatterns(
+      this.config.commandDenyPatterns,
+      limit,
+      "commandDenyPatterns",
+    );
     this.compiledCommandDenyPatterns = this.compileRegexArray([
       ...DEFAULT_COMMAND_DENY_PATTERNS,
-      ...(this.config.commandDenyPatterns ?? []),
+      ...userCommandPatterns,
     ]);
 
-    this.compiledNetworkAllowPatterns = this.compileRegexArray(
-      this.config.networkAllowPatterns ?? [],
+    const userNetworkAllow = this.truncatePatterns(
+      this.config.networkAllowPatterns,
+      limit,
+      "networkAllowPatterns",
     );
+    this.compiledNetworkAllowPatterns =
+      this.compileRegexArray(userNetworkAllow);
 
+    const userNetworkDeny = this.truncatePatterns(
+      this.config.networkDenyPatterns,
+      limit,
+      "networkDenyPatterns",
+    );
     this.compiledNetworkDenyPatterns = this.compileRegexArray([
       ...DEFAULT_NETWORK_DENY_PATTERNS,
-      ...(this.config.networkDenyPatterns ?? []),
+      ...userNetworkDeny,
     ]);
 
     // Merge blocked path patterns
     this.mergedBlockedPathPatterns = new Set([
       ...DEFAULT_BLOCKED_PATH_PATTERNS,
-      ...(this.config.blockedPathPatterns ?? []),
+      ...(this.config.blockedPathPatterns?.slice(0, limit) ?? []),
     ]);
+  }
+
+  private truncatePatterns(
+    patterns: string[] | undefined,
+    limit: number,
+    name: string,
+  ): string[] {
+    if (!patterns) return [];
+    if (patterns.length > limit) {
+      this.logger.warn(`${name} exceeds limit of ${limit}; truncated`);
+      return patterns.slice(0, limit);
+    }
+    return patterns;
   }
 
   private compileRegexArray(sources: string[]): RegExp[] {
@@ -279,19 +315,34 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
   // ── File watcher ─────────────────────────────────────────────────
 
   private startWatcher(): void {
-    // Watch the directory (not the file) so we catch creation and renames too.
     if (!this.configDir || !fs.existsSync(this.configDir)) {
-      return; // No config dir — nothing to watch
+      return;
     }
 
     try {
-      this.watcher = fs.watch(this.configDir, (_event, filename) => {
-        if (filename === CONFIG_FILENAME) {
-          this.logger.info("External security config changed — reloading");
+      const pattern = new vscode.RelativePattern(
+        this.configDir,
+        CONFIG_FILENAME,
+      );
+      this.vsCodeWatcher = vscode.workspace.createFileSystemWatcher(pattern);
+
+      const scheduleReload = (event: string) => {
+        clearTimeout(this.reloadDebounceTimer);
+        this.reloadDebounceTimer = setTimeout(() => {
+          this.logger.info(`Security config ${event} — reloading`);
           this.loadConfig().catch((err) => {
             this.logger.error(`Reload failed: ${err}`);
           });
-        }
+        }, 300);
+      };
+
+      this.vsCodeWatcher.onDidChange(() => scheduleReload("changed"));
+      this.vsCodeWatcher.onDidCreate(() => scheduleReload("created"));
+      this.vsCodeWatcher.onDidDelete(() => {
+        clearTimeout(this.reloadDebounceTimer);
+        this.logger.warn("Security config deleted — reverting to defaults");
+        this.config = {};
+        this.compilePatterns();
       });
     } catch {
       this.logger.warn("Could not start file watcher for security config");
@@ -302,13 +353,15 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
 
   /** Returns `true` if the command should be blocked. */
   public isCommandBlocked(command: string): boolean {
-    const normalised = command.trim().toLowerCase();
-    return this.compiledCommandDenyPatterns.some((rx) => rx.test(normalised));
+    const normalized = command.trim().replace(/\s+/g, " ");
+    return this.compiledCommandDenyPatterns.some((rx) =>
+      this.safeTest(rx, normalized),
+    );
   }
 
-  /** Returns the extra deny patterns so callers can merge them. */
+  /** Returns the extra deny patterns (frozen copy — callers cannot mutate). */
   public getCommandDenyPatterns(): readonly RegExp[] {
-    return this.compiledCommandDenyPatterns;
+    return Object.freeze([...this.compiledCommandDenyPatterns]);
   }
 
   /**
@@ -322,14 +375,16 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
    */
   public isUrlAllowed(url: string): boolean {
     // Deny always wins
-    if (this.compiledNetworkDenyPatterns.some((rx) => rx.test(url))) {
+    if (this.compiledNetworkDenyPatterns.some((rx) => this.safeTest(rx, url))) {
       return false;
     }
     // If no allow list, everything (not denied) is allowed
     if (this.compiledNetworkAllowPatterns.length === 0) {
       return true;
     }
-    return this.compiledNetworkAllowPatterns.some((rx) => rx.test(url));
+    return this.compiledNetworkAllowPatterns.some((rx) =>
+      this.safeTest(rx, url),
+    );
   }
 
   /**
@@ -358,13 +413,23 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
 
     const resolved = this.resolvePath(filePath);
 
+    // Reject if the resolved path still contains traversal artifacts
+    if (resolved.includes("..")) {
+      this.logger.warn(`Path traversal detected in: ${filePath}`);
+      return { allowed: false, readWrite: false };
+    }
+
     for (const entry of this.config.allowedPaths) {
       const allowedRoot = this.resolvePath(entry.path);
-      if (
-        resolved === allowedRoot ||
-        resolved.startsWith(allowedRoot + path.sep)
-      ) {
-        return { allowed: true, readWrite: entry.allowReadWrite ?? false };
+      const isMatch =
+        resolved === allowedRoot || resolved.startsWith(allowedRoot + path.sep);
+
+      if (isMatch) {
+        // Double-check containment via path.relative
+        const relative = path.relative(allowedRoot, resolved);
+        if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+          return { allowed: true, readWrite: entry.allowReadWrite ?? false };
+        }
       }
     }
 
@@ -471,7 +536,6 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
 
     // Reload after creation
     await this.loadConfig();
-    this.startWatcher();
     return true;
   }
 
@@ -486,6 +550,25 @@ export class ExternalSecurityConfigService implements vscode.Disposable {
   }
 
   // ── Helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Tests a regex against input with ReDoS mitigation: rejects
+   * oversized inputs and resets lastIndex for global/sticky regexes.
+   */
+  private safeTest(rx: RegExp, input: string): boolean {
+    if (input.length > ExternalSecurityConfigService.MAX_INPUT_LENGTH) {
+      this.logger.warn(
+        `Input too long for regex test (${input.length} chars), skipping`,
+      );
+      return false;
+    }
+    try {
+      rx.lastIndex = 0;
+      return rx.test(input);
+    } catch {
+      return false;
+    }
+  }
 
   private expandPath(p: string): string {
     if (p.startsWith("~")) {

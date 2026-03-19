@@ -224,5 +224,53 @@ suite("ExternalSecurityConfigService", () => {
         `Expected at least 5 patterns, got ${patterns.length}`,
       );
     });
+
+    test("returned patterns are immutable (frozen copy)", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      const patterns = svc.getCommandDenyPatterns();
+      assert.ok(Object.isFrozen(patterns), "Should return a frozen array");
+      // Verify pushing doesn't affect the service
+      const countBefore = svc.getCommandDenyPatterns().length;
+      try {
+        (patterns as RegExp[]).push(/test/);
+      } catch {
+        // expected — frozen array throws on push
+      }
+      assert.strictEqual(
+        svc.getCommandDenyPatterns().length,
+        countBefore,
+        "Internal state should not be mutated",
+      );
+    });
+  });
+
+  // ── Path traversal protection ─────────────────────────────────
+
+  suite("isExternalPathAllowed — path traversal", () => {
+    test("rejects paths with .. traversal", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      // Even without config, traversal should be rejected
+      const result = svc.isExternalPathAllowed("/allowed/../../etc/passwd");
+      assert.strictEqual(result.allowed, false);
+    });
+  });
+
+  // ── ISecurityPolicy conformance ───────────────────────────────
+
+  suite("ISecurityPolicy interface", () => {
+    test("implements isCommandBlocked", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      assert.strictEqual(typeof svc.isCommandBlocked, "function");
+    });
+
+    test("implements isUrlAllowed", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      assert.strictEqual(typeof svc.isUrlAllowed, "function");
+    });
+
+    test("implements isPathBlocked", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      assert.strictEqual(typeof svc.isPathBlocked, "function");
+    });
   });
 });
