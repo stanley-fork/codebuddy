@@ -82,7 +82,17 @@ export class LangChainTeamGraphTool extends StructuredTool<any> {
 
   schema = TeamGraphToolSchema;
 
-  async _call(input: TeamGraphToolInput): Promise<string> {
+  async _call(rawInput: unknown): Promise<string> {
+    // Always validate — don't trust that LangChain ran our schema
+    const parseResult = TeamGraphToolSchema.safeParse(rawInput);
+    if (!parseResult.success) {
+      this.logger.warn(`Invalid tool input: ${parseResult.error.message}`);
+      return `Error: Invalid input format. ${parseResult.error.issues
+        .map((i) => `${i.path.join(".")}: ${i.message}`)
+        .join(", ")}`;
+    }
+    const input = parseResult.data;
+
     this.logger.info(`Executing team_graph: ${input.operation}`);
 
     try {

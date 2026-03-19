@@ -55,7 +55,8 @@ export type RelationshipKind =
   | "blocks" // A blocks B
   | "reviews_for" // A reviews B's work
   | "reports_to" // inferred from role mentions
-  | "mentors"; // future: mentor/mentee
+  | "mentors" // mentor/mentee
+  | "depends_on"; // A's work depends on B
 
 export interface PersonProfile {
   id: number;
@@ -851,6 +852,8 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Get a team profile summary — useful for LLM context. */
   getTeamSummary(): string {
+    if (!this.isReady()) return "No team members tracked yet.";
+
     const people = this.getAllPeople();
     if (people.length === 0) return "No team members tracked yet.";
 
@@ -1001,6 +1004,12 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Get full history for a specific ticket across all standups. */
   getTicketHistory(ticketId: string): string {
+    // Validate ticket ID: strip optional # prefix, allow only alphanumeric + dash/underscore
+    const normalized = ticketId.replace(/^#/, "").trim();
+    if (!/^[A-Za-z0-9_\-]+$/.test(normalized)) {
+      return `Invalid ticket ID format: "${ticketId}". Use alphanumeric characters, dashes, or underscores only.`;
+    }
+
     // Mentions
     const mentionRows = this._db.exec(
       `SELECT s.date, s.team_name, tm.context, p.name
@@ -1009,10 +1018,11 @@ export class TeamGraphStore implements vscode.Disposable {
        LEFT JOIN people p ON tm.assignee_id = p.id
        WHERE tm.ticket_id = ?
        ORDER BY s.date DESC`,
-      [ticketId],
+      [normalized],
     );
 
     // Commitments referencing this ticket
+    const likePattern = `%"${normalized}"%`;
     const commitRows = this._db.exec(
       `SELECT s.date, p.name, c.action, c.status
        FROM commitments c
@@ -1020,17 +1030,17 @@ export class TeamGraphStore implements vscode.Disposable {
        JOIN people p ON c.person_id = p.id
        WHERE c.ticket_ids LIKE ?
        ORDER BY s.date DESC`,
-      [`%"${ticketId}"%`],
+      [likePattern],
     );
 
     if (
       (!mentionRows.length || !mentionRows[0].values.length) &&
       (!commitRows.length || !commitRows[0].values.length)
     ) {
-      return `No history found for ticket "${ticketId}".`;
+      return `No history found for ticket "${normalized}".`;
     }
 
-    let out = `## Ticket #${ticketId} History\n\n`;
+    let out = `## Ticket #${normalized} History\n\n`;
 
     if (mentionRows.length && mentionRows[0].values.length) {
       out += "### Mentions\n";

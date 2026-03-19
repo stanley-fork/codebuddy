@@ -32,7 +32,7 @@ export interface TicketMention {
 export interface DetectedRelationship {
   from: string;
   to: string;
-  kind: "reviews_for" | "reports_to" | "mentors";
+  kind: "reviews_for" | "reports_to" | "mentors" | "depends_on";
   context: string;
 }
 
