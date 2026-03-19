@@ -344,6 +344,8 @@ const TOOL_ROLE_MAPPING: Record<string, string[]> = {
     "search_symbols",
     "list_files",
     "search_vector_db",
+    "standup_intelligence",
+    "team_graph",
   ],
   tester: [
     "terminal",

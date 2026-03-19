@@ -421,20 +421,52 @@ export class EnhancedPromptBuilderService {
   /** Hard cap on team context injected into the prompt (in characters). */
   private static readonly MAX_TEAM_CONTEXT_CHARS = 4_000;
 
+  /** Patterns to redact from team context before prompt injection. */
+  private static readonly INJECTION_PATTERNS: ReadonlyArray<[RegExp, string]> =
+    [
+      // Direct instruction override
+      [/ignore\s+(previous|all|prior)\s+instructions?/gi, "[REDACTED]"],
+      [/disregard\s+(all\s+)?previous/gi, "[REDACTED]"],
+      [/forget\s+(everything|all|prior)/gi, "[REDACTED]"],
+      // Role/persona hijacking
+      [/you\s+are\s+now\s+/gi, "[REDACTED]"],
+      [/act\s+as\s+(a\s+)?(?:jailbreak|DAN|evil|unrestricted)/gi, "[REDACTED]"],
+      [/pretend\s+(you\s+are|to\s+be)/gi, "[REDACTED]"],
+      // Special tokens (model-specific)
+      [/\[INST\]/gi, "[REDACTED]"],
+      [/\[\/INST\]/gi, "[REDACTED]"],
+      [/<\|im_start\|>/gi, "[REDACTED]"],
+      [/<\|im_end\|>/gi, "[REDACTED]"],
+      [/<>/gi, "[REDACTED]"],
+      // Structural markers that could confuse prompt parsing
+      [/system\s*:/gi, "[REDACTED]"],
+      [/assistant\s*:/gi, "[REDACTED]"],
+      [/human\s*:/gi, "[REDACTED]"],
+      [
+        /<\/?(?:system|assistant|human|prompt|context|instruction)>/gi,
+        "[REDACTED]",
+      ],
+    ];
+
   /** Sanitize team context before injecting into the prompt. */
   private sanitizeTeamContext(raw: string): string {
-    return raw
-      .replace(/ignore\s+(previous|all|prior)\s+instructions?/gi, "[REDACTED]")
-      .replace(/you\s+are\s+now\s+/gi, "[REDACTED]")
-      .replace(/system\s*:/gi, "[REDACTED]")
-      .replace(/\[INST\]/gi, "[REDACTED]")
-      .replace(/<\|im_start\|>/gi, "[REDACTED]")
-      .slice(0, EnhancedPromptBuilderService.MAX_TEAM_CONTEXT_CHARS);
+    // Unicode normalization to catch homoglyph attacks
+    let sanitized = raw.normalize("NFKC");
+    for (const [
+      pattern,
+      replacement,
+    ] of EnhancedPromptBuilderService.INJECTION_PATTERNS) {
+      sanitized = sanitized.replace(pattern, replacement);
+    }
+    return sanitized.slice(
+      0,
+      EnhancedPromptBuilderService.MAX_TEAM_CONTEXT_CHARS,
+    );
   }
 
   /** Keywords that indicate the user is asking about team, people, or standup topics. */
   private static readonly TEAM_KEYWORDS =
-    /\b(standup|stand-up|stand up|daily scrum|scrum meeting|who\s+(is|are|does|works\s+on)|coworker|colleague|team\s+(member|health|velocity|graph|summary|overview)|meeting\s+(note|summary|update)|blocked\s+(by|on)|collaborat\w+\s+(with|on)|completion\s+rate|ticket\s+history)\b/i;
+    /\b(standup|stand-up|stand up|daily scrum|scrum meeting|coworker|colleague|team\s+(member|health|velocity|graph|summary|overview)|meeting\s+(note|summary|update)|blocked\s+(by|on)|collaborat\w+\s+(with|on)|completion\s+rate|ticket\s+history|who\s+(is|are|does|works\s+on)\s+\w+\s+(working|doing|blocked|assigned|responsible))\b/i;
 
   private isTeamRelatedQuery(message: string): boolean {
     return EnhancedPromptBuilderService.TEAM_KEYWORDS.test(message);

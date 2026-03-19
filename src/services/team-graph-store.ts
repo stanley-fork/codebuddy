@@ -262,6 +262,9 @@ export class TeamGraphStore implements vscode.Disposable {
         reason      TEXT NOT NULL
       );
     `);
+    this._db.run(
+      "CREATE INDEX IF NOT EXISTS idx_blockers_owner ON blockers(owner_id);",
+    );
 
     // Decisions
     this._db.run(`
@@ -911,6 +914,8 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Get a detailed person profile for the agent. */
   getPersonProfile(name: string): string {
+    if (!this.isReady()) return `Team graph is not yet initialized.`;
+
     const person = this.getPersonByName(name);
     if (!person) return `No profile found for "${name}".`;
 
@@ -954,8 +959,11 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Get people/tickets that appear in blockers repeatedly. */
   getRecurringBlockers(minCount = 2): string {
+    if (!this.isReady()) return "Team graph is not yet initialized.";
+
     const rows = this._db.exec(
-      `SELECT p.name, COUNT(*) AS block_count, GROUP_CONCAT(DISTINCT b.blocked) AS items
+      `SELECT p.name, COUNT(*) AS block_count,
+             SUBSTR(GROUP_CONCAT(DISTINCT b.blocked), 1, 500) AS items
        FROM blockers b
        JOIN people p ON b.owner_id = p.id
        GROUP BY p.id
@@ -975,6 +983,8 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Get commitment completion rate trends by week for a person. */
   getCompletionTrends(personId: number, weeks = 8): string {
+    if (!this.isReady()) return "Team graph is not yet initialized.";
+
     const rows = this._db.exec(
       `SELECT
          strftime('%Y-W%W', s.date) AS week,
@@ -1004,6 +1014,8 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Get full history for a specific ticket across all standups. */
   getTicketHistory(ticketId: string): string {
+    if (!this.isReady()) return "Team graph is not yet initialized.";
+
     // Validate ticket ID: strip optional # prefix, allow only alphanumeric + dash/underscore
     const normalized = ticketId.replace(/^#/, "").trim();
     if (!/^[A-Za-z0-9_\-]+$/.test(normalized)) {
@@ -1064,6 +1076,8 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Aggregate team health metrics. */
   getTeamHealth(): string {
+    if (!this.isReady()) return "Team graph is not yet initialized.";
+
     const people = this.getAllPeople();
     if (people.length === 0) return "No team data available yet.";
 
