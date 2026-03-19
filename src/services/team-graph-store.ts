@@ -25,6 +25,7 @@ import type {
   Blocker,
   Decision,
   TicketMention,
+  DetectedRelationship,
 } from "../shared/standup.types";
 
 // ── Minimal sql.js type definitions ─────────────────────────────
@@ -173,6 +174,11 @@ export class TeamGraphStore implements vscode.Disposable {
   async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
     return this.initialize();
+  }
+
+  /** Whether the DB is initialized and ready for synchronous queries. */
+  isReady(): boolean {
+    return this.initialized && this.db !== null;
   }
 
   dispose(): void {
@@ -653,6 +659,20 @@ export class TeamGraphStore implements vscode.Disposable {
         }
       }
 
+      // Build LLM-detected relationship edges (reviews_for, reports_to, mentors)
+      if (record.relationships?.length) {
+        for (const rel of record.relationships) {
+          const fromId = personIds.get(rel.from.toLowerCase().trim());
+          const toId = personIds.get(rel.to.toLowerCase().trim());
+          if (fromId && toId && fromId !== toId) {
+            this.upsertRelationship(fromId, toId, rel.kind, {
+              context: rel.context,
+              standup_date: record.date,
+            });
+          }
+        }
+      }
+
       db.run("COMMIT");
       this.scheduleSave();
       this.logger.info(
@@ -842,6 +862,8 @@ export class TeamGraphStore implements vscode.Disposable {
           : 0;
       summary += `- **${p.name}**`;
       if (p.role) summary += ` (${p.role})`;
+      const expertise = p.traits.expertise as string[] | undefined;
+      if (expertise?.length) summary += ` [${expertise.join(", ")}]`;
       summary += ` — ${p.standup_count} standups, ${p.commitment_count} commitments`;
       if (p.commitment_count > 0) summary += ` (${completionRate}% done)`;
       summary += `, last seen ${p.last_seen}\n`;
@@ -864,6 +886,220 @@ export class TeamGraphStore implements vscode.Disposable {
       }
     }
 
+    // Recurring blockers
+    const blockerRows = this._db.exec(
+      `SELECT p.name, COUNT(*) AS block_count
+       FROM blockers b
+       JOIN people p ON b.owner_id = p.id
+       GROUP BY p.id
+       HAVING block_count >= 2
+       ORDER BY block_count DESC
+       LIMIT 5`,
+    );
+    if (blockerRows.length && blockerRows[0].values.length) {
+      summary += "\n### Frequent Blockers\n";
+      for (const v of blockerRows[0].values) {
+        summary += `- ${v[0]} (blocked ${v[1]} times)\n`;
+      }
+    }
+
     return summary;
+  }
+
+  /** Get a detailed person profile for the agent. */
+  getPersonProfile(name: string): string {
+    const person = this.getPersonByName(name);
+    if (!person) return `No profile found for "${name}".`;
+
+    const completionRate =
+      person.commitment_count > 0
+        ? Math.round((person.completion_count / person.commitment_count) * 100)
+        : 0;
+
+    let profile = `## ${person.name}\n`;
+    if (person.role) profile += `**Role:** ${person.role}\n`;
+    const expertise = person.traits.expertise as string[] | undefined;
+    if (expertise?.length)
+      profile += `**Expertise:** ${expertise.join(", ")}\n`;
+    const workStyle = person.traits.workStyle as string | undefined;
+    if (workStyle) profile += `**Work Style:** ${workStyle}\n`;
+    profile += `**Stats:** ${person.standup_count} standups, ${person.commitment_count} commitments (${completionRate}% completed)\n`;
+    profile += `**Active since:** ${person.first_seen} — last seen ${person.last_seen}\n\n`;
+
+    // Recent commitments
+    const commitments = this.getCommitmentsFor(person.id, 5);
+    if (commitments.length) {
+      profile += "### Recent Commitments\n";
+      for (const c of commitments) {
+        const status = c.status === "done" ? "✅" : "⬜";
+        profile += `- ${status} ${c.action} (${c.date})\n`;
+      }
+      profile += "\n";
+    }
+
+    // Top collaborators
+    const collabs = this.getTopCollaborators(person.id, 5);
+    if (collabs.length) {
+      profile += "### Top Collaborators\n";
+      for (const { person: p, weight } of collabs) {
+        profile += `- ${p.name} (${weight} meetings together)\n`;
+      }
+    }
+
+    return profile;
+  }
+
+  /** Get people/tickets that appear in blockers repeatedly. */
+  getRecurringBlockers(minCount = 2): string {
+    const rows = this._db.exec(
+      `SELECT p.name, COUNT(*) AS block_count, GROUP_CONCAT(DISTINCT b.blocked) AS items
+       FROM blockers b
+       JOIN people p ON b.owner_id = p.id
+       GROUP BY p.id
+       HAVING block_count >= ?
+       ORDER BY block_count DESC`,
+      [minCount],
+    );
+    if (!rows.length || !rows[0].values.length)
+      return "No recurring blockers found.";
+
+    let out = "## Recurring Blockers\n\n";
+    for (const v of rows[0].values) {
+      out += `- **${v[0]}** — blocked ${v[1]} times (items: ${v[2]})\n`;
+    }
+    return out;
+  }
+
+  /** Get commitment completion rate trends by week for a person. */
+  getCompletionTrends(personId: number, weeks = 8): string {
+    const rows = this._db.exec(
+      `SELECT
+         strftime('%Y-W%W', s.date) AS week,
+         COUNT(CASE WHEN c.status = 'done' THEN 1 END) AS completed,
+         COUNT(*) AS total
+       FROM commitments c
+       JOIN standups s ON c.standup_id = s.id
+       WHERE c.person_id = ?
+       GROUP BY week
+       ORDER BY week DESC
+       LIMIT ?`,
+      [personId, weeks],
+    );
+    if (!rows.length || !rows[0].values.length)
+      return "No commitment data found.";
+
+    let out =
+      "## Completion Trends\n\n| Week | Completed | Total | Rate |\n|------|-----------|-------|------|\n";
+    for (const v of rows[0].values) {
+      const completed = v[1] as number;
+      const total = v[2] as number;
+      const rate = total > 0 ? Math.round((completed / total) * 100) : 0;
+      out += `| ${v[0]} | ${completed} | ${total} | ${rate}% |\n`;
+    }
+    return out;
+  }
+
+  /** Get full history for a specific ticket across all standups. */
+  getTicketHistory(ticketId: string): string {
+    // Mentions
+    const mentionRows = this._db.exec(
+      `SELECT s.date, s.team_name, tm.context, p.name
+       FROM ticket_mentions tm
+       JOIN standups s ON tm.standup_id = s.id
+       LEFT JOIN people p ON tm.assignee_id = p.id
+       WHERE tm.ticket_id = ?
+       ORDER BY s.date DESC`,
+      [ticketId],
+    );
+
+    // Commitments referencing this ticket
+    const commitRows = this._db.exec(
+      `SELECT s.date, p.name, c.action, c.status
+       FROM commitments c
+       JOIN standups s ON c.standup_id = s.id
+       JOIN people p ON c.person_id = p.id
+       WHERE c.ticket_ids LIKE ?
+       ORDER BY s.date DESC`,
+      [`%"${ticketId}"%`],
+    );
+
+    if (
+      (!mentionRows.length || !mentionRows[0].values.length) &&
+      (!commitRows.length || !commitRows[0].values.length)
+    ) {
+      return `No history found for ticket "${ticketId}".`;
+    }
+
+    let out = `## Ticket #${ticketId} History\n\n`;
+
+    if (mentionRows.length && mentionRows[0].values.length) {
+      out += "### Mentions\n";
+      for (const v of mentionRows[0].values) {
+        const assignee = v[3] ? ` (${v[3]})` : "";
+        out += `- **${v[0]}** ${v[1]}: ${v[2]}${assignee}\n`;
+      }
+      out += "\n";
+    }
+
+    if (commitRows.length && commitRows[0].values.length) {
+      out += "### Related Commitments\n";
+      for (const v of commitRows[0].values) {
+        const status = v[3] === "done" ? "✅" : "⬜";
+        out += `- ${status} **${v[0]}** ${v[1]}: ${v[2]}\n`;
+      }
+    }
+
+    return out;
+  }
+
+  /** Aggregate team health metrics. */
+  getTeamHealth(): string {
+    const people = this.getAllPeople();
+    if (people.length === 0) return "No team data available yet.";
+
+    const totalCommitments = people.reduce((s, p) => s + p.commitment_count, 0);
+    const totalCompleted = people.reduce((s, p) => s + p.completion_count, 0);
+    const avgCompletion =
+      totalCommitments > 0
+        ? Math.round((totalCompleted / totalCommitments) * 100)
+        : 0;
+
+    const totalStandups = this._db.exec("SELECT COUNT(*) FROM standups");
+    const standupCount = (totalStandups[0]?.values[0]?.[0] as number) ?? 0;
+
+    const blockerCount = this._db.exec("SELECT COUNT(*) FROM blockers");
+    const totalBlockers = (blockerCount[0]?.values[0]?.[0] as number) ?? 0;
+
+    const relCount = this._db.exec(
+      "SELECT COUNT(*) FROM relationships WHERE kind = 'collaborates_with'",
+    );
+    const totalEdges = (relCount[0]?.values[0]?.[0] as number) ?? 0;
+
+    let out = "## Team Health Dashboard\n\n";
+    out += `- **Team Size:** ${people.length} members\n`;
+    out += `- **Total Standups:** ${standupCount}\n`;
+    out += `- **Avg Completion Rate:** ${avgCompletion}%\n`;
+    out += `- **Total Blockers Recorded:** ${totalBlockers}\n`;
+    out += `- **Collaboration Edges:** ${totalEdges}\n\n`;
+
+    // Top performers
+    const sorted = [...people]
+      .filter((p) => p.commitment_count >= 3)
+      .sort((a, b) => {
+        const rateA = a.completion_count / (a.commitment_count || 1);
+        const rateB = b.completion_count / (b.commitment_count || 1);
+        return rateB - rateA;
+      });
+    if (sorted.length) {
+      out += "### Top Performers (by completion rate)\n";
+      for (const p of sorted.slice(0, 5)) {
+        const rate = Math.round(
+          (p.completion_count / p.commitment_count) * 100,
+        );
+        out += `- ${p.name}: ${rate}% (${p.completion_count}/${p.commitment_count})\n`;
+      }
+    }
+
+    return out;
   }
 }

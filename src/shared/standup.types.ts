@@ -29,6 +29,13 @@ export interface TicketMention {
   assignee?: string;
 }
 
+export interface DetectedRelationship {
+  from: string;
+  to: string;
+  kind: "reviews_for" | "reports_to" | "mentors";
+  context: string;
+}
+
 export interface StandupRecord {
   date: string;
   teamName: string;
@@ -37,6 +44,7 @@ export interface StandupRecord {
   blockers: Blocker[];
   decisions: Decision[];
   ticketMentions: TicketMention[];
+  relationships?: DetectedRelationship[];
 }
 
 export interface StandupFilter {

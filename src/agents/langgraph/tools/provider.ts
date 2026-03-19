@@ -49,6 +49,7 @@ import {
 } from "./debugger";
 import { LangChainArchitectureTool } from "./architecture";
 import { LangChainStandupTool } from "./standup";
+import { LangChainTeamGraphTool } from "./team-graph";
 
 const logger = Logger.initialize("ToolProvider", {
   minLevel: LogLevel.DEBUG,
@@ -217,6 +218,12 @@ class StandupToolFactory implements IToolFactory {
   }
 }
 
+class TeamGraphToolFactory implements IToolFactory {
+  createTool(): StructuredTool<any> {
+    return new LangChainTeamGraphTool();
+  }
+}
+
 class MCPToolFactory implements IToolFactory {
   constructor(
     private readonly mcpService: MCPService,
@@ -275,6 +282,8 @@ const TOOL_ROLE_MAPPING: Record<string, string[]> = {
     "edit_file",
     "compose_files",
     "search_vector_db",
+    "standup_intelligence",
+    "team_graph",
   ],
   "file-organizer": [
     "file",
@@ -316,6 +325,8 @@ const TOOL_ROLE_MAPPING: Record<string, string[]> = {
     "search_vector_db",
     "manage_core_memory",
     "manage_tasks",
+    "standup_intelligence",
+    "team_graph",
   ],
   reviewer: [
     "analyze",
@@ -422,6 +433,7 @@ export class ToolProvider {
       new DebugControlToolFactory(),
       new ArchitectureToolFactory(),
       new StandupToolFactory(),
+      new TeamGraphToolFactory(),
     ];
 
     // Deduplicate tools during initialization
