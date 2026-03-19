@@ -29,6 +29,13 @@ export interface TicketMention {
   assignee?: string;
 }
 
+export interface DetectedRelationship {
+  from: string;
+  to: string;
+  kind: "reviews_for" | "reports_to" | "mentors" | "depends_on";
+  context: string;
+}
+
 export interface StandupRecord {
   date: string;
   teamName: string;
@@ -37,6 +44,7 @@ export interface StandupRecord {
   blockers: Blocker[];
   decisions: Decision[];
   ticketMentions: TicketMention[];
+  relationships?: DetectedRelationship[];
 }
 
 export interface StandupFilter {
@@ -66,4 +74,11 @@ export interface StandupCardData {
   blockers: Blocker[];
   decisions: Decision[];
   ticketMentions: TicketMention[];
+}
+
+// ── Shared utilities ────────────────────────────────────────────
+
+/** Canonical person name — lowercase, trimmed, collapsed whitespace. */
+export function normalizePersonName(name: string): string {
+  return name.toLowerCase().trim().replace(/\s+/g, " ");
 }
