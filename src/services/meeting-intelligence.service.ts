@@ -104,7 +104,7 @@ export class MeetingIntelligenceService {
   private readonly configDisposable: vscode.Disposable;
   private migrationPromise: Promise<void> | null = null;
   private readonly traitExtractionQueue: Array<() => Promise<void>> = [];
-  private traitExtractionRunning = false;
+  private traitExtractionDrainPromise: Promise<void> | null = null;
 
   private constructor() {
     this.logger = Logger.initialize("MeetingIntelligenceService", {
@@ -846,17 +846,32 @@ Extract the standup data from the notes above into the JSON schema provided.`;
     }),
   );
 
+  private static readonly MAX_TRAIT_QUEUE_DEPTH = 20;
+  private static readonly TRAIT_EXTRACTION_DELAY_MS = 500;
+  private static readonly ROLE_CONFIDENCE_THRESHOLD = 3;
+  private static readonly MAX_EXPERTISE_TAGS = 20;
+
   /** Enqueue a trait extraction task (serial execution, rate-limit friendly). */
   private enqueueTraitExtraction(record: StandupRecord): void {
+    if (
+      this.traitExtractionQueue.length >=
+      MeetingIntelligenceService.MAX_TRAIT_QUEUE_DEPTH
+    ) {
+      this.logger.warn(
+        `Trait extraction queue full (${MeetingIntelligenceService.MAX_TRAIT_QUEUE_DEPTH}). ` +
+          `Dropping extraction for standup ${record.date}.`,
+      );
+      return;
+    }
     this.traitExtractionQueue.push(() =>
       this.extractTraitsForParticipants(record),
     );
-    this.drainTraitQueue();
+    if (!this.traitExtractionDrainPromise) {
+      this.traitExtractionDrainPromise = this.drainTraitQueue();
+    }
   }
 
   private async drainTraitQueue(): Promise<void> {
-    if (this.traitExtractionRunning) return;
-    this.traitExtractionRunning = true;
     while (this.traitExtractionQueue.length > 0) {
       const task = this.traitExtractionQueue.shift()!;
       try {
@@ -866,10 +881,11 @@ Extract the standup data from the notes above into the JSON schema provided.`;
           `Trait extraction failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      // Small delay between calls to respect rate limits
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) =>
+        setTimeout(r, MeetingIntelligenceService.TRAIT_EXTRACTION_DELAY_MS),
+      );
     }
-    this.traitExtractionRunning = false;
+    this.traitExtractionDrainPromise = null;
   }
 
   /**
@@ -949,11 +965,13 @@ JSON array:`;
           const candidates =
             (person.traits.roleCandidates as Record<string, number>) ?? {};
           candidates[entry.role] = (candidates[entry.role] ?? 0) + 1;
-          const ROLE_CONFIDENCE_THRESHOLD = 3;
           const topRole = Object.entries(candidates).sort(
             ([, a], [, b]) => b - a,
           )[0];
-          if (topRole && topRole[1] >= ROLE_CONFIDENCE_THRESHOLD) {
+          if (
+            topRole &&
+            topRole[1] >= MeetingIntelligenceService.ROLE_CONFIDENCE_THRESHOLD
+          ) {
             this.teamGraph.updateRole(person.id, topRole[0]);
           }
           this.teamGraph.updateTraits(person.id, {
@@ -963,10 +981,21 @@ JSON array:`;
 
         const newTraits: Record<string, unknown> = {};
         if (entry.expertise.length > 0) {
-          // Merge with existing expertise
-          const existing = (person.traits.expertise as string[]) ?? [];
-          const merged = [...new Set([...existing, ...entry.expertise])];
-          newTraits.expertise = merged;
+          // Frequency-scored, capped expertise: track counts, keep top N
+          const existingScores =
+            (person.traits.expertiseScores as Record<string, number>) ?? {};
+          for (const tag of entry.expertise) {
+            const normalized = tag.toLowerCase().trim();
+            if (normalized) {
+              existingScores[normalized] =
+                (existingScores[normalized] ?? 0) + 1;
+            }
+          }
+          const topTags = Object.entries(existingScores)
+            .sort(([, a], [, b]) => b - a)
+            .slice(0, MeetingIntelligenceService.MAX_EXPERTISE_TAGS);
+          newTraits.expertiseScores = Object.fromEntries(topTags);
+          newTraits.expertise = topTags.map(([k]) => k);
         }
         if (entry.workStyle) {
           newTraits.workStyle = entry.workStyle;
