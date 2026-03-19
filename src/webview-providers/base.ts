@@ -67,6 +67,7 @@ import {
   RulesHandler,
   SessionHandler,
   SettingsHandler,
+  StandupHandler,
 } from "./handlers";
 import { HandlerContext, MessageHandlerRegistry } from "./handlers/types";
 
@@ -255,6 +256,7 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
     this.handlerRegistry.register(new RulesHandler());
     this.handlerRegistry.register(new CheckpointHandler());
     this.handlerRegistry.register(new ComposerHandler());
+    this.handlerRegistry.register(new StandupHandler());
     this.handlerRegistry.register(
       new PerformanceHandler(
         () => this.performanceProfiler,
@@ -708,6 +710,85 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                   { command: "compact-history" },
                   ctx,
                 );
+                break;
+              }
+
+              // Handle /standup slash command
+              if (
+                typeof message.message === "string" &&
+                message.message.trim().toLowerCase().startsWith("/standup")
+              ) {
+                // Validate input before dispatching (Issue 10)
+                const standupValidation = this.inputValidator.validateInput(
+                  message.message,
+                  "chat",
+                );
+                if (standupValidation.blocked) {
+                  this.logger.warn(
+                    "Standup input blocked due to security concerns",
+                    {
+                      originalLength: message.message.length,
+                      warnings: standupValidation.warnings,
+                    },
+                  );
+                  await this.sendResponse(
+                    "⚠️ Your message contains potentially unsafe content and has been blocked. Please rephrase your input.",
+                    "bot",
+                  );
+                  break;
+                }
+                const standup_rest = message.message
+                  .trim()
+                  .substring("/standup".length)
+                  .trim();
+                const ctx: HandlerContext = {
+                  webview: _view,
+                  logger: this.logger,
+                  extensionUri: this._extensionUri,
+                  sendResponse: this.sendResponse.bind(this),
+                };
+
+                // Route sub-commands to their respective handlers
+                const subLower = standup_rest.toLowerCase();
+                if (
+                  subLower === "my-tasks" ||
+                  subLower.startsWith("my-tasks ")
+                ) {
+                  const person =
+                    standup_rest.substring("my-tasks".length).trim() ||
+                    undefined;
+                  await this.handlerRegistry.dispatch(
+                    { command: "standup-my-tasks", person },
+                    ctx,
+                  );
+                } else if (subLower === "blockers") {
+                  await this.handlerRegistry.dispatch(
+                    { command: "standup-blockers" },
+                    ctx,
+                  );
+                } else if (
+                  subLower === "history" ||
+                  subLower.startsWith("history ")
+                ) {
+                  const filter =
+                    standup_rest.substring("history".length).trim() ||
+                    undefined;
+                  await this.handlerRegistry.dispatch(
+                    { command: "standup-history", dateRange: filter },
+                    ctx,
+                  );
+                } else if (!standup_rest) {
+                  await this.sendResponse(
+                    "Usage: `/standup <paste your meeting notes>`\n\nSub-commands:\n- `/standup my-tasks` — your commitments\n- `/standup blockers` — active blockers\n- `/standup history` — past standups",
+                    "bot",
+                  );
+                } else {
+                  // Treat everything else as raw meeting notes to ingest
+                  await this.handlerRegistry.dispatch(
+                    { command: "standup-ingest", notes: standup_rest },
+                    ctx,
+                  );
+                }
                 break;
               }
 

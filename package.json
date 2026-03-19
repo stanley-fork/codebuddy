@@ -1047,6 +1047,11 @@
             },
             "default": [],
             "markdownDescription": "Ordered list of fallback providers to try when the primary fails. Leave empty to auto-detect from configured API keys."
+          },
+          "codebuddy.standup.myName": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Your name as it appears in standup/meeting notes (used to filter your action items). Falls back to `git config user.name` if empty."
           }
         }
       }

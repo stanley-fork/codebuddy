@@ -8,6 +8,7 @@ import { useSessionsStore } from "../stores/sessions.store";
 import { useNotificationsStore } from "../stores/notifications.store";
 import { useContentStore } from "../stores/content.store";
 import { useChatStore } from "../stores/chat.store";
+import { useStandupStore } from "../stores/standup.store";
 import type { IWebviewMessage } from "./useStreamingChat";
 
 interface ConfigData {
@@ -371,6 +372,40 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
               context: [],
               threadId,
             });
+          }
+          break;
+
+        // ── Meeting Intelligence ──
+        case "standup-result":
+          if (message.summary) {
+            useStandupStore.getState().addStandupSummary(message.summary);
+          }
+          useStandupStore.getState().setIngesting(false);
+          break;
+
+        case "standup-error":
+          useStandupStore
+            .getState()
+            .setError(message.error || "Meeting note parsing failed");
+          break;
+
+        case "standup-delete-result":
+          if (message.success) {
+            useStandupStore
+              .getState()
+              .confirmDelete(message.date, message.teamName);
+          } else {
+            useStandupStore
+              .getState()
+              .rollbackDelete(message.error || "Delete failed");
+          }
+          break;
+
+        case "standup-hydrate-result":
+          if (Array.isArray(message.summaries)) {
+            for (const s of message.summaries) {
+              useStandupStore.getState().addStandupSummary(s);
+            }
           }
           break;
 
