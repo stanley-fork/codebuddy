@@ -25,6 +25,12 @@ import type { StandupRecord } from "../../shared/standup.types";
 
 let tmpDir: string;
 
+// sql-wasm.wasm is not present in all CI environments (e.g. Windows runner).
+// Tests that require store.initialize() are skipped when the binary is missing.
+const WASM_AVAILABLE = fs.existsSync(
+  path.join(__dirname, "..", "..", "services", "grammars", "sql-wasm.wasm"),
+);
+
 function makeSampleRecord(): StandupRecord {
   return {
     date: "2026-03-17",
@@ -175,7 +181,8 @@ suite("LangChainTeamGraphTool — _call", () => {
     assert.ok(result.includes("not yet initialized"));
   });
 
-  test("returns error when person arg is missing for person_profile", async () => {
+  test("returns error when person arg is missing for person_profile", async function () {
+    if (!WASM_AVAILABLE) return this.skip();
     const store = TeamGraphStore.getInstance();
     await store.initialize();
     const result = await tool._call({
@@ -186,7 +193,8 @@ suite("LangChainTeamGraphTool — _call", () => {
     assert.ok(result.includes("'person' argument is required"));
   });
 
-  test("returns error when ticketId arg is missing for ticket_history", async () => {
+  test("returns error when ticketId arg is missing for ticket_history", async function () {
+    if (!WASM_AVAILABLE) return this.skip();
     const store = TeamGraphStore.getInstance();
     await store.initialize();
     const result = await tool._call({
@@ -197,7 +205,8 @@ suite("LangChainTeamGraphTool — _call", () => {
     assert.ok(result.includes("'ticketId' argument is required"));
   });
 
-  test("returns sanitized output for team_summary", async () => {
+  test("returns sanitized output for team_summary", async function () {
+    if (!WASM_AVAILABLE) return this.skip();
     const store = TeamGraphStore.getInstance();
     await store.initialize();
     store.storeStandup(makeSampleRecord());
@@ -209,7 +218,8 @@ suite("LangChainTeamGraphTool — _call", () => {
     assert.ok(!result.includes("<system>"));
   });
 
-  test("returns sanitized person profile", async () => {
+  test("returns sanitized person profile", async function () {
+    if (!WASM_AVAILABLE) return this.skip();
     const store = TeamGraphStore.getInstance();
     await store.initialize();
     store.storeStandup(makeSampleRecord());
@@ -221,7 +231,8 @@ suite("LangChainTeamGraphTool — _call", () => {
     assert.ok(result.includes("Alice Smith"));
   });
 
-  test("returns sanitized ticket history", async () => {
+  test("returns sanitized ticket history", async function () {
+    if (!WASM_AVAILABLE) return this.skip();
     const store = TeamGraphStore.getInstance();
     await store.initialize();
     store.storeStandup(makeSampleRecord());
@@ -233,7 +244,8 @@ suite("LangChainTeamGraphTool — _call", () => {
     assert.ok(result.includes("100"));
   });
 
-  test("sanitizes injection patterns in store output", async () => {
+  test("sanitizes injection patterns in store output", async function () {
+    if (!WASM_AVAILABLE) return this.skip();
     const store = TeamGraphStore.getInstance();
     await store.initialize();
     // Create a person with a name that contains injection text

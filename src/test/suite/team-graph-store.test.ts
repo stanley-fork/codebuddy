@@ -30,6 +30,12 @@ import {
 } from "../../services/team-graph-store";
 import type { StandupRecord } from "../../shared/standup.types";
 
+// sql-wasm.wasm is not present in all CI environments (e.g. Windows runner).
+// Suites that require store.initialize() are skipped when the binary is missing.
+const WASM_AVAILABLE = fs.existsSync(
+  path.join(__dirname, "..", "..", "services", "grammars", "sql-wasm.wasm"),
+);
+
 // ── Test Helpers ─────────────────────────────────────────────────
 
 let tmpDir: string;
@@ -79,6 +85,8 @@ function makeSampleRecord(overrides: Partial<StandupRecord> = {}): StandupRecord
 // ── Lifecycle & isReady ──────────────────────────────────────────
 
 suite("TeamGraphStore — Lifecycle", () => {
+  suiteSetup(function () { if (!WASM_AVAILABLE) this.skip(); });
+
   setup(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tgs-test-"));
     sinon.stub(vscode.workspace, "workspaceFolders").value([
@@ -125,6 +133,8 @@ suite("TeamGraphStore — Lifecycle", () => {
 // ── Person CRUD ──────────────────────────────────────────────────
 
 suite("TeamGraphStore — Person CRUD", () => {
+  suiteSetup(function () { if (!WASM_AVAILABLE) this.skip(); });
+
   let store: TeamGraphStore;
 
   setup(async () => {
@@ -223,6 +233,8 @@ suite("TeamGraphStore — Person CRUD", () => {
 // ── Standup Ingest & Load ────────────────────────────────────────
 
 suite("TeamGraphStore — Standup Ingest", () => {
+  suiteSetup(function () { if (!WASM_AVAILABLE) this.skip(); });
+
   let store: TeamGraphStore;
 
   setup(async () => {
@@ -333,6 +345,8 @@ suite("TeamGraphStore — Standup Ingest", () => {
 // ── Query Methods ────────────────────────────────────────────────
 
 suite("TeamGraphStore — Query Methods", () => {
+  suiteSetup(function () { if (!WASM_AVAILABLE) this.skip(); });
+
   let store: TeamGraphStore;
 
   setup(async () => {
@@ -516,6 +530,8 @@ suite("TeamGraphStore — isReady guards", () => {
 // ── Persistence ──────────────────────────────────────────────────
 
 suite("TeamGraphStore — Persistence", () => {
+  suiteSetup(function () { if (!WASM_AVAILABLE) this.skip(); });
+
   setup(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tgs-test-"));
     sinon.stub(vscode.workspace, "workspaceFolders").value([
