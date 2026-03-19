@@ -389,6 +389,26 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
             .setError(message.error || "Meeting note parsing failed");
           break;
 
+        case "standup-delete-result":
+          if (message.success) {
+            useStandupStore
+              .getState()
+              .confirmDelete(message.date, message.teamName);
+          } else {
+            useStandupStore
+              .getState()
+              .rollbackDelete(message.error || "Delete failed");
+          }
+          break;
+
+        case "standup-hydrate-result":
+          if (Array.isArray(message.summaries)) {
+            for (const s of message.summaries) {
+              useStandupStore.getState().addStandupSummary(s);
+            }
+          }
+          break;
+
         default:
           break;
       }

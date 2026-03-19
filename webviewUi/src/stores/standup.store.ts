@@ -16,6 +16,8 @@ interface StandupState {
   isIngesting: boolean;
   /** Last error message (cleared on next operation). */
   lastError: string | null;
+  /** Key of item currently being deleted ("date-teamName"). */
+  deletingKey: string | null;
 
   // ── Actions ──
 
@@ -37,8 +39,14 @@ interface StandupState {
   setIngesting: (val: boolean) => void;
   /** Set error. */
   setError: (err: string | null) => void;
-  /** Delete a standup by date+team. */
+  /** Request deletion — marks item as pending until backend confirms. */
   deleteStandup: (date: string, teamName: string) => void;
+  /** Backend confirmed deletion succeeded. */
+  confirmDelete: (date: string, teamName: string) => void;
+  /** Backend reported deletion failed — rollback. */
+  rollbackDelete: (error: string) => void;
+  /** Request stored standup summaries from the backend (rehydrate on webview load). */
+  hydrate: () => void;
 }
 
 export const useStandupStore = create<StandupState>()((set, get) => {
@@ -55,6 +63,7 @@ export const useStandupStore = create<StandupState>()((set, get) => {
     recentStandups: [],
     isIngesting: false,
     lastError: null,
+    deletingKey: null,
 
     ingestNotes: (notes: string) => {
       clearIngestTimeout();
@@ -107,12 +116,23 @@ export const useStandupStore = create<StandupState>()((set, get) => {
       set({ lastError: err, isIngesting: false });
     },
     deleteStandup: (date: string, teamName: string) => {
+      const key = `${date}-${teamName}`;
+      set({ deletingKey: key, lastError: null });
       vscode.postMessage({ command: "standup-delete", date, teamName });
+    },
+    confirmDelete: (date: string, teamName: string) => {
       set((s) => ({
+        deletingKey: null,
         recentStandups: s.recentStandups.filter(
           (r) => !(r.date === date && r.teamName === teamName),
         ),
       }));
+    },
+    rollbackDelete: (error: string) => {
+      set({ deletingKey: null, lastError: error });
+    },
+    hydrate: () => {
+      vscode.postMessage({ command: "standup-hydrate" });
     },
   };
 });

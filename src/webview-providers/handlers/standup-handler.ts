@@ -18,12 +18,15 @@ type StandupDeleteMessage = {
   teamName: string;
 };
 
+type StandupHydrateMessage = { command: "standup-hydrate" };
+
 type StandupMessage =
   | StandupIngestMessage
   | StandupMyTasksMessage
   | StandupBlockersMessage
   | StandupHistoryMessage
-  | StandupDeleteMessage;
+  | StandupDeleteMessage
+  | StandupHydrateMessage;
 
 const STANDUP_COMMANDS = [
   "standup-ingest",
@@ -31,6 +34,7 @@ const STANDUP_COMMANDS = [
   "standup-blockers",
   "standup-history",
   "standup-delete",
+  "standup-hydrate",
 ] as const;
 
 function isStandupMessage(msg: unknown): msg is StandupMessage {
@@ -48,6 +52,12 @@ function isStandupMessage(msg: unknown): msg is StandupMessage {
 
 export class StandupHandler implements WebviewMessageHandler {
   readonly commands = [...STANDUP_COMMANDS];
+
+  /** Maximum notes size accepted (characters). */
+  private static readonly MAX_NOTES_SIZE = 50_000;
+  /** Minimum interval between ingest calls (ms). */
+  private static readonly INGEST_COOLDOWN_MS = 5_000;
+  private lastIngestTime = 0;
 
   async handle(message: unknown, ctx: HandlerContext): Promise<void> {
     if (!isStandupMessage(message)) {
@@ -71,6 +81,26 @@ export class StandupHandler implements WebviewMessageHandler {
             );
             return;
           }
+
+          // Size cap
+          if (message.notes.length > StandupHandler.MAX_NOTES_SIZE) {
+            await ctx.sendResponse(
+              `Error: Notes too large (${(message.notes.length / 1000).toFixed(0)}k chars). Max ${StandupHandler.MAX_NOTES_SIZE / 1000}k.`,
+              "bot",
+            );
+            return;
+          }
+
+          // Rate limiting
+          const now = Date.now();
+          if (now - this.lastIngestTime < StandupHandler.INGEST_COOLDOWN_MS) {
+            await ctx.sendResponse(
+              "Please wait a few seconds before submitting again.",
+              "bot",
+            );
+            return;
+          }
+          this.lastIngestTime = now;
           await ctx.sendResponse("⏳ Parsing standup notes...", "bot");
           const { cardJson, record } = await svc.ingestStructured(
             message.notes,
@@ -144,6 +174,14 @@ export class StandupHandler implements WebviewMessageHandler {
             message.date,
             message.teamName,
           );
+          // Notify webview store of the deletion result
+          await ctx.webview.webview.postMessage({
+            command: "standup-delete-result",
+            success: deleted,
+            date: message.date,
+            teamName: message.teamName,
+            error: deleted ? undefined : `No standup found for ${message.date}`,
+          });
           if (deleted) {
             await ctx.sendResponse(
               `Deleted standup for ${message.date} — ${message.teamName || "Unknown Team"}.`,
@@ -155,6 +193,15 @@ export class StandupHandler implements WebviewMessageHandler {
               "bot",
             );
           }
+          break;
+        }
+
+        case "standup-hydrate": {
+          const summaries = await svc.getRecentSummaries();
+          await ctx.webview.webview.postMessage({
+            command: "standup-hydrate-result",
+            summaries,
+          });
           break;
         }
       }

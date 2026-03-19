@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import styled, { keyframes } from "styled-components";
-import { sanitizeText } from "../../utils/sanitize";
+import { sanitizeText, sanitizeTicketId } from "../../utils/sanitize";
 
 /* ─── Types (canonical definitions in src/shared/standup.types.ts) ─── */
 /* Re-exported here so existing imports from MessageRenderer keep working. */
@@ -291,11 +291,13 @@ const StandupCard: React.FC<StandupCardProps> = ({
       person: sanitizeText(c.person, 100),
       action: sanitizeText(c.action),
       deadline: c.deadline ? sanitizeText(c.deadline, 100) : c.deadline,
+      ticketIds: c.ticketIds.map(sanitizeTicketId).filter(Boolean),
     })),
     otherCommitments: data.otherCommitments.map(c => ({
       ...c,
       person: sanitizeText(c.person, 100),
       action: sanitizeText(c.action),
+      ticketIds: c.ticketIds.map(sanitizeTicketId).filter(Boolean),
     })),
     blockers: data.blockers.map(b => ({
       blocked: sanitizeText(b.blocked),
@@ -315,9 +317,18 @@ const StandupCard: React.FC<StandupCardProps> = ({
     })),
   }), [data]);
 
+  /** Simple string hash for stable React keys. */
+  const hashKey = (s: string): number => {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) {
+      h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+    }
+    return h >>> 0;
+  };
+
   /** Stable keys for commitments, blockers, and decisions. */
   const stableKey = (prefix: string, text: string, index: number) =>
-    `${prefix}-${text.slice(0, 40)}-${index}`;
+    `${prefix}-${hashKey(text)}-${index}`;
 
   const commitmentKeys = useMemo(
     () =>

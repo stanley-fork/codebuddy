@@ -81,10 +81,9 @@ suite("LangChainStandupTool", () => {
   // Import inline to avoid vscode module issues in test runner
   let LangChainStandupTool: any;
 
-  setup(() => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    LangChainStandupTool =
-      require("../../agents/langgraph/tools/standup").LangChainStandupTool;
+  setup(async () => {
+    const mod = await import("../../agents/langgraph/tools/standup");
+    LangChainStandupTool = mod.LangChainStandupTool;
   });
 
   teardown(() => {
