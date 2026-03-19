@@ -4,6 +4,8 @@ import { BotMessage } from "./botMessage";
 import SearchResultCard from "./SearchResultCard";
 import CodeAnalysisCard from "./CodeAnalysisCard";
 import ErrorCard from "./ErrorCard";
+import StandupCard from "./standup/StandupCard";
+import type { StandupCardData } from "./standup/StandupCard";
 
 /**
  * Filters out JSON tool/command metadata that shouldn't be displayed to users
@@ -62,7 +64,7 @@ interface CodeAnalysis {
   keyPoints?: string[];
 }
 
-type StructuredContent = SynthesizedSearch | CodeAnalysis;
+type StructuredContent = SynthesizedSearch | CodeAnalysis | StandupCardData;
 
 interface MessageRendererProps {
   content: string;
@@ -74,27 +76,35 @@ interface MessageRendererProps {
  * Attempts to detect and parse structured content from message
  */
 function parseStructuredContent(content: string): StructuredContent | null {
-  // Try to find JSON block in the content
-  try {
-    // First: check if entire content is JSON
-    const parsed = JSON.parse(content);
-    if (parsed.type === "synthesized_search" || parsed.type === "code_analysis") {
-      return parsed as StructuredContent;
-    }
-  } catch {
-    // Not pure JSON, continue checking
-  }
-
-  // Look for embedded JSON in markdown code blocks
-  const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)```/);
-  if (jsonBlockMatch) {
+  // Skip parsing for very large messages or those that clearly aren't JSON
+  if (content.length > 50_000 || (!content.startsWith("{") && !content.includes("```json"))) {
+    // Still check for source/code-analysis patterns below
+  } else {
+    // Try to find JSON block in the content
     try {
-      const parsed = JSON.parse(jsonBlockMatch[1]);
+      // First: check if entire content is JSON
+      const parsed = JSON.parse(content);
       if (parsed.type === "synthesized_search" || parsed.type === "code_analysis") {
         return parsed as StructuredContent;
       }
+      if (parsed.type === "standup_brief") {
+        return parsed as StandupCardData;
+      }
     } catch {
-      // Invalid JSON in block
+      // Not pure JSON, continue checking
+    }
+
+    // Look for embedded JSON in markdown code blocks
+    const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)```/);
+    if (jsonBlockMatch) {
+      try {
+        const parsed = JSON.parse(jsonBlockMatch[1]);
+        if (parsed.type === "synthesized_search" || parsed.type === "code_analysis") {
+          return parsed as StructuredContent;
+        }
+      } catch {
+        // Invalid JSON in block
+      }
     }
   }
 
@@ -254,6 +264,9 @@ const MessageRenderer: React.FC<MessageRendererProps> = ({
             keyPoints={parsedContent.keyPoints}
           />
         );
+
+      case "standup_brief":
+        return <StandupCard data={parsedContent as StandupCardData} />;
 
       default:
         break;
