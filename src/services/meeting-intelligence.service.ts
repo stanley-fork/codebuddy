@@ -91,7 +91,7 @@ export class MeetingIntelligenceService {
     null;
   private ingestQueue: Promise<unknown> = Promise.resolve();
   private readonly configDisposable: vscode.Disposable;
-  private migrated = false;
+  private migrationPromise: Promise<void> | null = null;
 
   private constructor() {
     this.logger = Logger.initialize("MeetingIntelligenceService", {
@@ -213,7 +213,14 @@ export class MeetingIntelligenceService {
     const result = this.ingestQueue.then(async () => {
       await this.ensureGraph();
       const record = await this.parseStandup(rawNotes);
-      this.teamGraph.storeStandup(record);
+      try {
+        this.teamGraph.storeStandup(record);
+      } catch (storeErr) {
+        this.logger.error(
+          `Failed to store standup: ${storeErr instanceof Error ? storeErr.message : String(storeErr)}`,
+        );
+        throw storeErr;
+      }
       this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
       const myName = await this.resolveMyName();
       return this.formatPersonalBrief(record, myName);
@@ -232,7 +239,14 @@ export class MeetingIntelligenceService {
     const result = this.ingestQueue.then(async () => {
       await this.ensureGraph();
       const record = await this.parseStandup(rawNotes);
-      this.teamGraph.storeStandup(record);
+      try {
+        this.teamGraph.storeStandup(record);
+      } catch (storeErr) {
+        this.logger.error(
+          `Failed to store standup: ${storeErr instanceof Error ? storeErr.message : String(storeErr)}`,
+        );
+        throw storeErr;
+      }
       this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
       const myName = await this.resolveMyName();
 
@@ -708,10 +722,15 @@ Extract the standup data from the notes above into the JSON schema provided.`;
   /** Ensure the graph database is initialised and legacy data migrated. */
   private async ensureGraph(): Promise<void> {
     await this.teamGraph.ensureInitialized();
-    if (!this.migrated) {
-      await this.migrateFromMemoryTool();
-      this.migrated = true;
+    if (!this.migrationPromise) {
+      this.migrationPromise = this.migrateFromMemoryTool().catch((err) => {
+        this.migrationPromise = null;
+        this.logger.warn(
+          `Migration failed, will retry: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
     }
+    await this.migrationPromise;
   }
 
   /**

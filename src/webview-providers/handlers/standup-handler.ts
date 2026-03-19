@@ -101,7 +101,6 @@ export class StandupHandler implements WebviewMessageHandler {
             return;
           }
           this.lastIngestTime = now;
-          await ctx.sendResponse("⏳ Parsing standup notes...", "bot");
           const { cardJson, record } = await svc.ingestStructured(
             message.notes,
           );
