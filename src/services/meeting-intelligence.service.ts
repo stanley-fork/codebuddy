@@ -75,6 +75,17 @@ const StandupRecordSchema = z.object({
       }),
     )
     .default([]),
+  relationships: z
+    .array(
+      z.object({
+        from: z.string(),
+        to: z.string(),
+        kind: z.enum(["reviews_for", "reports_to", "mentors"]),
+        context: z.string(),
+      }),
+    )
+    .optional()
+    .default([]),
 });
 
 /**
@@ -222,6 +233,12 @@ export class MeetingIntelligenceService {
         throw storeErr;
       }
       this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
+      // Fire-and-forget trait extraction (non-blocking enrichment)
+      this.extractTraitsForParticipants(record).catch((err) =>
+        this.logger.warn(
+          `Trait extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
       const myName = await this.resolveMyName();
       return this.formatPersonalBrief(record, myName);
     });
@@ -248,6 +265,11 @@ export class MeetingIntelligenceService {
         throw storeErr;
       }
       this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
+      this.extractTraitsForParticipants(record).catch((err) =>
+        this.logger.warn(
+          `Trait extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
       const myName = await this.resolveMyName();
 
       const myCommitments = record.commitments.filter((c) =>
@@ -477,6 +499,14 @@ Return ONLY valid JSON matching the schema. No markdown, no explanation.
       "context": "what was said about it",
       "assignee": "person or null"
     }
+  ],
+  "relationships": [
+    {
+      "from": "Person A",
+      "to": "Person B",
+      "kind": "reviews_for | reports_to | mentors",
+      "context": "brief reason this relationship was inferred"
+    }
   ]
 }
 
@@ -486,6 +516,11 @@ Rules:
 - Each person's update should produce at least one commitment
 - Look for dependency language: "blocks", "depends on", "needs X first", "unblock"
 - Look for decision language: "agreed", "decided", "will focus on", "prioritize"
+- For relationships, detect:
+  - "reviews_for": code review, reviewing MR/PR, approval language
+  - "reports_to": manager, lead, escalation, "report to", status updates directed at someone
+  - "mentors": pair programming, onboarding, teaching, "showing X how to"
+- Only emit relationships you are confident about from the text. Omit if unsure.
 
 [MEETING NOTES START — ${startTag}]
 ${escapedNotes}
@@ -781,6 +816,119 @@ Extract the standup data from the notes above into the JSON schema provided.`;
     } catch (err: unknown) {
       this.logger.warn(
         `MemoryTool migration failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  // ── Trait Extraction (Phase 1) ──────────────────────────────────
+
+  /** Schema for the trait extraction LLM output. */
+  private static readonly TraitExtractionSchema = z.array(
+    z.object({
+      name: z.string(),
+      role: z.string().nullable().optional(),
+      expertise: z.array(z.string()).default([]),
+      workStyle: z.string().nullable().optional(),
+    }),
+  );
+
+  /**
+   * Extract role/expertise/work-style traits from a standup record's
+   * commitments. Runs as a background LLM call after each ingest.
+   */
+  private async extractTraitsForParticipants(
+    record: StandupRecord,
+  ): Promise<void> {
+    if (record.participants.length === 0) return;
+
+    const llm = this.getLLM();
+    if (!llm) return;
+
+    // Build a concise summary of each person's actions for the LLM
+    const personSummaries = record.participants.map((name) => {
+      const commitments = record.commitments
+        .filter(
+          (c) => c.person.toLowerCase().trim() === name.toLowerCase().trim(),
+        )
+        .map((c) => c.action)
+        .join("; ");
+      return `- ${name}: ${commitments || "participated (no specific commitments)"}`;
+    });
+
+    const prompt = `You are a team analyst. Given the standup actions below, infer each person's likely role, expertise areas, and work style.
+
+Return ONLY a JSON array. No markdown, no explanation.
+
+Schema for each element:
+{
+  "name": "Full Name",
+  "role": "inferred role (e.g. Frontend Engineer, DevOps, QA) or null if unclear",
+  "expertise": ["topic1", "topic2"],
+  "workStyle": "one of: fast-mover, methodical, proactive-unblocker, specialist, generalist, or null"
+}
+
+Standup actions:
+${personSummaries.join("\n")}
+
+JSON array:`;
+
+    try {
+      const response = await Promise.race([
+        llm.generateText(prompt),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Trait extraction timed out")),
+            15_000,
+          ),
+        ),
+      ]);
+      if (!response) return;
+
+      const cleaned = response
+        .replace(/^```(?:json)?\s*/m, "")
+        .replace(/\s*```$/m, "")
+        .trim();
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch {
+        return;
+      }
+
+      const result =
+        MeetingIntelligenceService.TraitExtractionSchema.safeParse(parsed);
+      if (!result.success) return;
+
+      for (const entry of result.data) {
+        const person = this.teamGraph.getPersonByName(entry.name);
+        if (!person) continue;
+
+        if (entry.role && !person.role) {
+          this.teamGraph.updateRole(person.id, entry.role);
+        }
+
+        const newTraits: Record<string, unknown> = {};
+        if (entry.expertise.length > 0) {
+          // Merge with existing expertise
+          const existing = (person.traits.expertise as string[]) ?? [];
+          const merged = [...new Set([...existing, ...entry.expertise])];
+          newTraits.expertise = merged;
+        }
+        if (entry.workStyle) {
+          newTraits.workStyle = entry.workStyle;
+        }
+        if (Object.keys(newTraits).length > 0) {
+          this.teamGraph.updateTraits(person.id, newTraits);
+        }
+      }
+
+      this.logger.info(
+        `Extracted traits for ${result.data.length} participant(s)`,
+      );
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Trait extraction LLM call failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
