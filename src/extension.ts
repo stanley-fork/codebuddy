@@ -63,6 +63,8 @@ import { GitWatchdogTask } from "./services/tasks/git-watchdog.task";
 import { EndOfDaySummaryTask } from "./services/tasks/end-of-day-summary.task";
 import { CodebuddyIgnoreService } from "./services/codebuddy-ignore.service";
 import { ExternalSecurityConfigService } from "./services/external-security-config.service";
+import { DeepTerminalService } from "./services/deep-terminal.service";
+import { setSecurityPolicy as setBrowserSecurityPolicy } from "./webview-providers/handlers/browser-handler";
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -208,6 +210,10 @@ export async function activate(context: vscode.ExtensionContext) {
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     await externalSecurityConfig.initialize(workspacePath);
     context.subscriptions.push(externalSecurityConfig);
+
+    // Inject security policy into terminal and browser handler (DI — no circular imports)
+    DeepTerminalService.getInstance().setSecurityPolicy(externalSecurityConfig);
+    setBrowserSecurityPolicy(externalSecurityConfig);
 
     // Initialize Terminal with extension path early for Docker Compose support
     const terminal = Terminal.getInstance();
@@ -418,22 +424,30 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     // Register External Security Config commands
+    const securityChannel =
+      vscode.window.createOutputChannel("CodeBuddy Security");
+    context.subscriptions.push(securityChannel);
+
     context.subscriptions.push(
       vscode.commands.registerCommand(
         "codebuddy.openSecurityConfig",
         async () => {
           const svc = ExternalSecurityConfigService.getInstance();
           const configPath = svc.getConfigPath();
-          if (!fs.existsSync(configPath)) {
+          if (!configPath || !fs.existsSync(configPath)) {
             const action = await vscode.window.showInformationMessage(
-              "No external security config found. Create one?",
+              "No security config found. Create .codebuddy/security.json?",
               "Create",
               "Cancel",
             );
             if (action === "Create") {
               await svc.scaffoldDefaultConfig();
-              const doc = await vscode.workspace.openTextDocument(configPath);
-              await vscode.window.showTextDocument(doc);
+              const updatedPath = svc.getConfigPath();
+              if (updatedPath && fs.existsSync(updatedPath)) {
+                const doc =
+                  await vscode.workspace.openTextDocument(updatedPath);
+                await vscode.window.showTextDocument(doc);
+              }
             }
             return;
           }
@@ -446,10 +460,10 @@ export async function activate(context: vscode.ExtensionContext) {
         async () => {
           const svc = ExternalSecurityConfigService.getInstance();
           const diagnostics = svc.getDiagnostics();
-          const channel =
-            vscode.window.createOutputChannel("CodeBuddy Security");
-          channel.clear();
-          channel.appendLine("=== CodeBuddy Security Diagnostics ===\n");
+          securityChannel.clear();
+          securityChannel.appendLine(
+            "=== CodeBuddy Security Diagnostics ===\n",
+          );
           for (const d of diagnostics) {
             const icon =
               d.severity === "critical"
@@ -457,12 +471,14 @@ export async function activate(context: vscode.ExtensionContext) {
                 : d.severity === "warn"
                   ? "⚠️"
                   : "ℹ️";
-            channel.appendLine(
+            securityChannel.appendLine(
               `${icon} [${d.severity.toUpperCase()}] ${d.message}`,
             );
           }
-          channel.appendLine(`\nTotal: ${diagnostics.length} finding(s)`);
-          channel.show();
+          securityChannel.appendLine(
+            `\nTotal: ${diagnostics.length} finding(s)`,
+          );
+          securityChannel.show();
         },
       ),
     );

@@ -2,6 +2,15 @@ import * as vscode from "vscode";
 import { WebviewMessageHandler, HandlerContext } from "./types";
 import { AgentService } from "../../services/agent-state";
 import type { MCPToolResult } from "../../MCP/types";
+import type { ISecurityPolicy } from "../../services/security-policy.interface";
+
+/** Module-level security policy reference — set via {@link setSecurityPolicy}. */
+let securityPolicy: ISecurityPolicy | null = null;
+
+/** Inject the security policy once during extension activation. */
+export function setSecurityPolicy(policy: ISecurityPolicy): void {
+  securityPolicy = policy;
+}
 
 /** Article shape used throughout scraping — compatible with Readability.parse() output */
 interface ScrapedArticle {
@@ -45,24 +54,9 @@ export function validateArticleUrl(rawUrl: string): URL {
     throw new Error("URL exceeds maximum length");
   }
 
-  // Check external security config network policies
-  try {
-    const {
-      ExternalSecurityConfigService,
-    } = require("../../services/external-security-config.service");
-    const extSec = ExternalSecurityConfigService.getInstance();
-    if (!extSec.isUrlAllowed(rawUrl)) {
-      throw new Error(`Blocked by external security policy: ${rawUrl}`);
-    }
-  } catch (err: unknown) {
-    // Re-throw our own policy blocks
-    if (
-      err instanceof Error &&
-      err.message.startsWith("Blocked by external security policy")
-    ) {
-      throw err;
-    }
-    // External config not loaded — allow (fail-open for URL validation)
+  // Check injected security policy (fail-closed when injected)
+  if (securityPolicy && !securityPolicy.isUrlAllowed(rawUrl)) {
+    throw new Error(`Blocked by external security policy: ${rawUrl}`);
   }
 
   return parsed;
