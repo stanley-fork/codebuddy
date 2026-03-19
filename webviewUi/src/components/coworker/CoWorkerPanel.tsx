@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import styled from "styled-components";
 import { vscode } from "../../utils/vscode";
 import { useStandupStore } from "../../stores/standup.store";
@@ -403,10 +403,15 @@ export const CoWorkerPanel: React.FC<CoWorkerPanelProps> = ({
   onEndOfDaySummaryChange,
 }) => {
   const [notesInput, setNotesInput] = useState("");
-  const { isIngesting, lastError, recentStandups, ingestNotes, requestMyTasks, requestBlockers, requestHistory, deleteStandup } =
+  const { isIngesting, lastError, recentStandups, ingestNotes, requestMyTasks, requestBlockers, requestHistory, deleteStandup, deletingKey, hydrate } =
     useStandupStore();
+
+  // Rehydrate recent standups from backend when panel opens
+  useEffect(() => {
+    if (isOpen && recentStandups.length === 0) hydrate();
+  }, [isOpen, recentStandups.length, hydrate]);
   const handleIngest = () => {
-    if (!notesInput.trim()) return;
+    if (!notesInput.trim() || isIngesting) return;
     ingestNotes(notesInput.trim());
     setNotesInput("");
   };
@@ -511,10 +516,11 @@ export const CoWorkerPanel: React.FC<CoWorkerPanelProps> = ({
                     </div>
                     <DeleteButton
                       onClick={() => deleteStandup(s.date, s.teamName)}
+                      disabled={deletingKey === `${s.date}-${s.teamName}`}
                       title={`Delete standup for ${s.date}`}
                       aria-label={`Delete standup for ${s.date}`}
                     >
-                      🗑
+                      {deletingKey === `${s.date}-${s.teamName}` ? "⏳" : "🗑"}
                     </DeleteButton>
                   </RecentItem>
                 ))}

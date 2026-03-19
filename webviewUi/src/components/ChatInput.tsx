@@ -238,6 +238,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
     onSendRef.current(userInput, mentioned);
     setUserInput("");
     setMentionOpen(false);
+    setSlashOpen(false);
     clearReaderContext(null);
   }, [userInput, disabled, clearReaderContext]);
 

@@ -1,41 +1,12 @@
-export interface Commitment {
-  person: string;
-  action: string;
-  deadline?: string;
-  ticketIds: string[];
-  status: "pending" | "done";
-}
-
-export interface Blocker {
-  blocked: string;
-  blockedBy: string;
-  owner: string;
-  reason: string;
-}
-
-export interface Decision {
-  summary: string;
-  participants: string[];
-}
-
-export interface TicketMention {
-  id: string;
-  context: string;
-  assignee?: string;
-}
-
-export interface StandupRecord {
-  date: string;
-  teamName: string;
-  participants: string[];
-  commitments: Commitment[];
-  blockers: Blocker[];
-  decisions: Decision[];
-  ticketMentions: TicketMention[];
-}
-
-export interface StandupFilter {
-  person?: string;
-  dateRange?: string;
-  ticketId?: string;
-}
+/**
+ * Re-export from the single source of truth in `src/shared/standup.types.ts`.
+ * Kept for backwards compatibility — new code should import from shared directly.
+ */
+export type {
+  Commitment,
+  Blocker,
+  Decision,
+  TicketMention,
+  StandupRecord,
+  StandupFilter,
+} from "../shared/standup.types";

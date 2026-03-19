@@ -9,3 +9,12 @@ export function sanitizeText(input: unknown, maxLength = 500): string {
     .replace(/[<>]/g, (c) => (c === "<" ? "&lt;" : "&gt;"))
     .trim();
 }
+
+/**
+ * Sanitize a ticket/MR ID — allow only alphanumeric + common separators.
+ * This is stricter than sanitizeText because IDs should never contain HTML.
+ */
+export function sanitizeTicketId(input: unknown): string {
+  if (typeof input !== "string") return "";
+  return input.replace(/[^a-zA-Z0-9\-_]/g, "").slice(0, 30);
+}

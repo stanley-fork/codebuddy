@@ -76,30 +76,35 @@ interface MessageRendererProps {
  * Attempts to detect and parse structured content from message
  */
 function parseStructuredContent(content: string): StructuredContent | null {
-  // Try to find JSON block in the content
-  try {
-    // First: check if entire content is JSON
-    const parsed = JSON.parse(content);
-    if (parsed.type === "synthesized_search" || parsed.type === "code_analysis") {
-      return parsed as StructuredContent;
-    }
-    if (parsed.type === "standup_brief") {
-      return parsed as StandupCardData;
-    }
-  } catch {
-    // Not pure JSON, continue checking
-  }
-
-  // Look for embedded JSON in markdown code blocks
-  const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)```/);
-  if (jsonBlockMatch) {
+  // Skip parsing for very large messages or those that clearly aren't JSON
+  if (content.length > 50_000 || (!content.startsWith("{") && !content.includes("```json"))) {
+    // Still check for source/code-analysis patterns below
+  } else {
+    // Try to find JSON block in the content
     try {
-      const parsed = JSON.parse(jsonBlockMatch[1]);
+      // First: check if entire content is JSON
+      const parsed = JSON.parse(content);
       if (parsed.type === "synthesized_search" || parsed.type === "code_analysis") {
         return parsed as StructuredContent;
       }
+      if (parsed.type === "standup_brief") {
+        return parsed as StandupCardData;
+      }
     } catch {
-      // Invalid JSON in block
+      // Not pure JSON, continue checking
+    }
+
+    // Look for embedded JSON in markdown code blocks
+    const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)```/);
+    if (jsonBlockMatch) {
+      try {
+        const parsed = JSON.parse(jsonBlockMatch[1]);
+        if (parsed.type === "synthesized_search" || parsed.type === "code_analysis") {
+          return parsed as StructuredContent;
+        }
+      } catch {
+        // Invalid JSON in block
+      }
     }
   }
 

@@ -34,6 +34,7 @@ const StandupToolSchema = z.object({
 
 type StandupToolInput = z.infer<typeof StandupToolSchema>;
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- LangChain's StructuredTool generic causes infinite type instantiation with complex Zod schemas
 export class LangChainStandupTool extends StructuredTool<any> {
   private readonly logger: Logger;
 
