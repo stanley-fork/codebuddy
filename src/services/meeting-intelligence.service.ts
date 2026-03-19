@@ -80,7 +80,7 @@ const StandupRecordSchema = z.object({
       z.object({
         from: z.string(),
         to: z.string(),
-        kind: z.enum(["reviews_for", "reports_to", "mentors"]),
+        kind: z.enum(["reviews_for", "reports_to", "mentors", "depends_on"]),
         context: z.string(),
       }),
     )
@@ -103,6 +103,8 @@ export class MeetingIntelligenceService {
   private ingestQueue: Promise<unknown> = Promise.resolve();
   private readonly configDisposable: vscode.Disposable;
   private migrationPromise: Promise<void> | null = null;
+  private readonly traitExtractionQueue: Array<() => Promise<void>> = [];
+  private traitExtractionRunning = false;
 
   private constructor() {
     this.logger = Logger.initialize("MeetingIntelligenceService", {
@@ -233,12 +235,8 @@ export class MeetingIntelligenceService {
         throw storeErr;
       }
       this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
-      // Fire-and-forget trait extraction (non-blocking enrichment)
-      this.extractTraitsForParticipants(record).catch((err) =>
-        this.logger.warn(
-          `Trait extraction failed: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      // Enqueue background trait extraction (non-blocking enrichment)
+      this.enqueueTraitExtraction(record);
       const myName = await this.resolveMyName();
       return this.formatPersonalBrief(record, myName);
     });
@@ -265,11 +263,7 @@ export class MeetingIntelligenceService {
         throw storeErr;
       }
       this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
-      this.extractTraitsForParticipants(record).catch((err) =>
-        this.logger.warn(
-          `Trait extraction failed: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      this.enqueueTraitExtraction(record);
       const myName = await this.resolveMyName();
 
       const myCommitments = record.commitments.filter((c) =>
@@ -504,7 +498,7 @@ Return ONLY valid JSON matching the schema. No markdown, no explanation.
     {
       "from": "Person A",
       "to": "Person B",
-      "kind": "reviews_for | reports_to | mentors",
+      "kind": "reviews_for | reports_to | mentors | depends_on",
       "context": "brief reason this relationship was inferred"
     }
   ]
@@ -520,6 +514,7 @@ Rules:
   - "reviews_for": code review, reviewing MR/PR, approval language
   - "reports_to": manager, lead, escalation, "report to", status updates directed at someone
   - "mentors": pair programming, onboarding, teaching, "showing X how to"
+  - "depends_on": A's work depends on B completing something, "waiting for", "needs X's output"
 - Only emit relationships you are confident about from the text. Omit if unsure.
 
 [MEETING NOTES START — ${startTag}]
@@ -822,15 +817,60 @@ Extract the standup data from the notes above into the JSON schema provided.`;
 
   // ── Trait Extraction (Phase 1) ──────────────────────────────────
 
+  private static readonly VALID_WORK_STYLES = [
+    "fast-mover",
+    "methodical",
+    "proactive-unblocker",
+    "specialist",
+    "generalist",
+  ] as const;
+
   /** Schema for the trait extraction LLM output. */
   private static readonly TraitExtractionSchema = z.array(
     z.object({
       name: z.string(),
-      role: z.string().nullable().optional(),
-      expertise: z.array(z.string()).default([]),
-      workStyle: z.string().nullable().optional(),
+      role: z.string().max(100).nullable().optional(),
+      expertise: z.array(z.string().max(50)).max(15).default([]),
+      workStyle: z
+        .string()
+        .nullable()
+        .optional()
+        .transform((val) =>
+          val &&
+          (
+            MeetingIntelligenceService.VALID_WORK_STYLES as readonly string[]
+          ).includes(val)
+            ? val
+            : null,
+        ),
     }),
   );
+
+  /** Enqueue a trait extraction task (serial execution, rate-limit friendly). */
+  private enqueueTraitExtraction(record: StandupRecord): void {
+    this.traitExtractionQueue.push(() =>
+      this.extractTraitsForParticipants(record),
+    );
+    this.drainTraitQueue();
+  }
+
+  private async drainTraitQueue(): Promise<void> {
+    if (this.traitExtractionRunning) return;
+    this.traitExtractionRunning = true;
+    while (this.traitExtractionQueue.length > 0) {
+      const task = this.traitExtractionQueue.shift()!;
+      try {
+        await task();
+      } catch (err) {
+        this.logger.warn(
+          `Trait extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      // Small delay between calls to respect rate limits
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    this.traitExtractionRunning = false;
+  }
 
   /**
    * Extract role/expertise/work-style traits from a standup record's
@@ -904,8 +944,21 @@ JSON array:`;
         const person = this.teamGraph.getPersonByName(entry.name);
         if (!person) continue;
 
-        if (entry.role && !person.role) {
-          this.teamGraph.updateRole(person.id, entry.role);
+        if (entry.role) {
+          // Accumulate role votes — promote to official role after confidence threshold
+          const candidates =
+            (person.traits.roleCandidates as Record<string, number>) ?? {};
+          candidates[entry.role] = (candidates[entry.role] ?? 0) + 1;
+          const ROLE_CONFIDENCE_THRESHOLD = 3;
+          const topRole = Object.entries(candidates).sort(
+            ([, a], [, b]) => b - a,
+          )[0];
+          if (topRole && topRole[1] >= ROLE_CONFIDENCE_THRESHOLD) {
+            this.teamGraph.updateRole(person.id, topRole[0]);
+          }
+          this.teamGraph.updateTraits(person.id, {
+            roleCandidates: candidates,
+          });
         }
 
         const newTraits: Record<string, unknown> = {};
