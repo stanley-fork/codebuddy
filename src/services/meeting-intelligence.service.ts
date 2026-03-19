@@ -20,6 +20,7 @@ import type {
   Commitment,
   Blocker,
 } from "./standup.interfaces";
+import { normalizePersonName } from "../shared/standup.types";
 
 const STANDUP_KEYWORD_PREFIX = "standup";
 const MAX_STORED_STANDUPS = 30;
@@ -75,6 +76,16 @@ const StandupRecordSchema = z.object({
       }),
     )
     .default([]),
+  relationships: z
+    .array(
+      z.object({
+        from: z.string(),
+        to: z.string(),
+        kind: z.enum(["reviews_for", "reports_to", "mentors", "depends_on"]),
+        context: z.string(),
+      }),
+    )
+    .default([]),
 });
 
 /**
@@ -92,6 +103,8 @@ export class MeetingIntelligenceService {
   private ingestQueue: Promise<unknown> = Promise.resolve();
   private readonly configDisposable: vscode.Disposable;
   private migrationPromise: Promise<void> | null = null;
+  private readonly traitExtractionQueue: Array<() => Promise<void>> = [];
+  private traitExtractionDrainPromise: Promise<void> | null = null;
 
   private constructor() {
     this.logger = Logger.initialize("MeetingIntelligenceService", {
@@ -222,6 +235,8 @@ export class MeetingIntelligenceService {
         throw storeErr;
       }
       this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
+      // Enqueue background trait extraction (non-blocking enrichment)
+      this.enqueueTraitExtraction(record);
       const myName = await this.resolveMyName();
       return this.formatPersonalBrief(record, myName);
     });
@@ -248,6 +263,7 @@ export class MeetingIntelligenceService {
         throw storeErr;
       }
       this.teamGraph.pruneOldStandups(MAX_STORED_STANDUPS);
+      this.enqueueTraitExtraction(record);
       const myName = await this.resolveMyName();
 
       const myCommitments = record.commitments.filter((c) =>
@@ -477,6 +493,14 @@ Return ONLY valid JSON matching the schema. No markdown, no explanation.
       "context": "what was said about it",
       "assignee": "person or null"
     }
+  ],
+  "relationships": [
+    {
+      "from": "Person A",
+      "to": "Person B",
+      "kind": "reviews_for | reports_to | mentors | depends_on",
+      "context": "brief reason this relationship was inferred"
+    }
   ]
 }
 
@@ -486,6 +510,12 @@ Rules:
 - Each person's update should produce at least one commitment
 - Look for dependency language: "blocks", "depends on", "needs X first", "unblock"
 - Look for decision language: "agreed", "decided", "will focus on", "prioritize"
+- For relationships, detect:
+  - "reviews_for": code review, reviewing MR/PR, approval language
+  - "reports_to": manager, lead, escalation, "report to", status updates directed at someone
+  - "mentors": pair programming, onboarding, teaching, "showing X how to"
+  - "depends_on": A's work depends on B completing something, "waiting for", "needs X's output"
+- Only emit relationships you are confident about from the text. Omit if unsure.
 
 [MEETING NOTES START — ${startTag}]
 ${escapedNotes}
@@ -785,6 +815,235 @@ Extract the standup data from the notes above into the JSON schema provided.`;
     }
   }
 
+  // ── Trait Extraction (Phase 1) ──────────────────────────────────
+
+  private static readonly VALID_WORK_STYLES = [
+    "fast-mover",
+    "methodical",
+    "proactive-unblocker",
+    "specialist",
+    "generalist",
+  ] as const;
+
+  /** Schema for the trait extraction LLM output. */
+  private static readonly TraitExtractionSchema = z.array(
+    z.object({
+      name: z.string(),
+      role: z.string().max(100).nullable().optional(),
+      expertise: z.array(z.string().max(50)).max(15).default([]),
+      workStyle: z
+        .string()
+        .nullable()
+        .optional()
+        .transform((val) =>
+          val &&
+          (
+            MeetingIntelligenceService.VALID_WORK_STYLES as readonly string[]
+          ).includes(val)
+            ? val
+            : null,
+        ),
+    }),
+  );
+
+  private static readonly MAX_TRAIT_QUEUE_DEPTH = 20;
+  private static readonly TRAIT_EXTRACTION_DELAY_MS = 500;
+  private static readonly ROLE_CONFIDENCE_THRESHOLD = 3;
+  private static readonly MAX_EXPERTISE_TAGS = 20;
+  private static readonly MAX_ROLE_CANDIDATES = 10;
+
+  /** Enqueue a trait extraction task (serial execution, rate-limit friendly). */
+  private enqueueTraitExtraction(record: StandupRecord): void {
+    if (
+      this.traitExtractionQueue.length >=
+      MeetingIntelligenceService.MAX_TRAIT_QUEUE_DEPTH
+    ) {
+      this.logger.warn(
+        `Trait extraction queue full (${MeetingIntelligenceService.MAX_TRAIT_QUEUE_DEPTH}). ` +
+          `Dropping extraction for standup ${record.date}.`,
+      );
+      return;
+    }
+    this.traitExtractionQueue.push(() =>
+      this.extractTraitsForParticipants(record),
+    );
+    if (!this.traitExtractionDrainPromise) {
+      this.traitExtractionDrainPromise = this.drainTraitQueue();
+    }
+  }
+
+  private static readonly MAX_BACKOFF_MS = 30_000;
+
+  private async drainTraitQueue(): Promise<void> {
+    let consecutiveFailures = 0;
+    while (this.traitExtractionQueue.length > 0) {
+      const task = this.traitExtractionQueue.shift()!;
+      try {
+        await task();
+        consecutiveFailures = 0;
+      } catch (err) {
+        consecutiveFailures++;
+        const errMsg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `Trait extraction failed (attempt ${consecutiveFailures}): ${errMsg}`,
+        );
+        // Exponential backoff with jitter on repeated failures
+        const backoff = Math.min(
+          MeetingIntelligenceService.TRAIT_EXTRACTION_DELAY_MS *
+            Math.pow(2, consecutiveFailures),
+          MeetingIntelligenceService.MAX_BACKOFF_MS,
+        );
+        const jitter = Math.random() * backoff * 0.2;
+        await new Promise((r) => setTimeout(r, backoff + jitter));
+        continue;
+      }
+      await new Promise((r) =>
+        setTimeout(r, MeetingIntelligenceService.TRAIT_EXTRACTION_DELAY_MS),
+      );
+    }
+    this.traitExtractionDrainPromise = null;
+  }
+
+  /**
+   * Extract role/expertise/work-style traits from a standup record's
+   * commitments. Runs as a background LLM call after each ingest.
+   */
+  private async extractTraitsForParticipants(
+    record: StandupRecord,
+  ): Promise<void> {
+    if (record.participants.length === 0) return;
+
+    const llm = this.getLLM();
+    if (!llm) return;
+
+    // Build a concise summary of each person's actions for the LLM
+    const personSummaries = record.participants.map((name) => {
+      const commitments = record.commitments
+        .filter(
+          (c) => normalizePersonName(c.person) === normalizePersonName(name),
+        )
+        .map((c) => c.action)
+        .join("; ");
+      return `- ${name}: ${commitments || "participated (no specific commitments)"}`;
+    });
+
+    const prompt = `You are a team analyst. Given the standup actions below, infer each person's likely role, expertise areas, and work style.
+
+Return ONLY a JSON array. No markdown, no explanation.
+
+Schema for each element:
+{
+  "name": "Full Name",
+  "role": "inferred role (e.g. Frontend Engineer, DevOps, QA) or null if unclear",
+  "expertise": ["topic1", "topic2"],
+  "workStyle": "one of: fast-mover, methodical, proactive-unblocker, specialist, generalist, or null"
+}
+
+Standup actions:
+${personSummaries.join("\n")}
+
+JSON array:`;
+
+    try {
+      const response = await Promise.race([
+        llm.generateText(prompt),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Trait extraction timed out")),
+            15_000,
+          ),
+        ),
+      ]);
+      if (!response) return;
+
+      const cleaned = response
+        .replace(/^```(?:json)?\s*/m, "")
+        .replace(/\s*```$/m, "")
+        .trim();
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch {
+        return;
+      }
+
+      const result =
+        MeetingIntelligenceService.TraitExtractionSchema.safeParse(parsed);
+      if (!result.success) return;
+
+      for (const entry of result.data) {
+        const person = this.teamGraph.getPersonByName(entry.name);
+        if (!person) continue;
+
+        if (entry.role) {
+          // Normalize role name and accumulate votes — promote after confidence threshold
+          const normalizedRole = entry.role
+            .toLowerCase()
+            .trim()
+            .replace(/\s+/g, " ");
+          const candidates: Record<string, number> = {
+            ...person.traits.roleCandidates,
+          };
+          candidates[normalizedRole] = (candidates[normalizedRole] ?? 0) + 1;
+
+          // Cap to top N role candidates by vote count
+          const sorted = Object.entries(candidates).sort(
+            ([, a], [, b]) => b - a,
+          );
+          const capped = Object.fromEntries(
+            sorted.slice(0, MeetingIntelligenceService.MAX_ROLE_CANDIDATES),
+          );
+
+          const topRole = sorted[0];
+          if (
+            topRole &&
+            topRole[1] >= MeetingIntelligenceService.ROLE_CONFIDENCE_THRESHOLD
+          ) {
+            this.teamGraph.updateRole(person.id, topRole[0]);
+          }
+          this.teamGraph.updateTraits(person.id, {
+            roleCandidates: capped,
+          });
+        }
+
+        const newTraits: Record<string, unknown> = {};
+        if (entry.expertise.length > 0) {
+          // Frequency-scored, capped expertise: track counts, keep top N
+          const existingScores: Record<string, number> = {
+            ...person.traits.expertiseScores,
+          };
+          for (const tag of entry.expertise) {
+            const normalized = tag.toLowerCase().trim();
+            if (normalized) {
+              existingScores[normalized] =
+                (existingScores[normalized] ?? 0) + 1;
+            }
+          }
+          const topTags = Object.entries(existingScores)
+            .sort(([, a], [, b]) => b - a)
+            .slice(0, MeetingIntelligenceService.MAX_EXPERTISE_TAGS);
+          newTraits.expertiseScores = Object.fromEntries(topTags);
+          newTraits.expertise = topTags.map(([k]) => k);
+        }
+        if (entry.workStyle) {
+          newTraits.workStyle = entry.workStyle;
+        }
+        if (Object.keys(newTraits).length > 0) {
+          this.teamGraph.updateTraits(person.id, newTraits);
+        }
+      }
+
+      this.logger.info(
+        `Extracted traits for ${result.data.length} participant(s)`,
+      );
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Trait extraction LLM call failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   // ── Formatting ─────────────────────────────────────────────────
 
   private formatPersonalBrief(record: StandupRecord, myName: string): string {
@@ -922,8 +1181,8 @@ Extract the standup data from the notes above into the JSON schema provided.`;
 
   /** Fuzzy name matching — handles first name, last name, partial. */
   private nameMatch(candidate: string, target: string): boolean {
-    const normalizedCandidate = candidate.toLowerCase().trim();
-    const normalizedTarget = target.toLowerCase().trim();
+    const normalizedCandidate = normalizePersonName(candidate);
+    const normalizedTarget = normalizePersonName(target);
     if (normalizedCandidate === normalizedTarget) return true;
     const candidateParts = normalizedCandidate.split(/\s+/);
     const targetParts = normalizedTarget.split(/\s+/);

@@ -18,6 +18,7 @@
 import * as path from "path";
 import * as fs from "fs";
 import * as vscode from "vscode";
+import { z } from "zod";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import type {
   StandupRecord,
@@ -25,7 +26,28 @@ import type {
   Blocker,
   Decision,
   TicketMention,
+  DetectedRelationship,
 } from "../shared/standup.types";
+import { normalizePersonName } from "../shared/standup.types";
+
+// ── Zod schema for runtime-safe access to the traits JSON blob ──
+
+const PersonTraitsSchema = z
+  .object({
+    expertise: z.array(z.string()).default([]),
+    expertiseScores: z.record(z.string(), z.number()).default({}),
+    workStyle: z.string().nullable().optional(),
+    roleCandidates: z.record(z.string(), z.number()).default({}),
+  })
+  .passthrough()
+  .catch({
+    expertise: [],
+    expertiseScores: {},
+    workStyle: null,
+    roleCandidates: {},
+  });
+
+export type PersonTraits = z.infer<typeof PersonTraitsSchema>;
 
 // ── Minimal sql.js type definitions ─────────────────────────────
 
@@ -54,7 +76,8 @@ export type RelationshipKind =
   | "blocks" // A blocks B
   | "reviews_for" // A reviews B's work
   | "reports_to" // inferred from role mentions
-  | "mentors"; // future: mentor/mentee
+  | "mentors" // mentor/mentee
+  | "depends_on"; // A's work depends on B
 
 export interface PersonProfile {
   id: number;
@@ -64,7 +87,7 @@ export interface PersonProfile {
   /** Inferred role from meeting context (e.g. "Frontend Engineer"). */
   role: string | null;
   /** JSON-serialised personality/behavior traits object. */
-  traits: Record<string, unknown>;
+  traits: PersonTraits;
   /** Total standups this person appeared in. */
   standup_count: number;
   /** Total commitments made. */
@@ -175,6 +198,11 @@ export class TeamGraphStore implements vscode.Disposable {
     return this.initialize();
   }
 
+  /** Whether the DB is initialized and ready for synchronous queries. */
+  isReady(): boolean {
+    return this.initialized && this.db !== null;
+  }
+
   dispose(): void {
     this.saveToDisk();
     if (this.saveTimer) clearTimeout(this.saveTimer);
@@ -255,6 +283,9 @@ export class TeamGraphStore implements vscode.Disposable {
         reason      TEXT NOT NULL
       );
     `);
+    this._db.run(
+      "CREATE INDEX IF NOT EXISTS idx_blockers_owner ON blockers(owner_id);",
+    );
 
     // Decisions
     this._db.run(`
@@ -330,7 +361,7 @@ export class TeamGraphStore implements vscode.Disposable {
    * Increments standup_count and updates last_seen on repeat encounters.
    */
   upsertPerson(name: string, date: string): number {
-    const canonical = name.toLowerCase().trim();
+    const canonical = normalizePersonName(name);
     const existing = this._db.exec(
       "SELECT id FROM people WHERE canonical_name = ?",
       [canonical],
@@ -380,7 +411,7 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Get a person by canonical name. */
   getPersonByName(name: string): PersonProfile | null {
-    const canonical = name.toLowerCase().trim();
+    const canonical = normalizePersonName(name);
     const rows = this._db.exec(
       "SELECT * FROM people WHERE canonical_name = ?",
       [canonical],
@@ -406,7 +437,9 @@ export class TeamGraphStore implements vscode.Disposable {
       name: obj.name as string,
       canonical_name: obj.canonical_name as string,
       role: (obj.role as string | null) ?? null,
-      traits: JSON.parse((obj.traits as string) || "{}"),
+      traits: PersonTraitsSchema.parse(
+        JSON.parse((obj.traits as string) || "{}"),
+      ),
       standup_count: obj.standup_count as number,
       commitment_count: obj.commitment_count as number,
       completion_count: obj.completion_count as number,
@@ -552,14 +585,14 @@ export class TeamGraphStore implements vscode.Disposable {
       const personIds = new Map<string, number>();
       for (const name of record.participants) {
         personIds.set(
-          name.toLowerCase().trim(),
+          normalizePersonName(name),
           this.upsertPerson(name, record.date),
         );
       }
 
       // Store commitments
       for (const c of record.commitments) {
-        const canonical = c.person.toLowerCase().trim();
+        const canonical = normalizePersonName(c.person);
         let pid = personIds.get(canonical);
         if (!pid) {
           pid = this.upsertPerson(c.person, record.date);
@@ -591,7 +624,7 @@ export class TeamGraphStore implements vscode.Disposable {
 
       // Store blockers
       for (const b of record.blockers) {
-        const ownerId = personIds.get(b.owner.toLowerCase().trim()) ?? null;
+        const ownerId = personIds.get(normalizePersonName(b.owner)) ?? null;
         db.run(
           `INSERT INTO blockers (standup_id, blocked, blocked_by, owner_id, reason)
            VALUES (?, ?, ?, ?, ?)`,
@@ -611,7 +644,7 @@ export class TeamGraphStore implements vscode.Disposable {
       // Store ticket mentions
       for (const t of record.ticketMentions) {
         const assigneeId = t.assignee
-          ? (personIds.get(t.assignee.toLowerCase().trim()) ?? null)
+          ? (personIds.get(normalizePersonName(t.assignee)) ?? null)
           : null;
         db.run(
           `INSERT INTO ticket_mentions (standup_id, ticket_id, context, assignee_id)
@@ -632,21 +665,35 @@ export class TeamGraphStore implements vscode.Disposable {
 
       // Build blocking edges — only to people committed on the blocked item
       for (const b of record.blockers) {
-        const ownerId = personIds.get(b.owner.toLowerCase().trim());
+        const ownerId = personIds.get(normalizePersonName(b.owner));
         if (!ownerId) continue;
 
         const affectedCommitments = record.commitments.filter((c) => {
-          if (c.person.toLowerCase().trim() === b.owner.toLowerCase().trim())
+          if (normalizePersonName(c.person) === normalizePersonName(b.owner))
             return false;
           return c.ticketIds.some((tid) => b.blocked.includes(tid));
         });
 
         for (const c of affectedCommitments) {
-          const targetId = personIds.get(c.person.toLowerCase().trim());
+          const targetId = personIds.get(normalizePersonName(c.person));
           if (targetId && targetId !== ownerId) {
             this.upsertRelationship(ownerId, targetId, "blocks", {
               blocked: b.blocked,
               reason: b.reason,
+              standup_date: record.date,
+            });
+          }
+        }
+      }
+
+      // Build LLM-detected relationship edges (reviews_for, reports_to, mentors)
+      if (record.relationships?.length) {
+        for (const rel of record.relationships) {
+          const fromId = personIds.get(normalizePersonName(rel.from));
+          const toId = personIds.get(normalizePersonName(rel.to));
+          if (fromId && toId && fromId !== toId) {
+            this.upsertRelationship(fromId, toId, rel.kind, {
+              context: rel.context,
               standup_date: record.date,
             });
           }
@@ -831,6 +878,8 @@ export class TeamGraphStore implements vscode.Disposable {
 
   /** Get a team profile summary — useful for LLM context. */
   getTeamSummary(): string {
+    if (!this.isReady()) return "No team members tracked yet.";
+
     const people = this.getAllPeople();
     if (people.length === 0) return "No team members tracked yet.";
 
@@ -842,6 +891,8 @@ export class TeamGraphStore implements vscode.Disposable {
           : 0;
       summary += `- **${p.name}**`;
       if (p.role) summary += ` (${p.role})`;
+      const expertise = p.traits.expertise as string[] | undefined;
+      if (expertise?.length) summary += ` [${expertise.join(", ")}]`;
       summary += ` — ${p.standup_count} standups, ${p.commitment_count} commitments`;
       if (p.commitment_count > 0) summary += ` (${completionRate}% done)`;
       summary += `, last seen ${p.last_seen}\n`;
@@ -864,6 +915,237 @@ export class TeamGraphStore implements vscode.Disposable {
       }
     }
 
+    // Recurring blockers
+    const blockerRows = this._db.exec(
+      `SELECT p.name, COUNT(*) AS block_count
+       FROM blockers b
+       JOIN people p ON b.owner_id = p.id
+       GROUP BY p.id
+       HAVING block_count >= 2
+       ORDER BY block_count DESC
+       LIMIT 5`,
+    );
+    if (blockerRows.length && blockerRows[0].values.length) {
+      summary += "\n### Frequent Blockers\n";
+      for (const v of blockerRows[0].values) {
+        summary += `- ${v[0]} (blocked ${v[1]} times)\n`;
+      }
+    }
+
     return summary;
+  }
+
+  /** Get a detailed person profile for the agent. */
+  getPersonProfile(name: string): string {
+    if (!this.isReady()) return `Team graph is not yet initialized.`;
+
+    const person = this.getPersonByName(name);
+    if (!person) return `No profile found for "${name}".`;
+
+    const completionRate =
+      person.commitment_count > 0
+        ? Math.round((person.completion_count / person.commitment_count) * 100)
+        : 0;
+
+    let profile = `## ${person.name}\n`;
+    if (person.role) profile += `**Role:** ${person.role}\n`;
+    const expertise = person.traits.expertise;
+    if (expertise?.length)
+      profile += `**Expertise:** ${expertise.join(", ")}\n`;
+    const workStyle = person.traits.workStyle;
+    if (workStyle) profile += `**Work Style:** ${workStyle}\n`;
+    profile += `**Stats:** ${person.standup_count} standups, ${person.commitment_count} commitments (${completionRate}% completed)\n`;
+    profile += `**Active since:** ${person.first_seen} — last seen ${person.last_seen}\n\n`;
+
+    // Recent commitments
+    const commitments = this.getCommitmentsFor(person.id, 5);
+    if (commitments.length) {
+      profile += "### Recent Commitments\n";
+      for (const c of commitments) {
+        const status = c.status === "done" ? "✅" : "⬜";
+        profile += `- ${status} ${c.action} (${c.date})\n`;
+      }
+      profile += "\n";
+    }
+
+    // Top collaborators
+    const collabs = this.getTopCollaborators(person.id, 5);
+    if (collabs.length) {
+      profile += "### Top Collaborators\n";
+      for (const { person: p, weight } of collabs) {
+        profile += `- ${p.name} (${weight} meetings together)\n`;
+      }
+    }
+
+    return profile;
+  }
+
+  /** Get people/tickets that appear in blockers repeatedly. */
+  getRecurringBlockers(minCount = 2): string {
+    if (!this.isReady()) return "Team graph is not yet initialized.";
+
+    const rows = this._db.exec(
+      `SELECT p.name, COUNT(*) AS block_count,
+             SUBSTR(GROUP_CONCAT(DISTINCT b.blocked), 1, 500) AS items
+       FROM blockers b
+       JOIN people p ON b.owner_id = p.id
+       GROUP BY p.id
+       HAVING block_count >= ?
+       ORDER BY block_count DESC`,
+      [minCount],
+    );
+    if (!rows.length || !rows[0].values.length)
+      return "No recurring blockers found.";
+
+    let out = "## Recurring Blockers\n\n";
+    for (const v of rows[0].values) {
+      out += `- **${v[0]}** — blocked ${v[1]} times (items: ${v[2]})\n`;
+    }
+    return out;
+  }
+
+  /** Get commitment completion rate trends by week for a person. */
+  getCompletionTrends(personId: number, weeks = 8): string {
+    if (!this.isReady()) return "Team graph is not yet initialized.";
+
+    const rows = this._db.exec(
+      `SELECT
+         strftime('%Y-W%W', s.date) AS week,
+         COUNT(CASE WHEN c.status = 'done' THEN 1 END) AS completed,
+         COUNT(*) AS total
+       FROM commitments c
+       JOIN standups s ON c.standup_id = s.id
+       WHERE c.person_id = ?
+       GROUP BY week
+       ORDER BY week DESC
+       LIMIT ?`,
+      [personId, weeks],
+    );
+    if (!rows.length || !rows[0].values.length)
+      return "No commitment data found.";
+
+    let out =
+      "## Completion Trends\n\n| Week | Completed | Total | Rate |\n|------|-----------|-------|------|\n";
+    for (const v of rows[0].values) {
+      const completed = v[1] as number;
+      const total = v[2] as number;
+      const rate = total > 0 ? Math.round((completed / total) * 100) : 0;
+      out += `| ${v[0]} | ${completed} | ${total} | ${rate}% |\n`;
+    }
+    return out;
+  }
+
+  /** Get full history for a specific ticket across all standups. */
+  getTicketHistory(ticketId: string): string {
+    if (!this.isReady()) return "Team graph is not yet initialized.";
+
+    // Validate ticket ID: strip optional # prefix, allow only alphanumeric + dash/underscore
+    const normalized = ticketId.replace(/^#/, "").trim();
+    if (!/^[A-Za-z0-9_-]+$/.test(normalized)) {
+      return `Invalid ticket ID format: "${ticketId}". Use alphanumeric characters, dashes, or underscores only.`;
+    }
+
+    // Mentions
+    const mentionRows = this._db.exec(
+      `SELECT s.date, s.team_name, tm.context, p.name
+       FROM ticket_mentions tm
+       JOIN standups s ON tm.standup_id = s.id
+       LEFT JOIN people p ON tm.assignee_id = p.id
+       WHERE tm.ticket_id = ?
+       ORDER BY s.date DESC`,
+      [normalized],
+    );
+
+    // Commitments referencing this ticket (use json_each for correctness)
+    const commitRows = this._db.exec(
+      `SELECT s.date, p.name, c.action, c.status
+       FROM commitments c
+       JOIN standups s ON c.standup_id = s.id
+       JOIN people p ON c.person_id = p.id
+       WHERE EXISTS (SELECT 1 FROM json_each(c.ticket_ids) WHERE json_each.value = ?)
+       ORDER BY s.date DESC`,
+      [normalized],
+    );
+
+    if (
+      (!mentionRows.length || !mentionRows[0].values.length) &&
+      (!commitRows.length || !commitRows[0].values.length)
+    ) {
+      return `No history found for ticket "${normalized}".`;
+    }
+
+    let out = `## Ticket #${normalized} History\n\n`;
+
+    if (mentionRows.length && mentionRows[0].values.length) {
+      out += "### Mentions\n";
+      for (const v of mentionRows[0].values) {
+        const assignee = v[3] ? ` (${v[3]})` : "";
+        out += `- **${v[0]}** ${v[1]}: ${v[2]}${assignee}\n`;
+      }
+      out += "\n";
+    }
+
+    if (commitRows.length && commitRows[0].values.length) {
+      out += "### Related Commitments\n";
+      for (const v of commitRows[0].values) {
+        const status = v[3] === "done" ? "✅" : "⬜";
+        out += `- ${status} **${v[0]}** ${v[1]}: ${v[2]}\n`;
+      }
+    }
+
+    return out;
+  }
+
+  /** Aggregate team health metrics. */
+  getTeamHealth(): string {
+    if (!this.isReady()) return "Team graph is not yet initialized.";
+
+    const people = this.getAllPeople();
+    if (people.length === 0) return "No team data available yet.";
+
+    const totalCommitments = people.reduce((s, p) => s + p.commitment_count, 0);
+    const totalCompleted = people.reduce((s, p) => s + p.completion_count, 0);
+    const avgCompletion =
+      totalCommitments > 0
+        ? Math.round((totalCompleted / totalCommitments) * 100)
+        : 0;
+
+    const totalStandups = this._db.exec("SELECT COUNT(*) FROM standups");
+    const standupCount = (totalStandups[0]?.values[0]?.[0] as number) ?? 0;
+
+    const blockerCount = this._db.exec("SELECT COUNT(*) FROM blockers");
+    const totalBlockers = (blockerCount[0]?.values[0]?.[0] as number) ?? 0;
+
+    const relCount = this._db.exec(
+      "SELECT COUNT(*) FROM relationships WHERE kind = 'collaborates_with'",
+    );
+    const totalEdges = (relCount[0]?.values[0]?.[0] as number) ?? 0;
+
+    let out = "## Team Health Dashboard\n\n";
+    out += `- **Team Size:** ${people.length} members\n`;
+    out += `- **Total Standups:** ${standupCount}\n`;
+    out += `- **Avg Completion Rate:** ${avgCompletion}%\n`;
+    out += `- **Total Blockers Recorded:** ${totalBlockers}\n`;
+    out += `- **Collaboration Edges:** ${totalEdges}\n\n`;
+
+    // Top performers
+    const sorted = [...people]
+      .filter((p) => p.commitment_count >= 3)
+      .sort((a, b) => {
+        const rateA = a.completion_count / (a.commitment_count || 1);
+        const rateB = b.completion_count / (b.commitment_count || 1);
+        return rateB - rateA;
+      });
+    if (sorted.length) {
+      out += "### Top Performers (by completion rate)\n";
+      for (const p of sorted.slice(0, 5)) {
+        const rate = Math.round(
+          (p.completion_count / p.commitment_count) * 100,
+        );
+        out += `- ${p.name}: ${rate}% (${p.completion_count}/${p.commitment_count})\n`;
+      }
+    }
+
+    return out;
   }
 }

@@ -167,7 +167,7 @@ Already created with:
 - Utility: `pruneOldStandups`, `getTeamSummary` (markdown for LLM context)
 - Debounced `saveToDisk()`, proper `dispose()`
 
-### Step 2 — Migrate MeetingIntelligenceService storage
+### Step 2 — Migrate MeetingIntelligenceService storage (DONE)
 
 File: `src/services/meeting-intelligence.service.ts`
 
@@ -181,7 +181,7 @@ Changes:
 7. Remove MemoryTool dependency entirely (it's no longer needed for standups)
 8. Remove `standupCache` in-memory cache — SQLite is fast enough for the query volumes we see
 
-### Step 3 — Register TeamGraphStore for disposal
+### Step 3 — Register TeamGraphStore for disposal (DONE)
 
 File: `src/extension.ts`
 
@@ -189,7 +189,7 @@ File: `src/extension.ts`
 - Call `TeamGraphStore.getInstance().initialize()` during activation
 - Push to `context.subscriptions` for proper cleanup
 
-### Step 4 — One-time migration of existing memory.json data
+### Step 4 — One-time migration of existing memory.json data (DONE)
 
 File: `src/services/meeting-intelligence.service.ts` (or TeamGraphStore)
 
@@ -200,7 +200,7 @@ On first `initialize()`:
 4. Log how many records were migrated
 5. Do NOT delete the memory.json entries (other non-standup memories live there too)
 
-### Step 5 — Enhance query methods to leverage SQL
+### Step 5 — Enhance query methods to leverage SQL (DONE)
 
 File: `src/services/meeting-intelligence.service.ts`
 
@@ -218,25 +218,25 @@ New commands:
 - `standup-team-summary` — returns `teamGraph.getTeamSummary()` markdown for display
 - `standup-person-profile` — returns a person's profile + top collaborators + recent commitments
 
-(These are optional/future — not blocking the core migration.)
+(Future — not blocking the core system.)
 
-### Step 7 — Build and verify
+### Step 7 — Build and verify (DONE)
 
-- `npm run compile` — check no TS errors
-- `npm run build` — full pipeline
-- Manual test: ingest notes, restart extension, verify data persists
-- Manual test: ingest 2–3 standups, check that people/relationships are populated
+- `npm run compile` — check no TS errors ✅
+- `npm run build` — full pipeline ✅
+- Manual test: ingest notes, restart extension, verify data persists ✅
+- Manual test: ingest 2–3 standups, check that people/relationships are populated ✅
 
 ---
 
 ## What This Enables (Future)
 
-1. **Team personality profiling** — after N standups, `traits` JSON accumulates observations: "frequently volunteers for frontend tasks", "often blocked on backend dependencies", "consistently delivers early"
+1. ~~**Team personality profiling**~~ — ✅ **Shipped** (Phase 1). Traits JSON accumulates role, expertise, work-style. Zod-validated `PersonTraitsSchema`.
 2. **Relationship graph visualization** — render the people + edges in a webview (D3 force graph)
 3. **Smart assignment suggestions** — "Based on past standups, Alice usually handles ticket patterns matching X"
-4. **Standup trend analysis** — completion rates, blocker patterns, team velocity over time
-5. **Cross-standup context** — "Last 3 times Bob mentioned ticket #1279, it was blocked"
-6. **Role inference** — after seeing "Alice reviewed Bob's MR" multiple times, infer a `reviews_for` relationship
+4. ~~**Standup trend analysis**~~ — ✅ **Shipped** (Phase 3). `completion_trends` and `team_health` operations.
+5. ~~**Cross-standup context**~~ — ✅ **Shipped** (Phase 3). `ticket_history` operation with `json_each()` lookup.
+6. ~~**Role inference**~~ — ✅ **Shipped** (Phase 4). `reviews_for`, `reports_to`, `mentors`, `depends_on` relationships detected from meeting notes.
 
 ---
 
@@ -244,16 +244,21 @@ New commands:
 
 | File | Change |
 |------|--------|
-| `src/services/team-graph-store.ts` | NEW — full graph store implementation |
-| `src/services/meeting-intelligence.service.ts` | Replace MemoryTool storage with TeamGraphStore |
+| `src/services/team-graph-store.ts` | Full graph store: 7 tables, `PersonTraitsSchema` Zod validation, `json_each()` queries, `normalizePersonName()`, `isReady()` guards |
+| `src/services/meeting-intelligence.service.ts` | LLM parsing, trait extraction (serial queue, exp backoff), MemoryTool migration, `normalizePersonName()` |
+| `src/services/llm-safety.ts` | NEW — shared `sanitizeForLLM()` + 14 injection patterns |
+| `src/services/enhanced-prompt-builder.service.ts` | Team context injection for Ask mode (keyword gate, TTL cache, sanitization) |
+| `src/agents/langgraph/tools/team-graph.ts` | NEW — `team_graph` StructuredTool with 7 operations, Zod safeParse, egress sanitization |
+| `src/agents/langgraph/tools/provider.ts` | Registered `TeamGraphToolFactory`, role mappings |
 | `src/extension.ts` | Register TeamGraphStore for init + disposal |
-| `src/shared/standup.types.ts` | No changes needed (types already compatible) |
-| `src/webview-providers/handlers/standup-handler.ts` | Minor — `getRecentSummaries` now comes from graph store |
+| `src/shared/standup.types.ts` | `DetectedRelationship` type, `normalizePersonName()` utility |
+| `src/webview-providers/handlers/standup-handler.ts` | `getRecentSummaries` from graph store |
 
 ## Files NOT Modified
 
 | File | Reason |
 |------|--------|
 | `src/tools/memory.ts` | Still used for non-standup memories (knowledge, rules) |
-| `webviewUi/src/**` | No UI changes in this phase — same data shape |
+| `webviewUi/src/**` | No UI changes — same data shape |
 | `src/agents/langgraph/tools/standup.ts` | Calls MeetingIntelligenceService API, no direct storage access |
+| `src/agents/developer/agent.ts` | Agent uses `team_graph` tool on-demand (no blind context injection) |
