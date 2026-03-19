@@ -44,6 +44,27 @@ export function validateArticleUrl(rawUrl: string): URL {
   if (parsed.hostname.length > 253 || parsed.pathname.length > 2048) {
     throw new Error("URL exceeds maximum length");
   }
+
+  // Check external security config network policies
+  try {
+    const {
+      ExternalSecurityConfigService,
+    } = require("../../services/external-security-config.service");
+    const extSec = ExternalSecurityConfigService.getInstance();
+    if (!extSec.isUrlAllowed(rawUrl)) {
+      throw new Error(`Blocked by external security policy: ${rawUrl}`);
+    }
+  } catch (err: unknown) {
+    // Re-throw our own policy blocks
+    if (
+      err instanceof Error &&
+      err.message.startsWith("Blocked by external security policy")
+    ) {
+      throw err;
+    }
+    // External config not loaded — allow (fail-open for URL validation)
+  }
+
   return parsed;
 }
 

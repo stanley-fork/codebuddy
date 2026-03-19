@@ -8,7 +8,7 @@
   },
   "publisher": "fiatinnovations",
   "description": "%description%",
-  "version": "4.1.15",
+  "version": "4.1.16",
   "engines": {
     "vscode": "^1.78.0"
   },
@@ -249,6 +249,16 @@
       {
         "command": "codebuddy.createBranchFromGitLab",
         "title": "%commands.createBranchFromGitLab%",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.openSecurityConfig",
+        "title": "Open External Security Config",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.securityDiagnostics",
+        "title": "Run Security Diagnostics",
         "category": "CodeBuddy"
       },
       {

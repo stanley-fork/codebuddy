@@ -277,7 +277,8 @@ export class DeepTerminalService extends EventEmitter {
   }
 
   /**
-   * Validates a command against the instance's blocked-pattern list.
+   * Validates a command against the instance's blocked-pattern list
+   * and the external security config deny patterns.
    * @throws If the command matches a hard-blocked pattern.
    */
   private validateCommand(command: string): void {
@@ -290,6 +291,30 @@ export class DeepTerminalService extends EventEmitter {
           `${msg}. This command matches a restricted pattern and cannot be executed.`,
         );
       }
+    }
+
+    // Also check external security config deny patterns
+    try {
+      const {
+        ExternalSecurityConfigService,
+      } = require("./external-security-config.service");
+      const extSec = ExternalSecurityConfigService.getInstance();
+      if (extSec.isCommandBlocked(command)) {
+        const msg = `Blocked by external security policy: "${command}"`;
+        this.logger.warn(msg);
+        throw new Error(
+          `${msg}. This command matches a restricted pattern in .codebuddy/security.json.`,
+        );
+      }
+    } catch (err: unknown) {
+      // If it's our own security block, re-throw
+      if (
+        err instanceof Error &&
+        err.message.startsWith("Blocked by external security policy")
+      ) {
+        throw err;
+      }
+      // Otherwise, external config not initialised — skip silently
     }
   }
 
