@@ -452,7 +452,10 @@ export async function activate(context: vscode.ExtensionContext) {
       ),
       vscode.commands.registerCommand("codebuddy.runDoctor", async () => {
         const findings = await doctorService.execute();
-        doctorService.displayFindings(findings);
+        doctorService.displayFindings(findings, {
+          showChannel: true,
+          preserveFocus: false,
+        });
       }),
       vscode.commands.registerCommand("codebuddy.doctorAutoFix", async () => {
         const findings = await doctorService.execute();
@@ -475,7 +478,10 @@ export async function activate(context: vscode.ExtensionContext) {
           );
           // Re-run to show updated state
           const updated = await doctorService.execute();
-          doctorService.displayFindings(updated);
+          doctorService.displayFindings(updated, {
+            showChannel: true,
+            preserveFocus: false,
+          });
         }
       }),
     );

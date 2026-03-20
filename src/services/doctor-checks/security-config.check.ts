@@ -21,7 +21,7 @@ export const securityConfigCheck: DoctorCheckModule = {
       severity: d.severity,
       message: d.message,
       autoFixable: d.autoFixable,
-      ...(d.autoFixable && d.message.includes("No security config found")
+      ...(d.autoFixable && d.code === "no-config"
         ? {
             fix: () =>
               ctx.securityConfig.scaffoldDefaultConfig().then(() => {}),

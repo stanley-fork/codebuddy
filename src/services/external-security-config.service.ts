@@ -12,6 +12,15 @@ export interface SecurityDiagnostic {
   severity: "info" | "warn" | "critical";
   message: string;
   autoFixable: boolean;
+  /** Semantic code for programmatic matching (avoids brittle string checks). */
+  code?:
+    | "no-config"
+    | "config-loaded"
+    | "config-permissions"
+    | "custom-deny-patterns"
+    | "network-allowlist"
+    | "external-paths"
+    | "invalid-regex";
 }
 
 // ─── Schema ──────────────────────────────────────────────────────────
@@ -458,6 +467,14 @@ export class ExternalSecurityConfigService
     return Object.freeze([...this.compiledCommandDenyPatterns]);
   }
 
+  /** Returns only the user-defined custom deny patterns (excludes built-in defaults). */
+  public getCustomCommandDenyPatterns(): readonly RegExp[] {
+    const customStartIndex = DEFAULT_COMMAND_DENY_PATTERNS.length;
+    return Object.freeze(
+      this.compiledCommandDenyPatterns.slice(customStartIndex),
+    );
+  }
+
   /**
    * Returns `true` if the URL is allowed.
    * - If no `networkAllowPatterns` are configured, all URLs are allowed
@@ -592,12 +609,14 @@ export class ExternalSecurityConfigService
         message:
           "No security config found. Create .codebuddy/security.json for workspace security policies.",
         autoFixable: true,
+        code: "no-config",
       });
     } else {
       diagnostics.push({
         severity: "info",
         message: `Security config loaded from ${this.configFile}`,
         autoFixable: false,
+        code: "config-loaded",
       });
 
       // Check permissions on the config file (async)

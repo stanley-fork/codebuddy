@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import styled from "styled-components";
 import { vscode } from "../../utils/vscode";
 import { useStandupStore } from "../../stores/standup.store";
@@ -546,10 +546,12 @@ const DoctorSection: React.FC<{ isOpen: boolean }> = ({ isOpen }) => {
     if (isOpen && lastScanTime === null) hydrate();
   }, [isOpen, lastScanTime, hydrate]);
 
-  const critical = findings.filter((f) => f.severity === "critical").length;
-  const warn = findings.filter((f) => f.severity === "warn").length;
-  const info = findings.filter((f) => f.severity === "info").length;
-  const fixable = findings.filter((f) => f.autoFixable).length;
+  const { critical, warn, info, fixable } = useMemo(() => ({
+    critical: findings.filter((f) => f.severity === "critical").length,
+    warn: findings.filter((f) => f.severity === "warn").length,
+    info: findings.filter((f) => f.severity === "info").length,
+    fixable: findings.filter((f) => f.autoFixable).length,
+  }), [findings]);
 
   const summaryColor =
     critical > 0
@@ -579,8 +581,8 @@ const DoctorSection: React.FC<{ isOpen: boolean }> = ({ isOpen }) => {
       {/* ── Findings list ── */}
       {findings.length > 0 && (
         <DoctorFindingsList>
-          {findings.map((f, i) => (
-            <DoctorFindingItem key={`${f.check}-${i}`} $severity={f.severity}>
+          {findings.map((f) => (
+            <DoctorFindingItem key={`${f.check}-${f.message}`} $severity={f.severity}>
               <span>{f.severity === "critical" ? "❌" : f.severity === "warn" ? "⚠️" : "ℹ️"}</span>
               <DoctorFindingText>
                 <strong>[{f.check}]</strong> {f.message}

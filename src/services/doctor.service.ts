@@ -30,6 +30,10 @@ export class DoctorService implements vscode.Disposable {
   private readonly logger: Logger;
   private readonly outputChannel: vscode.OutputChannel;
   private statusBarItem: vscode.StatusBarItem | undefined;
+  private isDisposed = false;
+  private isConfigured = false;
+  private activeExecution: Promise<DoctorFinding[]> | undefined;
+  private cachedFindings: DoctorFinding[] = [];
 
   private readonly checks: DoctorCheckModule[] = [
     apiKeyAuditCheck,
@@ -40,8 +44,8 @@ export class DoctorService implements vscode.Disposable {
     securityConfigCheck,
   ];
 
-  private secretStorage!: SecretStorageService;
-  private securityConfig!: ExternalSecurityConfigService;
+  private secretStorage: SecretStorageService | undefined;
+  private securityConfig: ExternalSecurityConfigService | undefined;
   private workspacePath = "";
 
   private constructor() {
@@ -62,8 +66,12 @@ export class DoctorService implements vscode.Disposable {
   }
 
   /** @internal — test isolation */
-  public static resetInstance(): void {
+  public static async resetInstance(): Promise<void> {
     const inst = DoctorService.instance;
+    // Wait for any in-flight execute() to settle before disposing
+    if (inst?.activeExecution) {
+      await inst.activeExecution.catch(() => {});
+    }
     DoctorService.instance = undefined as unknown as DoctorService;
     inst?.dispose();
   }
@@ -77,9 +85,20 @@ export class DoctorService implements vscode.Disposable {
     this.secretStorage = deps.secretStorage;
     this.securityConfig = deps.securityConfig;
     this.workspacePath = deps.workspacePath;
+    this.isConfigured = true;
+  }
+
+  private assertConfigured(): void {
+    if (!this.isConfigured || !this.secretStorage || !this.securityConfig) {
+      throw new Error(
+        "DoctorService.configure() must be called before execute(). " +
+          "Ensure it is called during extension activation before runBackground().",
+      );
+    }
   }
 
   public dispose(): void {
+    this.isDisposed = true;
     this.outputChannel.dispose();
     this.statusBarItem?.dispose();
     this.statusBarItem = undefined;
@@ -87,12 +106,29 @@ export class DoctorService implements vscode.Disposable {
 
   // ── Core ─────────────────────────────────────────────────────────
 
+  /** Returns the findings from the most recent execute() call. */
+  public getCachedFindings(): DoctorFinding[] {
+    return this.cachedFindings;
+  }
+
   /** Run all checks and return sorted findings. */
   public async execute(): Promise<DoctorFinding[]> {
+    this.assertConfigured();
+    this.activeExecution = this._executeInternal();
+    try {
+      return await this.activeExecution;
+    } finally {
+      this.activeExecution = undefined;
+    }
+  }
+
+  private async _executeInternal(): Promise<DoctorFinding[]> {
+    this.assertConfigured();
+    // Safe after assertConfigured() confirms both are defined
     const context: DoctorCheckContext = {
       workspacePath: this.workspacePath,
-      secretStorage: this.secretStorage,
-      securityConfig: this.securityConfig,
+      secretStorage: this.secretStorage!,
+      securityConfig: this.securityConfig!,
       logger: this.logger,
     };
 
@@ -124,11 +160,18 @@ export class DoctorService implements vscode.Disposable {
       (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity],
     );
 
+    this.cachedFindings = findings;
     return findings;
   }
 
   /** Display findings in the output channel. */
-  public displayFindings(findings: DoctorFinding[]): void {
+  public displayFindings(
+    findings: DoctorFinding[],
+    options: { showChannel?: boolean; preserveFocus?: boolean } = {},
+  ): void {
+    const { showChannel = true, preserveFocus = true } = options;
+    if (this.isDisposed) return;
+
     const critical = findings.filter((f) => f.severity === "critical");
     const warnings = findings.filter((f) => f.severity === "warn");
     const infos = findings.filter((f) => f.severity === "info");
@@ -173,11 +216,14 @@ export class DoctorService implements vscode.Disposable {
       );
     }
 
-    this.outputChannel.show();
+    if (showChannel) {
+      this.outputChannel.show(preserveFocus);
+    }
   }
 
   /** Apply all auto-fixable findings. Returns count of fixes applied. */
   public async autoFixAll(findings: DoctorFinding[]): Promise<number> {
+    if (this.isDisposed) return 0;
     const fixable = findings.filter((f) => f.autoFixable && f.fix);
     let applied = 0;
 

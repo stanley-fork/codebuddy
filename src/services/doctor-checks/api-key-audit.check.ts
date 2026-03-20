@@ -48,7 +48,18 @@ export const apiKeyAuditCheck: DoctorCheckModule = {
           message: `${configKey} has a plaintext API key in settings — not yet migrated to SecretStorage`,
           autoFixable: true,
           fix: async () => {
-            await ctx.secretStorage.storeApiKey(configKey, settingsValue);
+            // Re-read at fix time — never hold the raw secret in a closure longer than needed
+            const currentValue = vscode.workspace
+              .getConfiguration()
+              .get<string>(configKey);
+            if (!currentValue || NON_KEY_VALUES.has(currentValue)) {
+              ctx.logger.warn(
+                `Doctor auto-fix: ${configKey} no longer has a value to migrate`,
+              );
+              return;
+            }
+            await ctx.secretStorage.storeApiKey(configKey, currentValue);
+            // Never log the secret value — only log the key name
             ctx.logger.info(
               `Doctor auto-fix: migrated ${configKey} to SecretStorage`,
             );
