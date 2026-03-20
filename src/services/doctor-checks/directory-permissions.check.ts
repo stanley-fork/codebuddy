@@ -13,9 +13,10 @@ export const directoryPermissionsCheck: DoctorCheckModule = {
 
   async run(ctx: DoctorCheckContext): Promise<DoctorFinding[]> {
     const findings: DoctorFinding[] = [];
+    const platform = ctx.platform ?? process.platform;
 
     // Skip on Windows — POSIX mode bits are meaningless
-    if (process.platform === "win32") {
+    if (platform === "win32") {
       findings.push({
         check: "directory-permissions",
         severity: "info",

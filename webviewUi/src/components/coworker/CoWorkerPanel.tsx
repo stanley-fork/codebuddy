@@ -546,19 +546,19 @@ const DoctorSection: React.FC<{ isOpen: boolean }> = ({ isOpen }) => {
     if (isOpen && lastScanTime === null) hydrate();
   }, [isOpen, lastScanTime, hydrate]);
 
-  const { critical, warn, info, fixable } = useMemo(() => ({
-    critical: findings.filter((f) => f.severity === "critical").length,
-    warn: findings.filter((f) => f.severity === "warn").length,
-    info: findings.filter((f) => f.severity === "info").length,
-    fixable: findings.filter((f) => f.autoFixable).length,
-  }), [findings]);
-
-  const summaryColor =
-    critical > 0
-      ? "var(--vscode-editorError-foreground, #f14c4c)"
-      : warn > 0
-        ? "var(--vscode-editorWarning-foreground, #cca700)"
-        : "var(--vscode-editorInfo-foreground, #3794ff)";
+  const { critical, warn, info, fixable, summaryColor } = useMemo(() => {
+    const c = findings.filter((f) => f.severity === "critical").length;
+    const w = findings.filter((f) => f.severity === "warn").length;
+    const i = findings.filter((f) => f.severity === "info").length;
+    const fix = findings.filter((f) => f.autoFixable).length;
+    const color =
+      c > 0
+        ? "var(--vscode-editorError-foreground, #f14c4c)"
+        : w > 0
+          ? "var(--vscode-editorWarning-foreground, #cca700)"
+          : "var(--vscode-editorInfo-foreground, #3794ff)";
+    return { critical: c, warn: w, info: i, fixable: fix, summaryColor: color };
+  }, [findings]);
 
   return (
     <Section>
@@ -582,7 +582,7 @@ const DoctorSection: React.FC<{ isOpen: boolean }> = ({ isOpen }) => {
       {findings.length > 0 && (
         <DoctorFindingsList>
           {findings.map((f) => (
-            <DoctorFindingItem key={`${f.check}-${f.message}`} $severity={f.severity}>
+            <DoctorFindingItem key={f.id} $severity={f.severity}>
               <span>{f.severity === "critical" ? "❌" : f.severity === "warn" ? "⚠️" : "ℹ️"}</span>
               <DoctorFindingText>
                 <strong>[{f.check}]</strong> {f.message}

@@ -33,14 +33,16 @@ function isDoctorMessage(msg: unknown): msg is DoctorMessage {
 
 /** Serialisable subset of DoctorFinding (strips the fix callback). */
 interface DoctorFindingDTO {
+  id: string;
   check: string;
   severity: "info" | "warn" | "critical";
   message: string;
   autoFixable: boolean;
 }
 
-function toDTO(f: DoctorFinding): DoctorFindingDTO {
+function toDTO(f: DoctorFinding, index: number): DoctorFindingDTO {
   return {
+    id: `${f.check}-${index}`,
     check: f.check,
     severity: f.severity,
     message: f.message,
@@ -100,9 +102,17 @@ export class DoctorHandler implements WebviewMessageHandler {
             fixesApplied: applied,
           });
         } catch (err) {
-          ctx.logger.error(
-            `DoctorHandler auto-fix failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          const errorMessage =
+            err instanceof Error ? err.message : "Auto-fix failed";
+          ctx.logger.error(`DoctorHandler auto-fix failed: ${errorMessage}`);
+          // Always unblock the UI
+          ctx.webview.webview.postMessage({
+            command: "doctor-results",
+            findings: svc.getCachedFindings().map(toDTO),
+            timestamp: Date.now(),
+            error: errorMessage,
+            fixesApplied: 0,
+          });
         }
         break;
       }

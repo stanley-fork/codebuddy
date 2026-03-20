@@ -68,12 +68,22 @@ export class DoctorService implements vscode.Disposable {
   /** @internal — test isolation */
   public static async resetInstance(): Promise<void> {
     const inst = DoctorService.instance;
-    // Wait for any in-flight execute() to settle before disposing
-    if (inst?.activeExecution) {
+    // Clear the static reference before any async/throwing operations
+    DoctorService.instance = undefined as unknown as DoctorService;
+
+    if (!inst) return;
+
+    // Wait for in-flight work to settle before disposing resources
+    if (inst.activeExecution) {
       await inst.activeExecution.catch(() => {});
     }
-    DoctorService.instance = undefined as unknown as DoctorService;
-    inst?.dispose();
+
+    try {
+      inst.dispose();
+    } catch {
+      // Swallow — resetInstance is used in test teardown;
+      // a dispose failure shouldn't break subsequent tests
+    }
   }
 
   /** Inject dependencies after construction. */
@@ -111,15 +121,21 @@ export class DoctorService implements vscode.Disposable {
     return this.cachedFindings;
   }
 
-  /** Run all checks and return sorted findings. */
+  /** Run all checks and return sorted findings. Concurrent calls are deduplicated. */
   public async execute(): Promise<DoctorFinding[]> {
     this.assertConfigured();
-    this.activeExecution = this._executeInternal();
-    try {
-      return await this.activeExecution;
-    } finally {
-      this.activeExecution = undefined;
+
+    // If a scan is already in progress, join it rather than starting a new one
+    if (this.activeExecution) {
+      this.logger.debug("Doctor execute(): joining in-flight scan");
+      return this.activeExecution;
     }
+
+    this.activeExecution = this._executeInternal().finally(() => {
+      this.activeExecution = undefined;
+    });
+
+    return this.activeExecution;
   }
 
   private async _executeInternal(): Promise<DoctorFinding[]> {
@@ -141,7 +157,7 @@ export class DoctorService implements vscode.Disposable {
               check: check.name,
               severity: "warn" as const,
               message: `Check failed: ${err instanceof Error ? err.message : String(err)}`,
-              autoFixable: false,
+              autoFixable: false as const,
             },
           ];
         }),
@@ -224,12 +240,14 @@ export class DoctorService implements vscode.Disposable {
   /** Apply all auto-fixable findings. Returns count of fixes applied. */
   public async autoFixAll(findings: DoctorFinding[]): Promise<number> {
     if (this.isDisposed) return 0;
-    const fixable = findings.filter((f) => f.autoFixable && f.fix);
+    const fixable = findings.filter(
+      (f): f is Extract<DoctorFinding, { autoFixable: true }> => f.autoFixable,
+    );
     let applied = 0;
 
     for (const f of fixable) {
       try {
-        await f.fix!();
+        await f.fix();
         applied++;
         this.logger.info(`Auto-fixed: [${f.check}] ${f.message}`);
       } catch (err) {
