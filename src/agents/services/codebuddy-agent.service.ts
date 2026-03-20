@@ -541,13 +541,23 @@ export class CodeBuddyAgentService {
     const provider = getGenerativeAiModel()?.toLowerCase();
     if (!provider) return undefined;
     try {
-      const { apiKey, model: modelName, baseUrl } = getAPIKeyAndModel(provider);
+      const {
+        apiKey,
+        model: modelName,
+        baseUrl,
+        proxySessionToken,
+      } = getAPIKeyAndModel(provider);
       if (!apiKey) return undefined;
 
       const cacheKey = `${provider}:${modelName ?? "default"}`;
       if (this.cachedSummarizationModel?.cacheKey === cacheKey) {
         return this.cachedSummarizationModel.model;
       }
+
+      // Build proxy default headers when session token is present
+      const proxyDefaultHeaders = proxySessionToken
+        ? { "x-codebuddy-proxy-token": proxySessionToken }
+        : undefined;
 
       let model:
         | ChatAnthropic
@@ -560,13 +570,21 @@ export class CodeBuddyAgentService {
           model = new ChatAnthropic({
             anthropicApiKey: apiKey,
             modelName: modelName || "claude-sonnet-4-20250514",
+            ...(baseUrl && {
+              clientOptions: {
+                baseURL: baseUrl,
+                defaultHeaders: proxyDefaultHeaders,
+              },
+            }),
           });
           break;
         case "openai":
           model = new ChatOpenAI({
             openAIApiKey: apiKey,
             modelName: modelName || "gpt-4o",
-            configuration: baseUrl ? { baseURL: baseUrl } : undefined,
+            configuration: baseUrl
+              ? { baseURL: baseUrl, defaultHeaders: proxyDefaultHeaders }
+              : undefined,
           });
           break;
         case "groq":
@@ -585,7 +603,10 @@ export class CodeBuddyAgentService {
           model = new ChatOpenAI({
             openAIApiKey: apiKey,
             modelName: modelName || "deepseek-chat",
-            configuration: { baseURL: baseUrl || "https://api.deepseek.com" },
+            configuration: {
+              baseURL: baseUrl || "https://api.deepseek.com",
+              defaultHeaders: proxyDefaultHeaders,
+            },
           });
           break;
         case "qwen":
@@ -596,6 +617,7 @@ export class CodeBuddyAgentService {
               baseURL:
                 baseUrl ||
                 "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+              defaultHeaders: proxyDefaultHeaders,
             },
           });
           break;
@@ -605,6 +627,7 @@ export class CodeBuddyAgentService {
             modelName: modelName || "glm-4-plus",
             configuration: {
               baseURL: baseUrl || "https://open.bigmodel.cn/api/paas/v4",
+              defaultHeaders: proxyDefaultHeaders,
             },
           });
           break;
@@ -612,7 +635,10 @@ export class CodeBuddyAgentService {
           model = new ChatOpenAI({
             openAIApiKey: apiKey || "not-needed",
             modelName: modelName || "local-model",
-            configuration: { baseURL: baseUrl || "http://localhost:11434/v1" },
+            configuration: {
+              baseURL: baseUrl || "http://localhost:11434/v1",
+              defaultHeaders: proxyDefaultHeaders,
+            },
           });
           break;
         default:

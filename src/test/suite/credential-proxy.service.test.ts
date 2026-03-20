@@ -16,6 +16,7 @@ import * as sinon from "sinon";
 import * as vscode from "vscode";
 import {
   CredentialProxyService,
+  SESSION_TOKEN_HEADER,
   type ProxyAuditEntry,
 } from "../../services/credential-proxy.service";
 import { credentialProxyCheck } from "../../services/doctor-checks/credential-proxy.check";
@@ -105,6 +106,21 @@ function proxyRequest(
     });
     if (options.body) req.write(options.body);
     req.end();
+  });
+}
+
+/** proxyRequest with session token injected from a running proxy instance. */
+function authedProxyRequest(
+  proxy: CredentialProxyService,
+  path: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): ReturnType<typeof proxyRequest> {
+  return proxyRequest(proxy.getPort(), path, {
+    ...options,
+    headers: {
+      [SESSION_TOKEN_HEADER]: proxy.getSessionToken(),
+      ...options.headers,
+    },
   });
 }
 
@@ -214,12 +230,24 @@ suite("CredentialProxyService", () => {
     assert.ok(!CredentialProxyService.hasRoute("unknown"));
   });
 
+  // ─ Session token ──────────────────────────────────────────────────
+
+  test("returns 403 without session token", async () => {
+    const proxy = CredentialProxyService.getInstance();
+    await proxy.start(mockSecretStorage());
+    // Request WITHOUT session token header
+    const res = await proxyRequest(proxy.getPort(), "/openai/v1/chat");
+    assert.strictEqual(res.statusCode, 403);
+    const body = JSON.parse(res.body);
+    assert.strictEqual(body.error, "Forbidden");
+  });
+
   // ─ Routing ───────────────────────────────────────────────────────
 
   test("returns 404 for unknown provider", async () => {
     const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage());
-    const res = await proxyRequest(proxy.getPort(), "/unknown-provider/v1/chat");
+    const res = await authedProxyRequest(proxy, "/unknown-provider/v1/chat");
     assert.strictEqual(res.statusCode, 404);
     const body = JSON.parse(res.body);
     assert.ok(body.error.includes("unknown-provider"));
@@ -228,7 +256,7 @@ suite("CredentialProxyService", () => {
   test("returns 401 when API key is missing for a provider", async () => {
     const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage({})); // no keys
-    const res = await proxyRequest(proxy.getPort(), "/openai/v1/chat/completions");
+    const res = await authedProxyRequest(proxy, "/openai/v1/chat/completions");
     assert.strictEqual(res.statusCode, 401);
     const body = JSON.parse(res.body);
     assert.ok(body.error.includes("openai"));
@@ -238,7 +266,7 @@ suite("CredentialProxyService", () => {
 
   test("returns 429 when rate limit is exhausted", async () => {
     const proxy = CredentialProxyService.getInstance();
-    // Set rate limit to 1 RPM for the test provider
+    // Stub config BEFORE start() so cachedRateLimits is populated correctly
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
     configStub.callsFake((section?: string) => {
       if (section === "codebuddy.credentialProxy") {
@@ -255,7 +283,7 @@ suite("CredentialProxyService", () => {
     );
 
     // First request should succeed (or 401/502 — but not 429)
-    const res1 = await proxyRequest(proxy.getPort(), "/openai/v1/models");
+    const res1 = await authedProxyRequest(proxy, "/openai/v1/models");
     assert.notStrictEqual(
       res1.statusCode,
       429,
@@ -263,7 +291,7 @@ suite("CredentialProxyService", () => {
     );
 
     // Second request should be rate-limited
-    const res2 = await proxyRequest(proxy.getPort(), "/openai/v1/models");
+    const res2 = await authedProxyRequest(proxy, "/openai/v1/models");
     assert.strictEqual(res2.statusCode, 429);
     const body = JSON.parse(res2.body);
     assert.ok(body.error.includes("Rate limit"));
@@ -274,8 +302,8 @@ suite("CredentialProxyService", () => {
   test("records entries in audit log", async () => {
     const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage());
-    // 404 for unknown provider does not record audit — try a known provider
-    await proxyRequest(proxy.getPort(), "/openai/v1/chat");
+    // Request a known provider — will get 401 (no key) but should still audit
+    await authedProxyRequest(proxy, "/openai/v1/chat");
     const log = proxy.getAuditLog();
     assert.ok(log.length > 0, "audit log should have entries");
 
@@ -285,10 +313,21 @@ suite("CredentialProxyService", () => {
     assert.ok(last.latencyMs >= 0);
   });
 
+  test("records 404 in audit log for unknown provider", async () => {
+    const proxy = CredentialProxyService.getInstance();
+    await proxy.start(mockSecretStorage());
+    await authedProxyRequest(proxy, "/unknown-provider/v1/chat");
+    const log = proxy.getAuditLog();
+    assert.ok(log.length > 0, "404 should be recorded in audit log");
+    const last = log[log.length - 1];
+    assert.strictEqual(last.provider, "unknown-provider");
+    assert.strictEqual(last.statusCode, 404);
+  });
+
   test("getAuditLog() returns a defensive copy", async () => {
     const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage());
-    await proxyRequest(proxy.getPort(), "/openai/v1/chat");
+    await authedProxyRequest(proxy, "/openai/v1/chat");
 
     const log1 = proxy.getAuditLog();
     const log2 = proxy.getAuditLog();
@@ -406,7 +445,7 @@ suite("credentialProxyCheck (doctor)", () => {
     try {
       const findings = await credentialProxyCheck.run(makeContext());
       const warning = findings.find(
-        (f) => f.severity === "warn" && f.message.includes("OPENAI_API_KEY"),
+        (f) => f.severity === "warn" && f.message.includes("API key"),
       );
       assert.ok(warning, "expected a warning about leaked env var");
     } finally {

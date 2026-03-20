@@ -76,7 +76,7 @@ export const credentialProxyCheck: DoctorCheckModule = {
       findings.push({
         check: "credential-proxy",
         severity: "warn",
-        message: `Found LLM API keys in environment variables (${leakedEnvVars.join(", ")}). With credential proxy enabled, these are unnecessary and increase exposure risk.`,
+        message: `Found ${leakedEnvVars.length} LLM API key(s) in environment variables. With credential proxy enabled, these are unnecessary and increase exposure risk. Run \`printenv | grep API_KEY\` to identify them.`,
         autoFixable: false,
       });
     }

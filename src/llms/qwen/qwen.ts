@@ -44,6 +44,9 @@ export class QwenLLM
       baseURL:
         config.baseUrl ||
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      ...(this.config.defaultHeaders && {
+        defaultHeaders: this.config.defaultHeaders,
+      }),
     });
     this.response = undefined;
     this.orchestrator = Orchestrator.getInstance();
@@ -85,6 +88,9 @@ export class QwenLLM
       baseURL:
         config.baseUrl ||
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      ...(this.config.defaultHeaders && {
+        defaultHeaders: this.config.defaultHeaders,
+      }),
     });
   }
 
