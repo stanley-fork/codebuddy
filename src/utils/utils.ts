@@ -348,10 +348,11 @@ export const getAPIKeyAndModel = (
   // When credential proxy is enabled, redirect through localhost proxy.
   // The proxy injects real credentials — the SDK gets a dummy key.
   // Gemini is excluded because its SDK doesn't support baseURL override.
+  // Check enabled first (cheap bool read) before set lookups and getInstance().
   if (
+    getConfigValue("codebuddy.credentialProxy.enabled") &&
     lowerCaseModel !== "gemini" &&
-    PROXY_PROVIDERS.has(lowerCaseModel) &&
-    getConfigValue("codebuddy.credentialProxy.enabled")
+    PROXY_PROVIDERS.has(lowerCaseModel)
   ) {
     const proxy = CredentialProxyService.getInstance();
     if (proxy.isRunning()) {

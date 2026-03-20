@@ -20,6 +20,7 @@ import {
 } from "../../services/credential-proxy.service";
 import { credentialProxyCheck } from "../../services/doctor-checks/credential-proxy.check";
 import type { DoctorCheckContext } from "../../services/doctor-checks/types";
+import type { SecretStorageService } from "../../services/secret-storage";
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -27,11 +28,11 @@ const REQUEST_TIMEOUT_MS = 5000;
 
 function mockSecretStorage(
   stored: Record<string, string> = {},
-): DoctorCheckContext["secretStorage"] {
+): SecretStorageService {
   return {
     getApiKey: (key: string) => stored[key],
     storeApiKey: sinon.stub().resolves(),
-  } as unknown as DoctorCheckContext["secretStorage"];
+  } as unknown as SecretStorageService;
 }
 
 function mockLogger(): DoctorCheckContext["logger"] {
@@ -41,6 +42,13 @@ function mockLogger(): DoctorCheckContext["logger"] {
     error: sinon.stub(),
     debug: sinon.stub(),
   } as unknown as DoctorCheckContext["logger"];
+}
+
+/** Minimal WorkspaceConfiguration stub — avoids `as any` on every call site. */
+function mockConfig(
+  getter: (key: string, defaultVal?: unknown) => unknown,
+): vscode.WorkspaceConfiguration {
+  return { get: getter } as unknown as vscode.WorkspaceConfiguration;
 }
 
 function makeContext(
@@ -145,7 +153,7 @@ suite("CredentialProxyService", () => {
 
   test("starts and exposes a dynamic port on localhost", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
 
     assert.ok(proxy.isRunning(), "proxy should be running");
     assert.ok(proxy.getPort() > 0, "port should be > 0");
@@ -153,15 +161,15 @@ suite("CredentialProxyService", () => {
 
   test("start() is idempotent", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
     const port1 = proxy.getPort();
-    await proxy.start(mockSecretStorage() as any); // second call
+    await proxy.start(mockSecretStorage()); // second call
     assert.strictEqual(proxy.getPort(), port1, "port should not change");
   });
 
   test("dispose() stops the server", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
     assert.ok(proxy.isRunning());
     proxy.dispose();
     assert.ok(!proxy.isRunning(), "should not be running after dispose");
@@ -170,7 +178,7 @@ suite("CredentialProxyService", () => {
 
   test("getInstance() after dispose returns same instance (not disposed)", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
     proxy.dispose();
     // Same instance — not resurrected
     const proxy2 = CredentialProxyService.getInstance();
@@ -180,18 +188,18 @@ suite("CredentialProxyService", () => {
 
   test("can restart after dispose", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
     const port1 = proxy.getPort();
     proxy.dispose();
     assert.ok(!proxy.isRunning());
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
     assert.ok(proxy.isRunning(), "should be running after restart");
     assert.ok(proxy.getPort() > 0, "should have a port after restart");
   });
 
   test("getProxyUrl() returns correct localhost URL with provider path", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
     const url = proxy.getProxyUrl("openai");
     assert.ok(
       url.startsWith(`http://127.0.0.1:${proxy.getPort()}/openai`),
@@ -210,7 +218,7 @@ suite("CredentialProxyService", () => {
 
   test("returns 404 for unknown provider", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
     const res = await proxyRequest(proxy.getPort(), "/unknown-provider/v1/chat");
     assert.strictEqual(res.statusCode, 404);
     const body = JSON.parse(res.body);
@@ -219,7 +227,7 @@ suite("CredentialProxyService", () => {
 
   test("returns 401 when API key is missing for a provider", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage({}) as any); // no keys
+    await proxy.start(mockSecretStorage({})); // no keys
     const res = await proxyRequest(proxy.getPort(), "/openai/v1/chat/completions");
     assert.strictEqual(res.statusCode, 401);
     const body = JSON.parse(res.body);
@@ -234,18 +242,16 @@ suite("CredentialProxyService", () => {
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
     configStub.callsFake((section?: string) => {
       if (section === "codebuddy.credentialProxy") {
-        return {
-          get: (key: string) => {
-            if (key === "rateLimits") return { openai: 1 };
-            return undefined;
-          },
-        } as any;
+        return mockConfig((key: string) => {
+          if (key === "rateLimits") return { openai: 1 };
+          return undefined;
+        });
       }
-      return { get: () => undefined } as any;
+      return mockConfig(() => undefined);
     });
 
     await proxy.start(
-      mockSecretStorage({ "codebuddy.openaiApiKey": "test-key" }) as any,
+      mockSecretStorage({ "codebuddy.openaiApiKey": "test-key" }),
     );
 
     // First request should succeed (or 401/502 — but not 429)
@@ -267,7 +273,7 @@ suite("CredentialProxyService", () => {
 
   test("records entries in audit log", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
     // 404 for unknown provider does not record audit — try a known provider
     await proxyRequest(proxy.getPort(), "/openai/v1/chat");
     const log = proxy.getAuditLog();
@@ -281,7 +287,7 @@ suite("CredentialProxyService", () => {
 
   test("getAuditLog() returns a defensive copy", async () => {
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
     await proxyRequest(proxy.getPort(), "/openai/v1/chat");
 
     const log1 = proxy.getAuditLog();
@@ -305,9 +311,7 @@ suite("credentialProxyCheck (doctor)", () => {
 
   test("returns info finding when proxy is disabled", async () => {
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
-    configStub.callsFake(() => ({
-      get: (_key: string, defaultVal: any) => defaultVal,
-    }) as any);
+    configStub.callsFake(() => mockConfig((_key: string, defaultVal?: unknown) => defaultVal));
 
     const findings = await credentialProxyCheck.run(makeContext());
     assert.strictEqual(findings.length, 1);
@@ -319,14 +323,12 @@ suite("credentialProxyCheck (doctor)", () => {
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
     configStub.callsFake((section?: string) => {
       if (section === "codebuddy.credentialProxy") {
-        return {
-          get: (key: string, defaultVal: any) => {
-            if (key === "enabled") return true;
-            return defaultVal;
-          },
-        } as any;
+        return mockConfig((key: string, defaultVal?: unknown) => {
+          if (key === "enabled") return true;
+          return defaultVal;
+        });
       }
-      return { get: (_k: string, d: any) => d } as any;
+      return mockConfig((_k: string, d?: unknown) => d);
     });
 
     // No singleton exists — resetForTesting() was called in setup
@@ -341,14 +343,12 @@ suite("credentialProxyCheck (doctor)", () => {
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
     configStub.callsFake((section?: string) => {
       if (section === "codebuddy.credentialProxy") {
-        return {
-          get: (key: string, defaultVal: any) => {
-            if (key === "enabled") return true;
-            return defaultVal;
-          },
-        } as any;
+        return mockConfig((key: string, defaultVal?: unknown) => {
+          if (key === "enabled") return true;
+          return defaultVal;
+        });
       }
-      return { get: (_k: string, d: any) => d } as any;
+      return mockConfig((_k: string, d?: unknown) => d);
     });
 
     // Proxy singleton exists but isn't started
@@ -364,19 +364,17 @@ suite("credentialProxyCheck (doctor)", () => {
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
     configStub.callsFake((section?: string) => {
       if (section === "codebuddy.credentialProxy") {
-        return {
-          get: (key: string, defaultVal: any) => {
-            if (key === "enabled") return true;
-            if (key === "rateLimits") return {};
-            return defaultVal;
-          },
-        } as any;
+        return mockConfig((key: string, defaultVal?: unknown) => {
+          if (key === "enabled") return true;
+          if (key === "rateLimits") return {};
+          return defaultVal;
+        });
       }
-      return { get: (_k: string, d: any) => d } as any;
+      return mockConfig((_k: string, d?: unknown) => d);
     });
 
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
 
     const findings = await credentialProxyCheck.run(makeContext());
     const infoFinding = findings.find(
@@ -390,19 +388,17 @@ suite("credentialProxyCheck (doctor)", () => {
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
     configStub.callsFake((section?: string) => {
       if (section === "codebuddy.credentialProxy") {
-        return {
-          get: (key: string, defaultVal: any) => {
-            if (key === "enabled") return true;
-            if (key === "rateLimits") return {};
-            return defaultVal;
-          },
-        } as any;
+        return mockConfig((key: string, defaultVal?: unknown) => {
+          if (key === "enabled") return true;
+          if (key === "rateLimits") return {};
+          return defaultVal;
+        });
       }
-      return { get: (_k: string, d: any) => d } as any;
+      return mockConfig((_k: string, d?: unknown) => d);
     });
 
     const proxy = CredentialProxyService.getInstance();
-    await proxy.start(mockSecretStorage() as any);
+    await proxy.start(mockSecretStorage());
 
     // Temporarily inject a fake env var
     const origKey = process.env.OPENAI_API_KEY;

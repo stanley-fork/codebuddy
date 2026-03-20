@@ -398,8 +398,20 @@ export class ExternalSecurityConfigService
     category: string = "unknown",
     flags: string = "i",
   ): RegExp[] {
+    const MAX_PATTERN_LENGTH = 200;
     const result: RegExp[] = [];
     for (const src of sources) {
+      if (src.length > MAX_PATTERN_LENGTH) {
+        this.logger.warn(
+          `Regex in ${category} exceeds ${MAX_PATTERN_LENGTH} chars, skipped: ${src.slice(0, 40)}…`,
+        );
+        this.invalidPatterns.push({
+          category,
+          pattern: src.slice(0, 40) + "…",
+          error: `Pattern exceeds ${MAX_PATTERN_LENGTH} character limit`,
+        });
+        continue;
+      }
       try {
         result.push(new RegExp(src, flags));
       } catch (err) {
