@@ -75,11 +75,26 @@ const MAX_ADMINS = 50;
 /** Identity resolution cache TTL (5 minutes). */
 const IDENTITY_TTL_MS = 5 * 60 * 1000;
 
-/** Minimum interval between checkAccess audit writes (100ms). */
-const CHECK_ACCESS_MIN_INTERVAL_MS = 100;
+/** Minimum interval between logger.warn outputs for denied access (100ms). */
+const DENY_LOG_MIN_INTERVAL_MS = 100;
 
-/** Basic email format validation pattern. */
+/** Matches a basic email address (intentionally simple — not RFC 5322). */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Matches a valid GitHub username: 1–39 alphanumeric/hyphen chars, no leading/trailing hyphen. */
+const GITHUB_USERNAME_RE = /^[a-zA-Z\d](?:[a-zA-Z\d-]{0,37}[a-zA-Z\d])?$/;
+
+/**
+ * Sanitize and validate a raw identity string from git config or auth.
+ * Accepts emails and GitHub usernames; rejects everything else.
+ */
+function sanitizeIdentity(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 254) return undefined; // RFC 5321 max
+  if (EMAIL_RE.test(trimmed)) return trimmed;
+  if (GITHUB_USERNAME_RE.test(trimmed)) return trimmed;
+  return undefined;
+}
 
 // ─── Service ─────────────────────────────────────────────────────────
 
@@ -115,8 +130,8 @@ export class AccessControlService implements vscode.Disposable {
   private identityResolvedAt = 0;
   /** In-memory audit log (bounded). */
   private auditLog: AccessAuditEntry[] = [];
-  /** Timestamp of last checkAccess call (simple rate limiter). */
-  private lastCheckAt = 0;
+  /** Timestamp of last deny logger.warn output (throttle log flooding). */
+  private lastDenyLogAt = 0;
   /** Disposables owned by this service (auth listener, etc.). */
   private readonly _disposables: vscode.Disposable[] = [];
 
@@ -265,9 +280,7 @@ export class AccessControlService implements vscode.Disposable {
             resolve(undefined);
             return;
           }
-          const email = (stdout as string)?.trim();
-          // Basic email format check — don't trust arbitrary git config output
-          resolve(email && EMAIL_RE.test(email) ? email : undefined);
+          resolve(sanitizeIdentity((stdout as string) ?? ""));
         },
       );
     });
@@ -282,6 +295,11 @@ export class AccessControlService implements vscode.Disposable {
 
     const knownFolders =
       vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [];
+
+    // Pre-workspace load: no known folders yet — fall back to workspacePath
+    // rather than rejecting outright (git email is non-sensitive read-only).
+    if (knownFolders.length === 0) return path.resolve(this.workspacePath);
+
     const resolved = path.resolve(this.workspacePath);
     const isKnown = knownFolders.some((f) => {
       const resolvedFolder = path.resolve(f);
@@ -399,27 +417,26 @@ export class AccessControlService implements vscode.Disposable {
   }
 
   /**
+   * Normalize a user list from config into a lowercase Set, capped at `max`.
+   */
+  private normalizeUserList(list: unknown, max: number): Set<string> {
+    if (!Array.isArray(list)) return new Set();
+    return new Set(
+      list
+        .filter((u): u is string => typeof u === "string" && u.length > 0)
+        .slice(0, max)
+        .map((u) => u.toLowerCase()),
+    );
+  }
+
+  /**
    * Pre-compute normalized lookup sets from config.
    */
   private applyConfig(): void {
-    const users = this.config.users;
-    this.normalizedUsers = new Set(
-      Array.isArray(users)
-        ? users
-            .filter((u): u is string => typeof u === "string" && u.length > 0)
-            .slice(0, MAX_USERS)
-            .map((u) => u.toLowerCase())
-        : [],
-    );
-
-    const admins = this.config.admins;
-    this.normalizedAdmins = new Set(
-      Array.isArray(admins)
-        ? admins
-            .filter((u): u is string => typeof u === "string" && u.length > 0)
-            .slice(0, MAX_ADMINS)
-            .map((u) => u.toLowerCase())
-        : [],
+    this.normalizedUsers = this.normalizeUserList(this.config.users, MAX_USERS);
+    this.normalizedAdmins = this.normalizeUserList(
+      this.config.admins,
+      MAX_ADMINS,
     );
 
     this.logDenied = this.config.logDenied !== false;
@@ -545,29 +562,51 @@ export class AccessControlService implements vscode.Disposable {
   }
 
   /**
-   * Check access and record an audit entry.
-   * Returns true if the action is allowed.
-   *
-   * Includes a simple rate limiter — if called faster than
-   * CHECK_ACCESS_MIN_INTERVAL_MS, the check still runs but
-   * audit logging is throttled to prevent log flooding.
+   * Async check: refreshes identity if TTL expired, records audit, returns allowed.
+   * Use this at enforcement points where `await` is available.
+   */
+  public async checkAccessAsync(action: string): Promise<boolean> {
+    await this.ensureFreshIdentity();
+    const allowed = this.isUserAllowed(this.currentUser);
+
+    // Always record to audit log — completeness is non-negotiable for security
+    this.recordAudit(action, allowed);
+
+    // Throttle only the logger.warn to prevent log flooding
+    if (!allowed && this.logDenied) {
+      const now = Date.now();
+      if (now - this.lastDenyLogAt >= DENY_LOG_MIN_INTERVAL_MS) {
+        this.lastDenyLogAt = now;
+        logger.warn(
+          `Access denied: user="${this.currentUser ?? "unknown"}" ` +
+            `action="${action}" mode=${this.mode}`,
+        );
+      }
+    }
+
+    return allowed;
+  }
+
+  /**
+   * Synchronous check: uses cached identity, records audit.
+   * Prefer `checkAccessAsync()` at enforcement points.
    */
   public checkAccess(action: string): boolean {
     const allowed = this.isCurrentUserAllowed();
 
-    const now = Date.now();
-    const shouldLog = now - this.lastCheckAt >= CHECK_ACCESS_MIN_INTERVAL_MS;
-    this.lastCheckAt = now;
+    // Always record to audit log — completeness is non-negotiable for security
+    this.recordAudit(action, allowed);
 
-    if (shouldLog) {
-      this.recordAudit(action, allowed);
-    }
-
+    // Throttle only the logger.warn to prevent log flooding
     if (!allowed && this.logDenied) {
-      logger.warn(
-        `Access denied: user="${this.currentUser ?? "unknown"}" ` +
-          `action="${action}" mode=${this.mode}`,
-      );
+      const now = Date.now();
+      if (now - this.lastDenyLogAt >= DENY_LOG_MIN_INTERVAL_MS) {
+        this.lastDenyLogAt = now;
+        logger.warn(
+          `Access denied: user="${this.currentUser ?? "unknown"}" ` +
+            `action="${action}" mode=${this.mode}`,
+        );
+      }
     }
 
     return allowed;
@@ -583,9 +622,9 @@ export class AccessControlService implements vscode.Disposable {
       allowed,
     });
 
-    // Bounded: drop oldest when limit reached
+    // Bounded: drop oldest entry — O(1) vs. O(n) slice reallocation
     if (this.auditLog.length > MAX_AUDIT_ENTRIES) {
-      this.auditLog = this.auditLog.slice(-MAX_AUDIT_ENTRIES);
+      this.auditLog.shift();
     }
   }
 
@@ -607,15 +646,36 @@ export class AccessControlService implements vscode.Disposable {
 
   /**
    * Set the access control mode programmatically.
+   *
+   * `source` controls priority: a lower-priority source cannot override a
+   * higher-priority one ("file" > "command" > "setting" > "default").
+   * The QuickPick command uses `"command"` so it can override a VS Code
+   * setting but not a file-based config.
+   *
    * Fires `onAccessChanged` if the mode actually changes.
    */
-  public setMode(mode: AccessControlMode, persist = true): void {
+  public setMode(
+    mode: AccessControlMode,
+    source: "default" | "setting" | "command" | "file" = "command",
+    persist = true,
+  ): void {
     if (!VALID_MODES.includes(mode)) return;
+
+    // File-based config has highest priority — lower sources cannot override
+    if (this.configLoaded && source !== "file") {
+      logger.debug(
+        `setMode("${mode}") from "${source}" ignored — .codebuddy/access.json is active`,
+      );
+      return;
+    }
+
     const old = this.mode;
     this.mode = mode;
     if (old !== this.mode) {
       this._onAccessChanged.fire(this.mode);
-      logger.info(`Access control mode changed: ${old} → ${this.mode}`);
+      logger.info(
+        `Access control mode changed: ${old} → ${this.mode} (source: ${source})`,
+      );
 
       if (persist) {
         vscode.workspace

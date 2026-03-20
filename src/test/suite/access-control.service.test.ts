@@ -288,7 +288,7 @@ suite("AccessControlService", () => {
       firedMode = m;
     });
 
-    svc.setMode("allow", false);
+    svc.setMode("allow", "command", false);
     assert.strictEqual(svc.getMode(), "allow");
     assert.strictEqual(firedMode, "allow");
   });
@@ -300,14 +300,14 @@ suite("AccessControlService", () => {
     let fireCount = 0;
     svc.onAccessChanged(() => { fireCount++; });
 
-    svc.setMode("open", false); // same as default
+    svc.setMode("open", "command", false); // same as default
     assert.strictEqual(fireCount, 0);
   });
 
   test("setMode ignores invalid mode", async () => {
     const svc = AccessControlService.getInstance();
     await svc.initialize();
-    svc.setMode("nonsense" as AccessControlMode, false);
+    svc.setMode("nonsense" as AccessControlMode, "command", false);
     assert.strictEqual(svc.getMode(), "open");
   });
 
@@ -388,18 +388,20 @@ suite("AccessControlService", () => {
     assert.ok(loaded.message.includes("highest priority"));
   });
 
-  test("checkAccess rate limits audit writes", async () => {
+  test("checkAccess always records audit but throttles logger.warn", async () => {
     const svc = AccessControlService.getInstance();
     await svc.initialize();
 
-    // Rapid-fire calls — only first should log (within 100ms window)
+    // Rapid-fire calls — all should be audit-logged (logger.warn is throttled, not audit)
     svc.checkAccess("action1");
     svc.checkAccess("action2");
     svc.checkAccess("action3");
 
     const log = svc.getAuditLog();
-    // At least 1 logged, but fewer than 3 due to throttle
-    assert.ok(log.length >= 1);
-    assert.ok(log.length < 3);
+    // Every call must produce an audit entry — completeness is non-negotiable
+    assert.strictEqual(log.length, 3);
+    assert.strictEqual(log[0].action, "action1");
+    assert.strictEqual(log[1].action, "action2");
+    assert.strictEqual(log[2].action, "action3");
   });
 });

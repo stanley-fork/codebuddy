@@ -685,10 +685,11 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
               break;
             }
             case "user-input": {
-              // ── Access control gate (fail-closed) ──
+              // ── Access control gate (fail-closed, async identity refresh) ──
               const acl = AccessControlService.getInstance();
               if (acl.isServiceInitialized()) {
-                if (!acl.checkAccess("user-input")) {
+                const allowed = await acl.checkAccessAsync("user-input");
+                if (!allowed) {
                   await this.currentWebView?.webview.postMessage({
                     type: "onStreamError",
                     payload: {
