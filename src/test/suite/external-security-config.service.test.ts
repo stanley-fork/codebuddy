@@ -12,22 +12,28 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const TEST_CONFIG_DIR = path.join(
+const TEST_WORKSPACE = path.join(
   os.tmpdir(),
   `codebuddy-security-test-${Date.now()}`,
 );
+const TEST_CONFIG_DIR = path.join(TEST_WORKSPACE, ".codebuddy");
 const TEST_CONFIG_FILE = path.join(TEST_CONFIG_DIR, "security.json");
 
-/** Write a test config and point the service at it. */
-function writeTestConfig(config: ExternalSecurityConfig): void {
+/** Write a test config and initialize the service against it. */
+async function writeAndInit(
+  config: ExternalSecurityConfig,
+): Promise<ExternalSecurityConfigService> {
   fs.mkdirSync(TEST_CONFIG_DIR, { recursive: true });
   fs.writeFileSync(TEST_CONFIG_FILE, JSON.stringify(config), "utf-8");
+  const svc = ExternalSecurityConfigService.getInstance();
+  await svc.initialize(TEST_WORKSPACE);
+  return svc;
 }
 
 function cleanUp(): void {
   try {
-    if (fs.existsSync(TEST_CONFIG_DIR)) {
-      fs.rmSync(TEST_CONFIG_DIR, { recursive: true, force: true });
+    if (fs.existsSync(TEST_WORKSPACE)) {
+      fs.rmSync(TEST_WORKSPACE, { recursive: true, force: true });
     }
   } catch {
     // best effort
@@ -183,9 +189,9 @@ suite("ExternalSecurityConfigService", () => {
   // ── Diagnostics ───────────────────────────────────────────────
 
   suite("getDiagnostics", () => {
-    test("reports missing config as info", () => {
+    test("reports missing config as info", async () => {
       const svc = ExternalSecurityConfigService.getInstance();
-      const diagnostics = svc.getDiagnostics();
+      const diagnostics = await svc.getDiagnostics();
       assert.ok(diagnostics.length > 0);
       const missingConfig = diagnostics.find((d) =>
         d.message.includes("No security config found"),
@@ -271,6 +277,145 @@ suite("ExternalSecurityConfigService", () => {
     test("implements isPathBlocked", () => {
       const svc = ExternalSecurityConfigService.getInstance();
       assert.strictEqual(typeof svc.isPathBlocked, "function");
+    });
+
+    test("implements isExternalPathAllowed", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      assert.strictEqual(typeof svc.isExternalPathAllowed, "function");
+    });
+  });
+
+  // ── Initialize with file loading ──────────────────────────────
+
+  suite("initialize with config file", () => {
+    test("loads config from disk on initialize", async () => {
+      const svc = await writeAndInit({
+        commandDenyPatterns: ["\\brm\\s+-rf\\s+\\/"],
+      });
+      assert.strictEqual(svc.isCommandBlocked("rm -rf /"), true);
+      assert.strictEqual(svc.isCommandBlocked("ls -la"), false);
+    });
+
+    test("loads network deny patterns from file", async () => {
+      const svc = await writeAndInit({
+        networkDenyPatterns: ["^https://evil\\.example\\.com"],
+      });
+      assert.strictEqual(
+        svc.isUrlAllowed("https://evil.example.com/pwn"),
+        false,
+      );
+      assert.strictEqual(
+        svc.isUrlAllowed("https://good.example.com"),
+        true,
+      );
+    });
+
+    test("loads blocked path patterns from file", async () => {
+      const svc = await writeAndInit({
+        blockedPathPatterns: ["my_secrets"],
+      });
+      assert.strictEqual(
+        svc.isPathBlocked("/home/user/my_secrets/key.pem"),
+        true,
+      );
+    });
+  });
+
+  // ── scaffoldDefaultConfig ─────────────────────────────────────
+
+  suite("scaffoldDefaultConfig", () => {
+    test("creates config file when none exists", async () => {
+      // Set up workspace dir but do NOT create config file
+      fs.mkdirSync(TEST_WORKSPACE, { recursive: true });
+      const svc = ExternalSecurityConfigService.getInstance();
+      await svc.initialize(TEST_WORKSPACE);
+
+      const created = await svc.scaffoldDefaultConfig();
+      assert.strictEqual(created, true);
+      assert.ok(fs.existsSync(TEST_CONFIG_FILE));
+
+      const content = JSON.parse(fs.readFileSync(TEST_CONFIG_FILE, "utf-8"));
+      assert.ok(content.allowedPaths);
+      assert.ok(content.allowedPaths.length > 0);
+    });
+
+    test("returns false if config already exists", async () => {
+      const svc = await writeAndInit({ commandDenyPatterns: [] });
+      const created = await svc.scaffoldDefaultConfig();
+      assert.strictEqual(created, false);
+    });
+  });
+
+  // ── hasConfig ─────────────────────────────────────────────────
+
+  suite("hasConfig", () => {
+    test("returns false when no config file", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      assert.strictEqual(svc.hasConfig(), false);
+    });
+
+    test("returns true when config file exists", async () => {
+      const svc = await writeAndInit({ commandDenyPatterns: [] });
+      assert.strictEqual(svc.hasConfig(), true);
+    });
+  });
+
+  // ── Null byte protection ──────────────────────────────────────
+
+  suite("isExternalPathAllowed — null byte protection", () => {
+    test("rejects paths containing null bytes", async () => {
+      const svc = await writeAndInit({
+        allowedPaths: [{ path: "/tmp", allowReadWrite: true }],
+      });
+      const result = svc.isExternalPathAllowed("/tmp/file\0.txt");
+      assert.strictEqual(result.allowed, false);
+    });
+  });
+
+  // ── isPathBlocked — full path matching ────────────────────────
+
+  suite("isPathBlocked — enhanced matching", () => {
+    test("blocks via exact segment match", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      assert.strictEqual(
+        svc.isPathBlocked("/home/user/.ssh/authorized_keys"),
+        true,
+      );
+    });
+
+    test("blocks via path component substring", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      // .aws at the end of a path (not followed by /)
+      assert.strictEqual(
+        svc.isPathBlocked("/home/user/.aws"),
+        true,
+      );
+    });
+  });
+
+  // ── getDiagnostics — async + invalid pattern surfacing ────────
+
+  suite("getDiagnostics async", () => {
+    test("returns diagnostics as a promise", async () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      const diagnostics = await svc.getDiagnostics();
+      assert.ok(Array.isArray(diagnostics));
+      assert.ok(diagnostics.length > 0);
+    });
+
+    test("surfaces invalid regex patterns in diagnostics", async () => {
+      const svc = await writeAndInit({
+        commandDenyPatterns: ["[invalid-regex("],
+      });
+      const diagnostics = await svc.getDiagnostics();
+      const invalidPatternDiag = diagnostics.find(
+        (d) => d.message.includes("Invalid regex"),
+      );
+      assert.ok(
+        invalidPatternDiag,
+        "Should surface invalid regex patterns in diagnostics",
+      );
+      assert.strictEqual(invalidPatternDiag!.severity, "warn");
     });
   });
 });

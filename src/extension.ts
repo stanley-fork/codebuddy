@@ -433,24 +433,27 @@ export async function activate(context: vscode.ExtensionContext) {
         "codebuddy.openSecurityConfig",
         async () => {
           const svc = ExternalSecurityConfigService.getInstance();
-          const configPath = svc.getConfigPath();
-          if (!configPath || !fs.existsSync(configPath)) {
+          if (!svc.hasConfig()) {
             const action = await vscode.window.showInformationMessage(
               "No security config found. Create .codebuddy/security.json?",
               "Create",
               "Cancel",
             );
             if (action === "Create") {
-              await svc.scaffoldDefaultConfig();
-              const updatedPath = svc.getConfigPath();
-              if (updatedPath && fs.existsSync(updatedPath)) {
-                const doc =
-                  await vscode.workspace.openTextDocument(updatedPath);
-                await vscode.window.showTextDocument(doc);
+              const created = await svc.scaffoldDefaultConfig();
+              if (created) {
+                const configPath = svc.getConfigPath();
+                if (configPath) {
+                  const doc =
+                    await vscode.workspace.openTextDocument(configPath);
+                  await vscode.window.showTextDocument(doc);
+                }
               }
             }
             return;
           }
+          const configPath = svc.getConfigPath();
+          if (!configPath) return;
           const doc = await vscode.workspace.openTextDocument(configPath);
           await vscode.window.showTextDocument(doc);
         },
@@ -459,7 +462,7 @@ export async function activate(context: vscode.ExtensionContext) {
         "codebuddy.securityDiagnostics",
         async () => {
           const svc = ExternalSecurityConfigService.getInstance();
-          const diagnostics = svc.getDiagnostics();
+          const diagnostics = await svc.getDiagnostics();
           securityChannel.clear();
           securityChannel.appendLine(
             "=== CodeBuddy Security Diagnostics ===\n",

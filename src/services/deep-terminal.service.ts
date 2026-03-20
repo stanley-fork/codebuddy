@@ -304,8 +304,15 @@ export class DeepTerminalService extends EventEmitter {
       }
     }
 
+    if (!this.securityPolicy) {
+      this.logger.debug(
+        "External security policy not yet injected — skipping policy check",
+      );
+    }
+
     // Check injected external security policy (fail-closed: if injected, it MUST succeed)
-    if (this.securityPolicy?.isCommandBlocked(command)) {
+    // Pass the ALREADY normalized string to ensure consistent pattern matching
+    if (this.securityPolicy?.isCommandBlocked(normalised)) {
       const msg = `Blocked by external security policy: "${command}"`;
       this.logger.warn(msg);
       throw new Error(

@@ -1,9 +1,18 @@
 import * as fs from "fs";
+import { readFile, access, stat } from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import { ISecurityPolicy } from "./security-policy.interface";
+
+// ─── Types ───────────────────────────────────────────────────────────
+
+export interface SecurityDiagnostic {
+  severity: "info" | "warn" | "critical";
+  message: string;
+  autoFixable: boolean;
+}
 
 // ─── Schema ──────────────────────────────────────────────────────────
 
@@ -106,9 +115,15 @@ export class ExternalSecurityConfigService
   private compiledCommandDenyPatterns: RegExp[] = [];
   private compiledNetworkAllowPatterns: RegExp[] = [];
   private compiledNetworkDenyPatterns: RegExp[] = [];
+  private compiledPathBlockPatterns: RegExp[] = [];
   private mergedBlockedPathPatterns: Set<string> = new Set(
     DEFAULT_BLOCKED_PATH_PATTERNS,
   );
+  private invalidPatterns: Array<{
+    category: string;
+    pattern: string;
+    error: string;
+  }> = [];
 
   private configDir = "";
   private configFile = "";
@@ -135,11 +150,12 @@ export class ExternalSecurityConfigService
     return ExternalSecurityConfigService.instance;
   }
 
-  /** @internal – for test isolation */
+  /** @internal – for test isolation. Clear reference before dispose to prevent re-entrant getInstance(). */
   public static resetInstance(): void {
-    ExternalSecurityConfigService.instance?.dispose();
+    const inst = ExternalSecurityConfigService.instance;
     ExternalSecurityConfigService.instance =
       undefined as unknown as ExternalSecurityConfigService;
+    inst?.dispose();
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────
@@ -167,8 +183,18 @@ export class ExternalSecurityConfigService
 
     await this.loadConfig();
     this.startWatcher();
+
+    let fileExists = false;
+    if (this.configFile) {
+      try {
+        await access(this.configFile, fs.constants.R_OK);
+        fileExists = true;
+      } catch {
+        // file doesn't exist
+      }
+    }
     this.logger.info(
-      `Security config initialised (file exists: ${this.configFile ? fs.existsSync(this.configFile) : false})`,
+      `Security config initialised (file exists: ${fileExists})`,
     );
   }
 
@@ -181,14 +207,23 @@ export class ExternalSecurityConfigService
   // ── Config loading ───────────────────────────────────────────────
 
   private async loadConfig(): Promise<void> {
-    if (!this.configFile || !fs.existsSync(this.configFile)) {
+    if (!this.configFile) {
+      this.config = {};
+      this.compilePatterns();
+      return;
+    }
+
+    // Use async I/O to avoid blocking the extension host
+    try {
+      await access(this.configFile, fs.constants.R_OK);
+    } catch {
       this.config = {};
       this.compilePatterns();
       return;
     }
 
     try {
-      const raw = fs.readFileSync(this.configFile, "utf-8");
+      const raw = await readFile(this.configFile, "utf-8");
       const parsed: unknown = JSON.parse(raw);
       if (!this.isValidConfig(parsed)) {
         this.logger.warn(
@@ -251,40 +286,49 @@ export class ExternalSecurityConfigService
    */
   private compilePatterns(): void {
     const limit = ExternalSecurityConfigService.MAX_USER_PATTERNS;
+    this.invalidPatterns = [];
 
     const userCommandPatterns = this.truncatePatterns(
       this.config.commandDenyPatterns,
       limit,
       "commandDenyPatterns",
     );
-    this.compiledCommandDenyPatterns = this.compileRegexArray([
-      ...DEFAULT_COMMAND_DENY_PATTERNS,
-      ...userCommandPatterns,
-    ]);
+    this.compiledCommandDenyPatterns = this.compileRegexArray(
+      [...DEFAULT_COMMAND_DENY_PATTERNS, ...userCommandPatterns],
+      "commandDenyPatterns",
+    );
 
     const userNetworkAllow = this.truncatePatterns(
       this.config.networkAllowPatterns,
       limit,
       "networkAllowPatterns",
     );
-    this.compiledNetworkAllowPatterns =
-      this.compileRegexArray(userNetworkAllow);
+    this.compiledNetworkAllowPatterns = this.compileRegexArray(
+      userNetworkAllow,
+      "networkAllowPatterns",
+    );
 
     const userNetworkDeny = this.truncatePatterns(
       this.config.networkDenyPatterns,
       limit,
       "networkDenyPatterns",
     );
-    this.compiledNetworkDenyPatterns = this.compileRegexArray([
-      ...DEFAULT_NETWORK_DENY_PATTERNS,
-      ...userNetworkDeny,
-    ]);
+    this.compiledNetworkDenyPatterns = this.compileRegexArray(
+      [...DEFAULT_NETWORK_DENY_PATTERNS, ...userNetworkDeny],
+      "networkDenyPatterns",
+    );
 
-    // Merge blocked path patterns
+    // Merge blocked path patterns (exact segment matches)
     this.mergedBlockedPathPatterns = new Set([
       ...DEFAULT_BLOCKED_PATH_PATTERNS,
       ...(this.config.blockedPathPatterns?.slice(0, limit) ?? []),
     ]);
+
+    // Compile user-supplied blocked path patterns as regex for flexible matching
+    this.compiledPathBlockPatterns = this.compileRegexArray(
+      this.config.blockedPathPatterns?.slice(0, limit) ?? [],
+      "blockedPathPatterns",
+    );
   }
 
   private truncatePatterns(
@@ -300,13 +344,20 @@ export class ExternalSecurityConfigService
     return patterns;
   }
 
-  private compileRegexArray(sources: string[]): RegExp[] {
+  private compileRegexArray(
+    sources: readonly string[],
+    category: string = "unknown",
+  ): RegExp[] {
     const result: RegExp[] = [];
     for (const src of sources) {
       try {
         result.push(new RegExp(src, "i"));
-      } catch {
-        this.logger.warn(`Invalid regex in security config, skipped: ${src}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `Invalid regex in ${category}, skipped: ${src} — ${message}`,
+        );
+        this.invalidPatterns.push({ category, pattern: src, error: message });
       }
     }
     return result;
@@ -390,11 +441,37 @@ export class ExternalSecurityConfigService
   /**
    * Returns `true` if the given filesystem path looks like it touches
    * a sensitive location (e.g. `.ssh/`, `.aws/`, credential files).
+   * Uses both exact segment matching and full-path substring checks
+   * to prevent bypass via near-matching directory names.
    */
   public isPathBlocked(filePath: string): boolean {
     const expanded = this.expandPath(filePath);
-    const segments = expanded.split(path.sep);
-    return segments.some((seg) => this.mergedBlockedPathPatterns.has(seg));
+    // Normalize to forward slashes for consistent matching
+    const normalized = expanded.split(path.sep).join("/");
+    const segments = normalized.split("/");
+
+    for (const pattern of this.mergedBlockedPathPatterns) {
+      // 1. Exact segment match (original behavior — fastest)
+      if (segments.some((seg) => seg === pattern)) {
+        return true;
+      }
+      // 2. Pattern appears as a path component (catches near-matches)
+      if (
+        normalized.includes(`/${pattern}/`) ||
+        normalized.endsWith(`/${pattern}`)
+      ) {
+        return true;
+      }
+    }
+
+    // 3. User-supplied regex patterns for flexible path blocking
+    if (
+      this.compiledPathBlockPatterns.some((rx) => this.safeTest(rx, normalized))
+    ) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -407,40 +484,60 @@ export class ExternalSecurityConfigService
     allowed: boolean;
     readWrite: boolean;
   } {
+    // Reject null bytes — defense against filesystem exploits
+    if (filePath.includes("\0")) {
+      this.logger.warn(
+        `Null byte in path rejected: ${JSON.stringify(filePath)}`,
+      );
+      return { allowed: false, readWrite: false };
+    }
+
     if (!this.config.allowedPaths || this.config.allowedPaths.length === 0) {
       return { allowed: false, readWrite: false };
     }
 
     const resolved = this.resolvePath(filePath);
 
-    // Reject if the resolved path still contains traversal artifacts
-    if (resolved.includes("..")) {
-      this.logger.warn(`Path traversal detected in: ${filePath}`);
-      return { allowed: false, readWrite: false };
-    }
-
     for (const entry of this.config.allowedPaths) {
       const allowedRoot = this.resolvePath(entry.path);
-      const isMatch =
-        resolved === allowedRoot || resolved.startsWith(allowedRoot + path.sep);
+      const relative = path.relative(allowedRoot, resolved);
 
-      if (isMatch) {
-        // Double-check containment via path.relative
-        const relative = path.relative(allowedRoot, resolved);
-        if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
-          return { allowed: true, readWrite: entry.allowReadWrite ?? false };
-        }
+      // path.relative returns ".." prefix for paths outside allowedRoot
+      // path.isAbsolute catches edge cases on Windows where relative might be absolute
+      if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+        return { allowed: true, readWrite: entry.allowReadWrite ?? false };
       }
     }
 
     return { allowed: false, readWrite: false };
   }
 
+  /** Returns `true` if a config file exists and is readable. */
+  public hasConfig(): boolean {
+    if (!this.configFile) return false;
+    try {
+      fs.accessSync(this.configFile, fs.constants.R_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Returns a diagnostic summary for the Doctor command. */
-  public getDiagnostics(): SecurityDiagnostic[] {
+  public async getDiagnostics(): Promise<SecurityDiagnostic[]> {
     const diagnostics: SecurityDiagnostic[] = [];
 
-    if (!this.configFile || !fs.existsSync(this.configFile)) {
+    let configExists = false;
+    if (this.configFile) {
+      try {
+        await access(this.configFile, fs.constants.R_OK);
+        configExists = true;
+      } catch {
+        // file doesn't exist or not readable
+      }
+    }
+
+    if (!configExists) {
       diagnostics.push({
         severity: "info",
         message:
@@ -454,10 +551,10 @@ export class ExternalSecurityConfigService
         autoFixable: false,
       });
 
-      // Check permissions on the config file
+      // Check permissions on the config file (async)
       try {
-        const stat = fs.statSync(this.configFile);
-        const mode = stat.mode & 0o777;
+        const fileStat = await stat(this.configFile);
+        const mode = fileStat.mode & 0o777;
         if (mode & 0o022) {
           diagnostics.push({
             severity: "warn",
@@ -495,6 +592,15 @@ export class ExternalSecurityConfigService
           autoFixable: false,
         });
       }
+    }
+
+    // Surface invalid regex patterns (#8)
+    for (const inv of this.invalidPatterns) {
+      diagnostics.push({
+        severity: "warn",
+        message: `Invalid regex in ${inv.category}, pattern skipped: "${inv.pattern}" — ${inv.error}`,
+        autoFixable: false,
+      });
     }
 
     return diagnostics;
@@ -585,12 +691,4 @@ export class ExternalSecurityConfigService
       return path.resolve(expanded);
     }
   }
-}
-
-// ─── Types ───────────────────────────────────────────────────────────
-
-export interface SecurityDiagnostic {
-  severity: "info" | "warn" | "critical";
-  message: string;
-  autoFixable: boolean;
 }
