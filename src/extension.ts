@@ -72,6 +72,7 @@ import {
 import { DoctorService } from "./services/doctor.service";
 import { CredentialProxyService } from "./services/credential-proxy.service";
 import { setProxyContext, clearProxyContext } from "./services/proxy-context";
+import { PermissionScopeService } from "./services/permission-scope.service";
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -218,8 +219,14 @@ export async function activate(context: vscode.ExtensionContext) {
     await externalSecurityConfig.initialize(workspacePath);
     context.subscriptions.push(externalSecurityConfig);
 
+    // Initialize Permission Scope Service (must be before terminal & tool provider)
+    const permissionScope = PermissionScopeService.getInstance();
+    await permissionScope.initialize(workspacePath);
+    context.subscriptions.push(permissionScope);
+
     // Inject security policy into terminal and browser handler (DI — no circular imports)
     DeepTerminalService.getInstance().setSecurityPolicy(externalSecurityConfig);
+    DeepTerminalService.getInstance().setPermissionScope(permissionScope);
     setBrowserSecurityPolicy(externalSecurityConfig);
 
     // Initialize Terminal with extension path early for Docker Compose support
@@ -552,6 +559,70 @@ export async function activate(context: vscode.ExtensionContext) {
         }
         proxyAuditChannel.show();
       }),
+    );
+
+    // ── Permission Scope: status bar indicator + switch command ──
+    const permissionStatusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      50,
+    );
+    const profileIcons: Record<string, string> = {
+      restricted: "$(lock)",
+      standard: "$(shield)",
+      trusted: "$(unlock)",
+    };
+    const updatePermissionStatusBar = () => {
+      const profile = permissionScope.getActiveProfile();
+      permissionStatusBar.text = `${profileIcons[profile] ?? "$(shield)"} ${profile}`;
+      permissionStatusBar.tooltip = `CodeBuddy Permission: ${profile}\nClick to change`;
+      permissionStatusBar.command = "codebuddy.switchPermissionProfile";
+      permissionStatusBar.show();
+    };
+    updatePermissionStatusBar();
+    context.subscriptions.push(
+      permissionScope.onProfileChanged(updatePermissionStatusBar),
+      permissionStatusBar,
+    );
+
+    interface ProfileQuickPickItem extends vscode.QuickPickItem {
+      profile: import("./services/permission-scope.service").PermissionProfile;
+    }
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "codebuddy.switchPermissionProfile",
+        async () => {
+          const current = permissionScope.getActiveProfile();
+          const items: ProfileQuickPickItem[] = [
+            {
+              label: "$(lock) restricted",
+              description: "Read-only access. No terminal, no file writes.",
+              picked: current === "restricted",
+              profile: "restricted",
+            },
+            {
+              label: "$(shield) standard",
+              description:
+                "Read/write with safe terminal. Dangerous commands denied.",
+              picked: current === "standard",
+              profile: "standard",
+            },
+            {
+              label: "$(unlock) trusted",
+              description: "Full access. Auto-approves known safe tools.",
+              picked: current === "trusted",
+              profile: "trusted",
+            },
+          ];
+          const selected = await vscode.window.showQuickPick(items, {
+            placeHolder: `Current profile: ${current}`,
+            title: "Switch Permission Profile",
+          });
+          if (selected) {
+            permissionScope.setActiveProfile(selected.profile);
+          }
+        },
+      ),
     );
 
     // Run Doctor in background (after all services ready — non-blocking)
