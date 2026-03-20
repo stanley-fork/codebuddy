@@ -351,4 +351,55 @@ suite("AccessControlService", () => {
     assert.ok(findings.length > 0);
     assert.ok(findings.every((f) => f.check === "access-control"));
   });
+
+  // ── Service Lifecycle ────────────────────────────────────────────
+
+  test("isServiceInitialized returns false before initialize", () => {
+    const svc = AccessControlService.getInstance();
+    assert.strictEqual(svc.isServiceInitialized(), false);
+  });
+
+  test("isServiceInitialized returns true after initialize", async () => {
+    const svc = AccessControlService.getInstance();
+    await svc.initialize();
+    assert.strictEqual(svc.isServiceInitialized(), true);
+  });
+
+  test("diagnostics surface config source (VS Code setting)", async () => {
+    const ws = setupTmpWorkspace();
+    const svc = AccessControlService.getInstance();
+    await svc.initialize(ws);
+
+    const diags = svc.getDiagnostics();
+    const noConfig = diags.find((d) => d.code === "no-config");
+    assert.ok(noConfig);
+    assert.ok(noConfig.message.includes("VS Code setting"));
+  });
+
+  test("diagnostics surface config source (access.json)", async () => {
+    const ws = setupTmpWorkspace({ mode: "allow", users: ["alice@test.com"] });
+    const svc = AccessControlService.getInstance();
+    await svc.initialize(ws);
+
+    const diags = svc.getDiagnostics();
+    const loaded = diags.find((d) => d.code === "config-loaded");
+    assert.ok(loaded);
+    assert.ok(loaded.message.includes(".codebuddy/access.json"));
+    assert.ok(loaded.message.includes("highest priority"));
+  });
+
+  test("checkAccess rate limits audit writes", async () => {
+    const svc = AccessControlService.getInstance();
+    await svc.initialize();
+
+    // Rapid-fire calls — only first should log (within 100ms window)
+    svc.checkAccess("action1");
+    svc.checkAccess("action2");
+    svc.checkAccess("action3");
+
+    const log = svc.getAuditLog();
+    // At least 1 logged, but fewer than 3 due to throttle
+    assert.ok(log.length >= 1);
+    assert.ok(log.length < 3);
+  });
 });

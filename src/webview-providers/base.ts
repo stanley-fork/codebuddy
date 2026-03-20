@@ -685,9 +685,9 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
               break;
             }
             case "user-input": {
-              // ── Access control gate ──
-              try {
-                const acl = AccessControlService.getInstance();
+              // ── Access control gate (fail-closed) ──
+              const acl = AccessControlService.getInstance();
+              if (acl.isServiceInitialized()) {
                 if (!acl.checkAccess("user-input")) {
                   await this.currentWebView?.webview.postMessage({
                     type: "onStreamError",
@@ -700,8 +700,20 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                   });
                   break;
                 }
-              } catch {
-                // Service not initialized — allow (open mode default)
+              } else {
+                // Service not yet initialized — deny and log rather than silently allow.
+                this.logger.warn(
+                  "AccessControlService not initialized — denying user-input for safety",
+                );
+                await this.currentWebView?.webview.postMessage({
+                  type: "onStreamError",
+                  payload: {
+                    requestId: message.requestId,
+                    error:
+                      "Extension is still initializing. Please retry in a moment.",
+                  },
+                });
+                break;
               }
 
               this.UserMessageCounter += 1;
