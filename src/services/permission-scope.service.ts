@@ -86,6 +86,22 @@ const DANGEROUS_COMMAND_PATTERNS: readonly string[] = [
 ];
 
 /**
+ * Catastrophic / irreversible command patterns — enforced in ALL profiles
+ * including `trusted`. These prevent unrecoverable system damage even when
+ * the user has opted into full access.
+ */
+const CATASTROPHIC_DENY_PATTERNS: readonly string[] = [
+  String.raw`rm\s+-rf\s+/`,
+  String.raw`\bmkfs\b`,
+  String.raw`\bdd\s+.*of=/dev/`,
+  String.raw`:\(\)\s*\{`, // fork bomb
+];
+
+/** Pre-compiled catastrophic patterns — evaluated before any profile logic. */
+const COMPILED_CATASTROPHIC_DENY: readonly RegExp[] =
+  CATASTROPHIC_DENY_PATTERNS.map((p) => new RegExp(p, "i"));
+
+/**
  * Tools that are read-only and safe in any profile.
  * Used by `restricted` profile to limit available tools.
  */
@@ -131,7 +147,8 @@ export class PermissionScopeService implements vscode.Disposable {
   private configLoaded = false;
   private configWatcher: vscode.FileSystemWatcher | undefined;
   private workspacePath: string | undefined;
-  private isInitialized = false;
+  /** Guards against concurrent loadConfig calls from debounced reloads. */
+  private loadInFlight: Promise<void> | undefined;
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** Event fired when the active permission profile changes. */
@@ -172,7 +189,6 @@ export class PermissionScopeService implements vscode.Disposable {
       this.startWatching(workspacePath);
     }
 
-    this.isInitialized = true;
     logger.info(`Permission scope initialized: profile=${this.activeProfile}`);
   }
 
@@ -189,7 +205,32 @@ export class PermissionScopeService implements vscode.Disposable {
   // ── Config Loading ───────────────────────────────────────────────
 
   private async loadConfig(workspacePath: string): Promise<void> {
-    const configPath = path.join(workspacePath, CODEBUDDY_DIR, CONFIG_FILENAME);
+    // Serialize concurrent reloads — if one is in-flight, join it
+    if (this.loadInFlight) {
+      await this.loadInFlight;
+      return;
+    }
+    this.loadInFlight = this._loadConfigInner(workspacePath).finally(() => {
+      this.loadInFlight = undefined;
+    });
+    await this.loadInFlight;
+  }
+
+  private async _loadConfigInner(workspacePath: string): Promise<void> {
+    const resolvedWorkspace = path.resolve(workspacePath);
+    const configPath = path.resolve(
+      resolvedWorkspace,
+      CODEBUDDY_DIR,
+      CONFIG_FILENAME,
+    );
+
+    // Guard against path traversal
+    if (!configPath.startsWith(resolvedWorkspace + path.sep)) {
+      logger.warn(
+        `Config path escaped workspace root — ignoring: ${configPath}`,
+      );
+      return;
+    }
 
     try {
       await access(configPath, fs.constants.R_OK);
@@ -217,6 +258,11 @@ export class PermissionScopeService implements vscode.Disposable {
 
     try {
       const raw = await readFile(configPath, "utf-8");
+
+      // Reset before applying — any failure below leaves us in a clean state
+      this.config = {};
+      this.configLoaded = false;
+
       const parsed: unknown = JSON.parse(raw);
 
       if (
@@ -225,11 +271,11 @@ export class PermissionScopeService implements vscode.Disposable {
         Array.isArray(parsed)
       ) {
         logger.warn("permissions.json root must be an object — ignoring");
+        this.applyConfig();
         return;
       }
 
       const cfg = parsed as Record<string, unknown>;
-      this.config = {};
 
       // Profile
       if (typeof cfg.profile === "string") {
@@ -285,6 +331,7 @@ export class PermissionScopeService implements vscode.Disposable {
       logger.warn(
         `Failed to parse permissions.json: ${(err as Error).message}`,
       );
+      this.applyConfig(); // ensure lookup sets are consistent with reset config
     }
   }
 
@@ -451,11 +498,18 @@ export class PermissionScopeService implements vscode.Disposable {
    * Check whether a command should be denied by the permission layer.
    * Uses pre-compiled patterns — no per-call RegExp allocation.
    *
+   * Catastrophic patterns (rm -rf /, mkfs, dd of=/dev, fork bomb) are
+   * enforced in ALL profiles including `trusted` as an irreversible-damage
+   * safety floor.
+   *
    * - `restricted`: All terminal commands denied.
    * - `standard`: Built-in + custom deny patterns enforced.
-   * - `trusted`: Only custom deny patterns enforced (built-in skipped).
+   * - `trusted`: Catastrophic patterns + custom deny patterns enforced.
    */
   public isCommandDenied(command: string): boolean {
+    // Safety floor: catastrophic patterns always enforced regardless of profile
+    if (COMPILED_CATASTROPHIC_DENY.some((re) => re.test(command))) return true;
+
     switch (this.activeProfile) {
       case "restricted":
         return true;

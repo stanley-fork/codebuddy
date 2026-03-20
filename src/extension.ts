@@ -579,8 +579,10 @@ export async function activate(context: vscode.ExtensionContext) {
       permissionStatusBar.show();
     };
     updatePermissionStatusBar();
-    permissionScope.onProfileChanged(updatePermissionStatusBar);
-    context.subscriptions.push(permissionStatusBar);
+    context.subscriptions.push(
+      permissionScope.onProfileChanged(updatePermissionStatusBar),
+      permissionStatusBar,
+    );
 
     interface ProfileQuickPickItem extends vscode.QuickPickItem {
       profile: import("./services/permission-scope.service").PermissionProfile;
