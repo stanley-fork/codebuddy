@@ -22,15 +22,17 @@ export const securityConfigCheck: DoctorCheckModule = {
           check: "security-config",
           severity: d.severity,
           message: d.message,
-          autoFixable: true as const,
-          fix: () => ctx.securityConfig.scaffoldDefaultConfig().then(() => {}),
+          autoFixable: true,
+          fix: async () => {
+            await ctx.securityConfig.scaffoldDefaultConfig();
+          },
         };
       }
       return {
         check: "security-config",
         severity: d.severity,
         message: d.message,
-        autoFixable: false as const,
+        autoFixable: false,
       };
     });
   },

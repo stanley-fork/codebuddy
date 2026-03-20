@@ -6,18 +6,18 @@ import type {
   DoctorFinding,
 } from "./types";
 
-/** Env var names that commonly hold secrets — tightened to reduce false positives. */
+/** Env var names that commonly hold secrets — anchored to reduce false positives. */
 const SECRET_ENV_PATTERNS: RegExp[] = [
   /^api[_-]?key$/i, // API_KEY, APIKEY, API-KEY
   /^.*[_-]api[_-]?key$/i, // OPENAI_API_KEY, MY_API_KEY
   /[_-]secret$/i, // MY_SECRET, APP_SECRET (suffix only)
   /^secret[_-]/i, // SECRET_KEY (prefix only)
-  /password/i, // PASSWORD is always a secret
+  /^.*[_-]?password$/i, // DB_PASSWORD (suffix — not PASSWORD_HINT)
   /[_-]token$/i, // ACCESS_TOKEN, AUTH_TOKEN (suffix)
   /^token[_-]/i, // TOKEN_VALUE
-  /credential/i, // CREDENTIALS is always sensitive
+  /^.*[_-]credentials?$/i, // SERVICE_CREDENTIALS (suffix — not CREDENTIAL_HELPER)
   /[_-]auth[_-]?token/i, // AUTH_TOKEN, OAUTH_TOKEN — not bare AUTH
-  /private[_-]?key/i, // PRIVATE_KEY
+  /private[_-]?key$/i, // PRIVATE_KEY (suffix — not PRIVATE_KEY_ROTATION_DAYS)
 ];
 
 /** Minimum value length to consider as a potential secret. */

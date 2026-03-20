@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect } from "react";
 import styled from "styled-components";
 import { vscode } from "../../utils/vscode";
 import { useStandupStore } from "../../stores/standup.store";
-import { useDoctorStore } from "../../stores/doctor.store";
+import { DoctorSection } from "./DoctorSection";
 
 interface CoWorkerPanelProps {
   isOpen: boolean;
@@ -106,11 +106,11 @@ const Content = styled.div`
   }
 `;
 
-const Section = styled.div`
+export const Section = styled.div`
   margin-bottom: 20px;
 `;
 
-const SectionTitle = styled.h3`
+export const SectionTitle = styled.h3`
   margin: 0 0 12px 0;
   font-size: 11px;
   font-weight: 600;
@@ -143,7 +143,7 @@ const TaskLabel = styled.div`
   margin-bottom: 4px;
 `;
 
-const TaskDescription = styled.div`
+export const TaskDescription = styled.div`
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
   line-height: 1.4;
@@ -180,7 +180,7 @@ const ToggleThumb = styled.div<{ $checked: boolean }>`
   transition: left 0.2s ease;
 `;
 
-const TriggerButton = styled.button`
+export const TriggerButton = styled.button`
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
@@ -263,7 +263,7 @@ const IngestButton = styled.button<{ $loading?: boolean }>`
   }
 `;
 
-const QuickActions = styled.div`
+export const QuickActions = styled.div`
   display: flex;
   gap: 6px;
   margin-top: 10px;
@@ -341,7 +341,7 @@ const DeleteButton = styled.button`
   }
 `;
 
-const ErrorText = styled.div`
+export const ErrorText = styled.div`
   color: var(--vscode-editorError-foreground, #f14c4c);
   font-size: 11px;
   margin-top: 4px;
@@ -536,168 +536,6 @@ export const CoWorkerPanel: React.FC<CoWorkerPanelProps> = ({
     </PanelOverlay>
   );
 };
-
-/* ─── Doctor Section Component ─── */
-const DoctorSection: React.FC<{ isOpen: boolean }> = ({ isOpen }) => {
-  const { findings, lastScanTime, isScanning, lastError, lastFixesApplied, runScan, runAutoFix, hydrate } =
-    useDoctorStore();
-
-  useEffect(() => {
-    if (isOpen && lastScanTime === null) hydrate();
-  }, [isOpen, lastScanTime, hydrate]);
-
-  const { critical, warn, info, fixable, summaryColor } = useMemo(() => {
-    const c = findings.filter((f) => f.severity === "critical").length;
-    const w = findings.filter((f) => f.severity === "warn").length;
-    const i = findings.filter((f) => f.severity === "info").length;
-    const fix = findings.filter((f) => f.autoFixable).length;
-    const color =
-      c > 0
-        ? "var(--vscode-editorError-foreground, #f14c4c)"
-        : w > 0
-          ? "var(--vscode-editorWarning-foreground, #cca700)"
-          : "var(--vscode-editorInfo-foreground, #3794ff)";
-    return { critical: c, warn: w, info: i, fixable: fix, summaryColor: color };
-  }, [findings]);
-
-  return (
-    <Section>
-      <SectionTitle>Security Pulse</SectionTitle>
-      <TaskDescription style={{ marginBottom: 8 }}>
-        Runs security health checks across API keys, terminal restrictions,
-        MCP servers, file permissions, and security config.
-      </TaskDescription>
-
-      {/* ── Summary badges ── */}
-      {lastScanTime !== null && (
-        <DoctorSummaryRow>
-          {critical > 0 && <DoctorBadge $variant="critical">{critical} critical</DoctorBadge>}
-          {warn > 0 && <DoctorBadge $variant="warn">{warn} warning</DoctorBadge>}
-          {info > 0 && <DoctorBadge $variant="info">{info} info</DoctorBadge>}
-          {findings.length === 0 && <DoctorBadge $variant="info">No issues</DoctorBadge>}
-        </DoctorSummaryRow>
-      )}
-
-      {/* ── Findings list ── */}
-      {findings.length > 0 && (
-        <DoctorFindingsList>
-          {findings.map((f) => (
-            <DoctorFindingItem key={f.id} $severity={f.severity}>
-              <span>{f.severity === "critical" ? "❌" : f.severity === "warn" ? "⚠️" : "ℹ️"}</span>
-              <DoctorFindingText>
-                <strong>[{f.check}]</strong> {f.message}
-                {f.autoFixable && <DoctorFixTag>auto-fixable</DoctorFixTag>}
-              </DoctorFindingText>
-            </DoctorFindingItem>
-          ))}
-        </DoctorFindingsList>
-      )}
-
-      {lastError && <ErrorText>{lastError}</ErrorText>}
-      {lastFixesApplied !== null && lastFixesApplied > 0 && (
-        <DoctorSuccessText>✅ {lastFixesApplied} fix(es) applied</DoctorSuccessText>
-      )}
-
-      {/* ── Actions ── */}
-      <QuickActions>
-        <TriggerButton onClick={runScan} disabled={isScanning}>
-          {isScanning ? "⏳ Scanning..." : "🩺 Run Doctor"}
-        </TriggerButton>
-        {fixable > 0 && (
-          <TriggerButton onClick={runAutoFix} disabled={isScanning}>
-            🔧 Auto-Fix ({fixable})
-          </TriggerButton>
-        )}
-      </QuickActions>
-
-      {lastScanTime !== null && (
-        <DoctorTimestamp style={{ color: summaryColor }}>
-          Last scan: {new Date(lastScanTime).toLocaleTimeString()}
-        </DoctorTimestamp>
-      )}
-    </Section>
-  );
-};
-
-/* ─── Doctor Styled Components ─── */
-const DoctorSummaryRow = styled.div`
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-bottom: 8px;
-`;
-
-const DoctorBadge = styled.span<{ $variant: "critical" | "warn" | "info" }>`
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: ${(p) =>
-    p.$variant === "critical"
-      ? "rgba(241, 76, 76, 0.15)"
-      : p.$variant === "warn"
-        ? "rgba(204, 167, 0, 0.15)"
-        : "rgba(55, 148, 255, 0.15)"};
-  color: ${(p) =>
-    p.$variant === "critical"
-      ? "var(--vscode-editorError-foreground, #f14c4c)"
-      : p.$variant === "warn"
-        ? "var(--vscode-editorWarning-foreground, #cca700)"
-        : "var(--vscode-editorInfo-foreground, #3794ff)"};
-`;
-
-const DoctorFindingsList = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 8px;
-  max-height: 200px;
-  overflow-y: auto;
-`;
-
-const DoctorFindingItem = styled.div<{ $severity: string }>`
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.08));
-  border-left: 2px solid
-    ${(p) =>
-      p.$severity === "critical"
-        ? "var(--vscode-editorError-foreground, #f14c4c)"
-        : p.$severity === "warn"
-          ? "var(--vscode-editorWarning-foreground, #cca700)"
-          : "var(--vscode-editorInfo-foreground, #3794ff)"};
-`;
-
-const DoctorFindingText = styled.span`
-  flex: 1;
-  line-height: 1.4;
-  color: var(--vscode-foreground);
-`;
-
-const DoctorFixTag = styled.span`
-  margin-left: 4px;
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: rgba(55, 148, 255, 0.12);
-  color: var(--vscode-editorInfo-foreground, #3794ff);
-`;
-
-const DoctorSuccessText = styled.div`
-  color: var(--vscode-terminal-ansiGreen, #89d185);
-  font-size: 11px;
-  margin-bottom: 6px;
-`;
-
-const DoctorTimestamp = styled.div`
-  font-size: 10px;
-  margin-top: 6px;
-  color: var(--vscode-descriptionForeground);
-`;
 
 /* ─── Icon (small, for header) ─── */
 const CoWorkerIconSmall = () => (

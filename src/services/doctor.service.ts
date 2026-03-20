@@ -26,10 +26,10 @@ const SEVERITY_ORDER: Record<DoctorFinding["severity"], number> = {
 };
 
 export class DoctorService implements vscode.Disposable {
-  private static instance: DoctorService;
+  private static instance: DoctorService | undefined;
   private readonly logger: Logger;
   private readonly outputChannel: vscode.OutputChannel;
-  private statusBarItem: vscode.StatusBarItem | undefined;
+  private readonly statusBarItem: vscode.StatusBarItem;
   private isDisposed = false;
   private isConfigured = false;
   private activeExecution: Promise<DoctorFinding[]> | undefined;
@@ -56,6 +56,11 @@ export class DoctorService implements vscode.Disposable {
       enableTelemetry: true,
     });
     this.outputChannel = vscode.window.createOutputChannel("CodeBuddy Doctor");
+    this.statusBarItem = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Left,
+      -100,
+    );
+    this.statusBarItem.command = "codebuddy.runDoctor";
   }
 
   public static getInstance(): DoctorService {
@@ -69,14 +74,12 @@ export class DoctorService implements vscode.Disposable {
   public static async resetInstance(): Promise<void> {
     const inst = DoctorService.instance;
     // Clear the static reference before any async/throwing operations
-    DoctorService.instance = undefined as unknown as DoctorService;
+    DoctorService.instance = undefined;
 
     if (!inst) return;
 
     // Wait for in-flight work to settle before disposing resources
-    if (inst.activeExecution) {
-      await inst.activeExecution.catch(() => {});
-    }
+    await inst.activeExecution?.catch(() => {});
 
     try {
       inst.dispose();
@@ -110,8 +113,7 @@ export class DoctorService implements vscode.Disposable {
   public dispose(): void {
     this.isDisposed = true;
     this.outputChannel.dispose();
-    this.statusBarItem?.dispose();
-    this.statusBarItem = undefined;
+    this.statusBarItem.dispose();
   }
 
   // ── Core ─────────────────────────────────────────────────────────
@@ -192,8 +194,9 @@ export class DoctorService implements vscode.Disposable {
     const warnings = findings.filter((f) => f.severity === "warn");
     const infos = findings.filter((f) => f.severity === "info");
 
-    this.outputChannel.clear();
-    this.outputChannel.appendLine("=== CodeBuddy Doctor ===");
+    this.outputChannel.appendLine(
+      `\n${"─".repeat(40)}\n=== CodeBuddy Doctor — ${new Date().toLocaleTimeString()} ===`,
+    );
     this.outputChannel.appendLine(
       `Ran ${this.checks.length} checks • Found ${critical.length} critical, ${warnings.length} warning, ${infos.length} info\n`,
     );
@@ -260,6 +263,17 @@ export class DoctorService implements vscode.Disposable {
     return applied;
   }
 
+  /** Apply all auto-fixable findings, then re-run checks. Returns applied count + updated findings. */
+  public async runAutoFixWithRefresh(): Promise<{
+    applied: number;
+    updated: DoctorFinding[];
+  }> {
+    const findingsToFix = this.getCachedFindings();
+    const applied = await this.autoFixAll(findingsToFix);
+    const updated = await this.execute();
+    return { applied, updated };
+  }
+
   /** Run silently on activation — only show status bar for critical issues. */
   public async runBackground(): Promise<void> {
     try {
@@ -284,14 +298,6 @@ export class DoctorService implements vscode.Disposable {
   // ── Status bar ───────────────────────────────────────────────────
 
   private updateStatusBar(criticalCount: number): void {
-    if (!this.statusBarItem) {
-      this.statusBarItem = vscode.window.createStatusBarItem(
-        vscode.StatusBarAlignment.Left,
-        -100,
-      );
-      this.statusBarItem.command = "codebuddy.runDoctor";
-    }
-
     this.statusBarItem.text = `$(shield) Doctor: ${criticalCount} critical`;
     this.statusBarItem.tooltip = `CodeBuddy Doctor found ${criticalCount} critical issue(s). Click to view.`;
     this.statusBarItem.backgroundColor = new vscode.ThemeColor(
@@ -301,6 +307,6 @@ export class DoctorService implements vscode.Disposable {
   }
 
   private clearStatusBar(): void {
-    this.statusBarItem?.hide();
+    this.statusBarItem.hide();
   }
 }
