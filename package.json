@@ -167,7 +167,8 @@
           "when": "workspaceFolderCount != 0"
         },
         {
-          "command": "codebuddy.switchPermissionProfile"
+          "command": "codebuddy.switchPermissionProfile",
+          "when": "workspaceFolderCount != 0"
         }
       ]
     },

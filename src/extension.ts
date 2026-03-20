@@ -566,14 +566,14 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.StatusBarAlignment.Right,
       50,
     );
+    const profileIcons: Record<string, string> = {
+      restricted: "$(lock)",
+      standard: "$(shield)",
+      trusted: "$(unlock)",
+    };
     const updatePermissionStatusBar = () => {
       const profile = permissionScope.getActiveProfile();
-      const icons: Record<string, string> = {
-        restricted: "$(lock)",
-        standard: "$(shield)",
-        trusted: "$(unlock)",
-      };
-      permissionStatusBar.text = `${icons[profile] ?? "$(shield)"} ${profile}`;
+      permissionStatusBar.text = `${profileIcons[profile] ?? "$(shield)"} ${profile}`;
       permissionStatusBar.tooltip = `CodeBuddy Permission: ${profile}\nClick to change`;
       permissionStatusBar.command = "codebuddy.switchPermissionProfile";
       permissionStatusBar.show();
@@ -582,27 +582,34 @@ export async function activate(context: vscode.ExtensionContext) {
     permissionScope.onProfileChanged(updatePermissionStatusBar);
     context.subscriptions.push(permissionStatusBar);
 
+    interface ProfileQuickPickItem extends vscode.QuickPickItem {
+      profile: import("./services/permission-scope.service").PermissionProfile;
+    }
+
     context.subscriptions.push(
       vscode.commands.registerCommand(
         "codebuddy.switchPermissionProfile",
         async () => {
           const current = permissionScope.getActiveProfile();
-          const items: vscode.QuickPickItem[] = [
+          const items: ProfileQuickPickItem[] = [
             {
               label: "$(lock) restricted",
               description: "Read-only access. No terminal, no file writes.",
               picked: current === "restricted",
+              profile: "restricted",
             },
             {
               label: "$(shield) standard",
               description:
                 "Read/write with safe terminal. Dangerous commands denied.",
               picked: current === "standard",
+              profile: "standard",
             },
             {
               label: "$(unlock) trusted",
               description: "Full access. Auto-approves known safe tools.",
               picked: current === "trusted",
+              profile: "trusted",
             },
           ];
           const selected = await vscode.window.showQuickPick(items, {
@@ -610,11 +617,7 @@ export async function activate(context: vscode.ExtensionContext) {
             title: "Switch Permission Profile",
           });
           if (selected) {
-            const profile = selected.label.replace(
-              /\$\([^)]+\)\s*/,
-              "",
-            ) as import("./services/permission-scope.service").PermissionProfile;
-            permissionScope.setActiveProfile(profile);
+            permissionScope.setActiveProfile(selected.profile);
           }
         },
       ),
