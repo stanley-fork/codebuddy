@@ -12,6 +12,7 @@ import * as crypto from "crypto";
 import { Buffer } from "buffer";
 import { spawn } from "child_process";
 import { SecretStorageService } from "../services/secret-storage";
+import { CredentialProxyService } from "../services/credential-proxy.service";
 
 type GetConfigValueType<T> = (key: string) => T | undefined;
 
@@ -339,6 +340,27 @@ export const getAPIKeyAndModel = (
     throw new Error(
       `API key not found for model: ${model}. Please add the API key in the extension configuration.`,
     );
+  }
+
+  // When credential proxy is enabled, redirect through localhost proxy.
+  // The proxy injects real credentials — the SDK gets a dummy key.
+  // Gemini is excluded because its SDK doesn't support baseURL override.
+  if (
+    lowerCaseModel !== "gemini" &&
+    getConfigValue("codebuddy.credentialProxy.enabled")
+  ) {
+    try {
+      const proxy = CredentialProxyService.getInstance();
+      if (proxy.isRunning()) {
+        return {
+          apiKey: "proxy-managed",
+          model: modelName,
+          baseUrl: proxy.getProxyUrl(lowerCaseModel),
+        };
+      }
+    } catch {
+      // Proxy not initialized yet — fall through to direct mode
+    }
   }
 
   return { apiKey: apiKey || "", model: modelName, baseUrl };

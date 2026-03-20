@@ -215,7 +215,14 @@ export class ExternalSecurityConfigService
         await access(this.configFile, fs.constants.R_OK);
         fileExists = true;
       } catch {
-        // file doesn't exist
+        // Auto-scaffold security.json on first use
+        const created = await this.scaffoldDefaultConfig();
+        if (created) {
+          fileExists = true;
+          this.logger.info(
+            "Auto-created default security config at " + this.configFile,
+          );
+        }
       }
     }
     this.logger.info(
@@ -693,7 +700,8 @@ export class ExternalSecurityConfigService
     }
 
     const defaultConfig = {
-      $schema: "https://codebuddy.dev/schemas/security-config-v1.json",
+      $schema:
+        "https://raw.githubusercontent.com/olasunkanmi-SE/codebuddy/main/schemas/security-config-v1.json",
       version: 1,
       allowedPaths: [
         {
