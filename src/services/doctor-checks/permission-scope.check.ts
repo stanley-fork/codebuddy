@@ -15,12 +15,14 @@ import {
 export const permissionScopeCheck: DoctorCheckModule = {
   name: "permission-scope",
 
-  async run(_ctx: DoctorCheckContext): Promise<DoctorFinding[]> {
+  async run(ctx: DoctorCheckContext): Promise<DoctorFinding[]> {
     let diagnostics: PermissionDiagnostic[];
     try {
       diagnostics = PermissionScopeService.getInstance().getDiagnostics();
-    } catch {
-      // Service not yet initialised — nothing to report.
+    } catch (err) {
+      ctx.logger.debug(
+        `PermissionScopeService not initialized — skipping check: ${err}`,
+      );
       return [];
     }
 

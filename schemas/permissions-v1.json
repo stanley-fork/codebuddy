@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://raw.githubusercontent.com/olasunkanmi-SE/codebuddy/main/schemas/permissions-v1.json",
+  "$id": "permissions-v1.json",
   "title": "CodeBuddy Permission Scope Config",
   "description": "Controls the active permission profile and tool/command scoping for the CodeBuddy agent in this workspace.",
   "type": "object",

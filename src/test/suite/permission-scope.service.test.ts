@@ -284,7 +284,7 @@ suite("PermissionScopeService", () => {
       firedProfile = p;
     });
 
-    svc.setActiveProfile("trusted");
+    svc.setActiveProfile("trusted", false);
     assert.strictEqual(svc.getActiveProfile(), "trusted");
     assert.strictEqual(firedProfile, "trusted");
   });
@@ -292,7 +292,7 @@ suite("PermissionScopeService", () => {
   test("setActiveProfile ignores invalid profile", async () => {
     const svc = PermissionScopeService.getInstance();
     await svc.initialize();
-    svc.setActiveProfile("nonsense" as PermissionProfile);
+    svc.setActiveProfile("nonsense" as PermissionProfile, false);
     assert.strictEqual(svc.getActiveProfile(), "standard");
   });
 
@@ -300,14 +300,11 @@ suite("PermissionScopeService", () => {
 
   test("ignores invalid JSON gracefully", async () => {
     const ws = setupTmpWorkspace();
+    const dir = path.join(ws, ".codebuddy");
+    fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
-      path.join(ws, ".codebuddy", "permissions.json"),
+      path.join(dir, "permissions.json"),
       "NOT VALID JSON",
-    );
-    fs.mkdirSync(path.join(ws, ".codebuddy"), { recursive: true });
-    fs.writeFileSync(
-      path.join(ws, ".codebuddy", "permissions.json"),
-      "NOT VALID",
     );
 
     const svc = PermissionScopeService.getInstance();

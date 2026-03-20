@@ -56,6 +56,9 @@ const VALID_PROFILES: readonly PermissionProfile[] = [
  */
 const MAX_PATTERN_LENGTH = 200;
 
+/** Maximum config file size (64 KB). Prevents memory exhaustion from malicious files. */
+const MAX_CONFIG_FILE_BYTES = 64 * 1024;
+
 /**
  * Built-in dangerous command patterns — always enforced on `restricted`
  * and `standard` profiles. The external-security-config has its own set;
@@ -97,32 +100,9 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "get_architecture_knowledge",
   "think",
   "travily_search",
-  "search_vector_db",
   "open_web_preview",
   "standup_intelligence",
   "team_graph",
-]);
-
-/**
- * Tools requiring terminal access — blocked in `restricted` profile.
- */
-const TERMINAL_TOOLS: ReadonlySet<string> = new Set([
-  "terminal",
-  "manage_terminal",
-  "run_tests",
-]);
-
-/**
- * Write-capable tools — blocked in `restricted` profile.
- */
-const WRITE_TOOLS: ReadonlySet<string> = new Set([
-  "write_file",
-  "edit_file",
-  "delete_file",
-  "compose_files",
-  "git",
-  "manage_tasks",
-  "manage_core_memory",
 ]);
 
 // ─── Service ─────────────────────────────────────────────────────────
@@ -131,7 +111,7 @@ const logger = Logger.initialize("PermissionScopeService", {
   minLevel: LogLevel.DEBUG,
   enableConsole: true,
   enableFile: true,
-  enableTelemetry: true,
+  enableTelemetry: false,
 });
 
 export class PermissionScopeService implements vscode.Disposable {
@@ -139,7 +119,16 @@ export class PermissionScopeService implements vscode.Disposable {
 
   private activeProfile: PermissionProfile = "standard";
   private config: PermissionConfig = {};
+  /** Built-in + custom deny patterns (for standard profile). */
   private compiledDenyPatterns: RegExp[] = [];
+  /** Custom-only deny patterns (for trusted profile). Pre-compiled, no per-call allocation. */
+  private compiledTrustedPatterns: RegExp[] = [];
+  /** Pre-computed lowercase blocklist for O(1) lookup. */
+  private normalizedBlocklist: Set<string> = new Set();
+  /** Pre-computed lowercase allowlist for O(1) lookup. */
+  private normalizedAllowlist: Set<string> = new Set();
+  /** Whether a valid config file was loaded (avoids sync I/O in getDiagnostics). */
+  private configLoaded = false;
   private configWatcher: vscode.FileSystemWatcher | undefined;
   private workspacePath: string | undefined;
   private isInitialized = false;
@@ -193,6 +182,7 @@ export class PermissionScopeService implements vscode.Disposable {
       this.debounceTimer = undefined;
     }
     this.configWatcher?.dispose();
+    this.configWatcher = undefined;
     this._onProfileChanged.dispose();
   }
 
@@ -205,6 +195,23 @@ export class PermissionScopeService implements vscode.Disposable {
       await access(configPath, fs.constants.R_OK);
     } catch {
       logger.debug("No permissions.json found — using defaults");
+      this.configLoaded = false;
+      return;
+    }
+
+    // Guard against oversized files before reading into memory
+    try {
+      const { size } = await stat(configPath);
+      if (size > MAX_CONFIG_FILE_BYTES) {
+        logger.warn(
+          `permissions.json is ${size} bytes (limit: ${MAX_CONFIG_FILE_BYTES}) — ignoring`,
+        );
+        this.configLoaded = false;
+        return;
+      }
+    } catch (err) {
+      logger.warn(`Cannot stat permissions.json: ${(err as Error).message}`);
+      this.configLoaded = false;
       return;
     }
 
@@ -264,14 +271,15 @@ export class PermissionScopeService implements vscode.Disposable {
         }
       }
 
-      // Compile deny patterns
-      this.compileDenyPatterns();
+      // Pre-compute derived lookup structures
+      this.applyConfig();
+      this.configLoaded = true;
 
       logger.info(
         `Loaded permissions.json: profile=${this.activeProfile}, ` +
           `denyPatterns=${this.compiledDenyPatterns.length}, ` +
-          `allowlist=${this.config.toolAllowlist?.length ?? 0}, ` +
-          `blocklist=${this.config.toolBlocklist?.length ?? 0}`,
+          `allowlist=${this.normalizedAllowlist.size}, ` +
+          `blocklist=${this.normalizedBlocklist.size}`,
       );
     } catch (err) {
       logger.warn(
@@ -280,14 +288,26 @@ export class PermissionScopeService implements vscode.Disposable {
     }
   }
 
+  /**
+   * Pre-compute all derived lookup structures from the current config.
+   * Called after config load and on config reset.
+   */
+  private applyConfig(): void {
+    this.normalizedBlocklist = new Set(
+      (this.config.toolBlocklist ?? []).map((t) => t.toLowerCase()),
+    );
+    this.normalizedAllowlist = new Set(
+      (this.config.toolAllowlist ?? []).map((t) => t.toLowerCase()),
+    );
+    this.compileDenyPatterns();
+  }
+
   private compileDenyPatterns(): void {
     this.compiledDenyPatterns = [];
-    const sources = [
-      ...DANGEROUS_COMMAND_PATTERNS,
-      ...(this.config.commandDenyPatterns ?? []),
-    ];
+    this.compiledTrustedPatterns = [];
 
-    for (const src of sources) {
+    // Custom patterns → compiled into their own list for trusted profile
+    for (const src of this.config.commandDenyPatterns ?? []) {
       if (src.length > MAX_PATTERN_LENGTH) {
         logger.warn(
           `Skipping deny pattern (exceeds ${MAX_PATTERN_LENGTH} chars): ${src.slice(0, 40)}…`,
@@ -295,14 +315,31 @@ export class PermissionScopeService implements vscode.Disposable {
         continue;
       }
       try {
-        this.compiledDenyPatterns.push(new RegExp(src, "i"));
+        this.compiledTrustedPatterns.push(new RegExp(src, "i"));
       } catch {
         logger.warn(`Invalid regex in deny pattern: ${src}`);
       }
     }
+
+    // Standard profile: built-in patterns + custom patterns
+    const builtIn: RegExp[] = [];
+    for (const src of DANGEROUS_COMMAND_PATTERNS) {
+      try {
+        builtIn.push(new RegExp(src, "i"));
+      } catch {
+        logger.warn(`Invalid built-in deny pattern: ${src}`);
+      }
+    }
+    this.compiledDenyPatterns = [...builtIn, ...this.compiledTrustedPatterns];
   }
 
   private startWatching(workspacePath: string): void {
+    // Dispose existing watcher before creating a new one (idempotent)
+    if (this.configWatcher) {
+      this.configWatcher.dispose();
+      this.configWatcher = undefined;
+    }
+
     const pattern = new vscode.RelativePattern(
       workspacePath,
       `${CODEBUDDY_DIR}/${CONFIG_FILENAME}`,
@@ -321,9 +358,16 @@ export class PermissionScopeService implements vscode.Disposable {
     this.configWatcher.onDidChange(reload);
     this.configWatcher.onDidCreate(reload);
     this.configWatcher.onDidDelete(() => {
+      // Cancel any pending reload that might race with the delete
+      if (this.debounceTimer) {
+        clearTimeout(this.debounceTimer);
+        this.debounceTimer = undefined;
+      }
+
       logger.info("permissions.json deleted — reverting to defaults");
       this.config = {};
-      this.compiledDenyPatterns = [];
+      this.configLoaded = false;
+      this.applyConfig();
 
       const settingProfile = vscode.workspace
         .getConfiguration("codebuddy")
@@ -347,15 +391,30 @@ export class PermissionScopeService implements vscode.Disposable {
 
   /**
    * Programmatically switch the active profile (e.g. from a command).
-   * Fires the `onProfileChanged` event.
+   * Fires the `onProfileChanged` event and persists to workspace settings.
+   *
+   * @param persist Write to VS Code workspace settings (default true; false for tests).
    */
-  public setActiveProfile(profile: PermissionProfile): void {
+  public setActiveProfile(profile: PermissionProfile, persist = true): void {
     if (!VALID_PROFILES.includes(profile)) return;
     const old = this.activeProfile;
     this.activeProfile = profile;
     if (old !== this.activeProfile) {
       this._onProfileChanged.fire(this.activeProfile);
       logger.info(`Permission profile changed: ${old} → ${this.activeProfile}`);
+
+      if (persist) {
+        vscode.workspace
+          .getConfiguration("codebuddy")
+          .update(
+            "permissionScope.defaultProfile",
+            profile,
+            vscode.ConfigurationTarget.Workspace,
+          )
+          .then(undefined, (err) =>
+            logger.warn(`Could not persist profile setting: ${err}`),
+          );
+      }
     }
   }
 
@@ -363,37 +422,26 @@ export class PermissionScopeService implements vscode.Disposable {
    * Check whether a tool is allowed under the current profile.
    *
    * Evaluation order:
-   * 1. Explicit blocklist → always blocked
-   * 2. Explicit allowlist → always allowed
-   * 3. Profile-based rules (restricted = read-only, standard = no dangerous, trusted = all)
+   * 1. Explicit blocklist → always blocked  (O(1) Set lookup)
+   * 2. Explicit allowlist → always allowed   (O(1) Set lookup)
+   * 3. Profile-based rules (restricted = read-only, standard/trusted = all)
    */
   public isToolAllowed(toolName: string): boolean {
     const name = toolName.toLowerCase();
 
     // 1. Blocklist always wins
-    if (this.config.toolBlocklist?.some((b) => b.toLowerCase() === name)) {
-      return false;
-    }
+    if (this.normalizedBlocklist.has(name)) return false;
 
     // 2. Allowlist overrides profile restrictions
-    if (this.config.toolAllowlist?.some((a) => a.toLowerCase() === name)) {
-      return true;
-    }
+    if (this.normalizedAllowlist.has(name)) return true;
 
     // 3. Profile-based restrictions
     switch (this.activeProfile) {
       case "restricted":
-        // Only explicitly read-only tools
         return READ_ONLY_TOOLS.has(name);
 
       case "standard":
-        // Everything except explicitly dangerous terminal tools
-        // (DeepTerminalService handles command-level deny separately)
-        return true;
-
       case "trusted":
-        return true;
-
       default:
         return true;
     }
@@ -401,36 +449,24 @@ export class PermissionScopeService implements vscode.Disposable {
 
   /**
    * Check whether a command should be denied by the permission layer.
-   * This is evaluated in addition to the existing ExternalSecurityConfig
-   * deny patterns — it adds the permission-scope deny list on top.
+   * Uses pre-compiled patterns — no per-call RegExp allocation.
    *
    * - `restricted`: All terminal commands denied.
    * - `standard`: Built-in + custom deny patterns enforced.
-   * - `trusted`: Only custom blocklist patterns enforced (built-in skipped).
+   * - `trusted`: Only custom deny patterns enforced (built-in skipped).
    */
   public isCommandDenied(command: string): boolean {
-    if (this.activeProfile === "restricted") {
-      return true; // No terminal at all in restricted mode
-    }
+    switch (this.activeProfile) {
+      case "restricted":
+        return true;
 
-    if (this.activeProfile === "trusted") {
-      // Trusted only enforces user-supplied deny patterns
-      const customPatterns = this.config.commandDenyPatterns ?? [];
-      for (const src of customPatterns) {
-        try {
-          if (new RegExp(src, "i").test(command)) return true;
-        } catch {
-          // Skip invalid patterns
-        }
-      }
-      return false;
-    }
+      case "trusted":
+        return this.compiledTrustedPatterns.some((re) => re.test(command));
 
-    // Standard profile: full deny list
-    for (const re of this.compiledDenyPatterns) {
-      if (re.test(command)) return true;
+      case "standard":
+      default:
+        return this.compiledDenyPatterns.some((re) => re.test(command));
     }
-    return false;
   }
 
   /**
@@ -451,7 +487,7 @@ export class PermissionScopeService implements vscode.Disposable {
 
   /**
    * Returns diagnostics for the current permission configuration.
-   * Consumed by the Doctor service.
+   * Consumed by the Doctor service. Uses cached state — no sync I/O.
    */
   public getDiagnostics(): PermissionDiagnostic[] {
     const diags: PermissionDiagnostic[] = [];
@@ -466,12 +502,7 @@ export class PermissionScopeService implements vscode.Disposable {
       return diags;
     }
 
-    const configPath = path.join(
-      this.workspacePath,
-      CODEBUDDY_DIR,
-      CONFIG_FILENAME,
-    );
-    if (!fs.existsSync(configPath)) {
+    if (!this.configLoaded) {
       diags.push({
         severity: "info",
         message: `No ${CODEBUDDY_DIR}/${CONFIG_FILENAME} found — using default profile "${this.activeProfile}".`,
@@ -486,11 +517,8 @@ export class PermissionScopeService implements vscode.Disposable {
     }
 
     // Check for blocklist/allowlist overlap
-    const allowSet = new Set(
-      (this.config.toolAllowlist ?? []).map((t) => t.toLowerCase()),
-    );
-    const overlap = (this.config.toolBlocklist ?? []).filter((t) =>
-      allowSet.has(t.toLowerCase()),
+    const overlap = [...this.normalizedBlocklist].filter((t) =>
+      this.normalizedAllowlist.has(t),
     );
     if (overlap.length > 0) {
       diags.push({
