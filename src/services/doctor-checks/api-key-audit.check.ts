@@ -49,19 +49,25 @@ export const apiKeyAuditCheck: DoctorCheckModule = {
           autoFixable: true,
           fix: async () => {
             // Re-read at fix time — never hold the raw secret in a closure longer than needed
-            const currentValue = vscode.workspace
-              .getConfiguration()
-              .get<string>(configKey);
+            const config = vscode.workspace.getConfiguration();
+            const currentValue = config.get<string>(configKey);
             if (!currentValue || NON_KEY_VALUES.has(currentValue)) {
               ctx.logger.warn(
                 `Doctor auto-fix: ${configKey} no longer has a value to migrate`,
               );
               return;
             }
+            // 1. Store in SecretStorage first — never clear before storing
             await ctx.secretStorage.storeApiKey(configKey, currentValue);
+            // 2. Clear from settings — use undefined to remove the key entirely
+            await config.update(
+              configKey,
+              undefined,
+              vscode.ConfigurationTarget.Global,
+            );
             // Never log the secret value — only log the key name
             ctx.logger.info(
-              `Doctor auto-fix: migrated ${configKey} to SecretStorage`,
+              `Doctor auto-fix: migrated ${configKey} to SecretStorage and cleared settings`,
             );
           },
         });

@@ -458,7 +458,10 @@ export async function activate(context: vscode.ExtensionContext) {
         });
       }),
       vscode.commands.registerCommand("codebuddy.doctorAutoFix", async () => {
-        const findings = await doctorService.execute();
+        // Use cached findings if available, otherwise run a scan
+        const cached = doctorService.getCachedFindings();
+        const findings =
+          cached.length > 0 ? cached : await doctorService.execute();
         const fixable = findings.filter((f) => f.autoFixable);
         if (fixable.length === 0) {
           vscode.window.showInformationMessage(

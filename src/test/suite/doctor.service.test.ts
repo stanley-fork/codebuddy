@@ -200,6 +200,7 @@ suite("DoctorService", () => {
           severity: "critical",
           message: "bad",
           autoFixable: true,
+          fix: sinon.stub().resolves(),
         },
         { check: "test", severity: "warn", message: "eh", autoFixable: false },
         { check: "test", severity: "info", message: "ok", autoFixable: false },
@@ -229,6 +230,7 @@ suite("api-key-audit check", () => {
     getConfigStub = sinon.stub();
     sinon.stub(vscode.workspace, "getConfiguration").returns({
       get: getConfigStub,
+      update: sinon.stub().resolves(),
     } as unknown as vscode.WorkspaceConfiguration);
   });
 
@@ -415,6 +417,7 @@ suite("mcp-config check", () => {
     getConfigStub = sinon.stub();
     sinon.stub(vscode.workspace, "getConfiguration").returns({
       get: getConfigStub,
+      update: sinon.stub().resolves(),
     } as unknown as vscode.WorkspaceConfiguration);
   });
 
@@ -548,21 +551,8 @@ suite("directory-permissions check", () => {
   });
 
   test("skips on win32 platform", async () => {
-    const originalPlatform = Object.getOwnPropertyDescriptor(
-      process,
-      "platform",
-    );
-    Object.defineProperty(process, "platform", { value: "win32" });
-
-    try {
-      const ctx = makeContext();
-      const findings = await directoryPermissionsCheck.run(ctx);
-      assert.ok(findings.some((f) => f.message.includes("skipped on Windows")));
-    } finally {
-      // Restore original platform
-      if (originalPlatform) {
-        Object.defineProperty(process, "platform", originalPlatform);
-      }
-    }
+    const ctx = makeContext({ platform: "win32" });
+    const findings = await directoryPermissionsCheck.run(ctx);
+    assert.ok(findings.some((f) => f.message.includes("skipped on Windows")));
   });
 });
