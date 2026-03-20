@@ -43,6 +43,7 @@
       "description": "Regex patterns for terminal commands that should be blocked. Merged with built-in defaults.",
       "items": {
         "type": "string",
+        "maxLength": 200,
         "description": "A regex pattern (e.g. \"rm\\\\s+-rf\\\\s+/\") that matches commands to deny."
       }
     },
@@ -51,6 +52,7 @@
       "description": "URL patterns the extension is permitted to fetch. If present, only matching URLs are allowed (allowlist mode).",
       "items": {
         "type": "string",
+        "maxLength": 200,
         "description": "A regex pattern matching allowed URLs."
       }
     },
@@ -59,6 +61,7 @@
       "description": "URL patterns the extension must never fetch. Evaluated before allow patterns (denylist takes priority).",
       "items": {
         "type": "string",
+        "maxLength": 200,
         "description": "A regex pattern matching blocked URLs."
       }
     },
@@ -67,6 +70,7 @@
       "description": "Glob or regex patterns for sensitive file/directory paths that should never be read or listed.",
       "items": {
         "type": "string",
+        "maxLength": 200,
         "description": "A pattern matching paths to block (e.g. \".env\", \"secrets/\")."
       }
     }

@@ -506,6 +506,12 @@ export async function activate(context: vscode.ExtensionContext) {
     let proxyAuditChannel: vscode.OutputChannel | undefined;
     context.subscriptions.push(
       vscode.commands.registerCommand("codebuddy.credentialProxyAudit", () => {
+        if (!CredentialProxyService.isInstantiated()) {
+          vscode.window.showWarningMessage(
+            "Credential proxy is not enabled. Enable via codebuddy.credentialProxy.enabled setting.",
+          );
+          return;
+        }
         const proxy = CredentialProxyService.getInstance();
         if (!proxyAuditChannel) {
           proxyAuditChannel = vscode.window.createOutputChannel(
