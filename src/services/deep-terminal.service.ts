@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import { EventEmitter } from "events";
 import { l10n } from "vscode";
+import type { ISecurityPolicy } from "./security-policy.interface";
 
 /**
  * A fixed-capacity circular buffer that overwrites the oldest entries
@@ -162,6 +163,8 @@ export class DeepTerminalService extends EventEmitter {
   private blockedPatterns: RegExp[] = [...DEFAULT_BLOCKED_PATTERNS];
   /** Runtime-extensible approval-required patterns. */
   private approvalPatterns: RegExp[] = [...APPROVAL_REQUIRED_PATTERNS];
+  /** Injected external security policy — avoids circular require(). */
+  private securityPolicy: ISecurityPolicy | null = null;
 
   /**
    * @param logger  Pre-initialised logger instance. When omitted the service
@@ -198,6 +201,14 @@ export class DeepTerminalService extends EventEmitter {
    */
   public addBlockedPatterns(patterns: RegExp[]): void {
     this.blockedPatterns.push(...patterns);
+  }
+
+  /**
+   * Inject an external security policy for command validation.
+   * Called once during extension activation — no circular import needed.
+   */
+  public setSecurityPolicy(policy: ISecurityPolicy): void {
+    this.securityPolicy = policy;
   }
 
   /**
@@ -277,8 +288,9 @@ export class DeepTerminalService extends EventEmitter {
   }
 
   /**
-   * Validates a command against the instance's blocked-pattern list.
-   * @throws If the command matches a hard-blocked pattern.
+   * Validates a command against the instance's blocked-pattern list
+   * and the injected external security policy.
+   * @throws If the command matches a blocked pattern.
    */
   private validateCommand(command: string): void {
     const normalised = this.normalise(command);
@@ -290,6 +302,22 @@ export class DeepTerminalService extends EventEmitter {
           `${msg}. This command matches a restricted pattern and cannot be executed.`,
         );
       }
+    }
+
+    if (!this.securityPolicy) {
+      this.logger.debug(
+        "External security policy not yet injected — skipping policy check",
+      );
+    }
+
+    // Check injected external security policy (fail-closed: if injected, it MUST succeed)
+    // Pass the ALREADY normalized string to ensure consistent pattern matching
+    if (this.securityPolicy?.isCommandBlocked(normalised)) {
+      const msg = `Blocked by external security policy: "${command}"`;
+      this.logger.warn(msg);
+      throw new Error(
+        `${msg}. Check .codebuddy/security.json for configured deny patterns.`,
+      );
     }
   }
 

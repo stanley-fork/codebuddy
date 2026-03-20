@@ -62,6 +62,14 @@ import { DependencyCheckTask } from "./services/tasks/dependency-check.task";
 import { GitWatchdogTask } from "./services/tasks/git-watchdog.task";
 import { EndOfDaySummaryTask } from "./services/tasks/end-of-day-summary.task";
 import { CodebuddyIgnoreService } from "./services/codebuddy-ignore.service";
+import { ExternalSecurityConfigService } from "./services/external-security-config.service";
+import { DeepTerminalService } from "./services/deep-terminal.service";
+import { setSecurityPolicy as setBrowserSecurityPolicy } from "./webview-providers/handlers/browser-handler";
+import {
+  openSecurityConfig,
+  runSecurityDiagnostics,
+} from "./commands/security-config.command";
+import { DoctorService } from "./services/doctor.service";
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -202,6 +210,16 @@ export async function activate(context: vscode.ExtensionContext) {
       l10n.config({ uri: bundleUri.toString() });
     }
 
+    // Initialize External Security Config (must be before terminal for deny-pattern enforcement)
+    const externalSecurityConfig = ExternalSecurityConfigService.getInstance();
+    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    await externalSecurityConfig.initialize(workspacePath);
+    context.subscriptions.push(externalSecurityConfig);
+
+    // Inject security policy into terminal and browser handler (DI — no circular imports)
+    DeepTerminalService.getInstance().setSecurityPolicy(externalSecurityConfig);
+    setBrowserSecurityPolicy(externalSecurityConfig);
+
     // Initialize Terminal with extension path early for Docker Compose support
     const terminal = Terminal.getInstance();
     terminal.setExtensionPath(context.extensionPath);
@@ -210,7 +228,6 @@ export async function activate(context: vscode.ExtensionContext) {
     SkillService.setExtensionPath(context.extensionPath);
     SkillService.setSecretStorage(context.secrets);
     const skillService = SkillService.getInstance();
-    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
     // Defer initialization to not block extension activation
     // Errors are tracked and shown to user on first skills interaction
@@ -239,6 +256,15 @@ export async function activate(context: vscode.ExtensionContext) {
     const secretStorageService = SecretStorageService.initialize(context);
     await secretStorageService.migrateApiKeys();
     context.subscriptions.push(secretStorageService);
+
+    // Initialize Doctor Service (security audit framework)
+    const doctorService = DoctorService.getInstance();
+    doctorService.configure({
+      secretStorage: secretStorageService,
+      securityConfig: externalSecurityConfig,
+      workspacePath: workspacePath ?? "",
+    });
+    context.subscriptions.push(doctorService);
 
     // Use dynamic import for DeveloperAgent to ensure it's loaded AFTER telemetry initialization
     const { DeveloperAgent } = await import("./agents/developer/agent");
@@ -410,6 +436,66 @@ export async function activate(context: vscode.ExtensionContext) {
         },
       ),
     );
+
+    // Register External Security Config commands
+    const securityChannel =
+      vscode.window.createOutputChannel("CodeBuddy Security");
+    context.subscriptions.push(securityChannel);
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "codebuddy.openSecurityConfig",
+        openSecurityConfig,
+      ),
+      vscode.commands.registerCommand("codebuddy.securityDiagnostics", () =>
+        runSecurityDiagnostics(securityChannel),
+      ),
+      vscode.commands.registerCommand("codebuddy.runDoctor", async () => {
+        const findings = await doctorService.execute();
+        doctorService.displayFindings(findings, {
+          showChannel: true,
+          preserveFocus: false,
+        });
+      }),
+      vscode.commands.registerCommand("codebuddy.doctorAutoFix", async () => {
+        // Ensure we have findings to work with
+        if (doctorService.getCachedFindings().length === 0) {
+          await doctorService.execute();
+        }
+        const fixable = doctorService
+          .getCachedFindings()
+          .filter((f) => f.autoFixable);
+        if (fixable.length === 0) {
+          vscode.window.showInformationMessage(
+            "Doctor: No auto-fixable issues found.",
+          );
+          return;
+        }
+        const action = await vscode.window.showInformationMessage(
+          `Doctor found ${fixable.length} auto-fixable issue(s). Apply fixes?`,
+          "Apply All",
+          "Cancel",
+        );
+        if (action === "Apply All") {
+          const { applied, updated } =
+            await doctorService.runAutoFixWithRefresh();
+          vscode.window.showInformationMessage(
+            `Doctor: Applied ${applied} fix(es).`,
+          );
+          doctorService.displayFindings(updated, {
+            showChannel: true,
+            preserveFocus: false,
+          });
+        }
+      }),
+    );
+
+    // Run Doctor in background (after all services ready — non-blocking)
+    setImmediate(() => {
+      doctorService.runBackground().catch((err) => {
+        logger.error("Doctor background scan failed:", err);
+      });
+    });
 
     // Initialize Diff Review Service
     const diffReviewService = DiffReviewService.getInstance();

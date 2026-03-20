@@ -2,6 +2,20 @@ import * as vscode from "vscode";
 import { WebviewMessageHandler, HandlerContext } from "./types";
 import { AgentService } from "../../services/agent-state";
 import type { MCPToolResult } from "../../MCP/types";
+import type { ISecurityPolicy } from "../../services/security-policy.interface";
+
+/** Module-level security policy reference — set via {@link setSecurityPolicy}. */
+let securityPolicy: ISecurityPolicy | null = null;
+
+/** Inject the security policy once during extension activation. */
+export function setSecurityPolicy(policy: ISecurityPolicy): void {
+  securityPolicy = policy;
+}
+
+/** @internal — test use only. Resets the module-level security policy to null. */
+export function resetSecurityPolicy(): void {
+  securityPolicy = null;
+}
 
 /** Article shape used throughout scraping — compatible with Readability.parse() output */
 interface ScrapedArticle {
@@ -44,6 +58,13 @@ export function validateArticleUrl(rawUrl: string): URL {
   if (parsed.hostname.length > 253 || parsed.pathname.length > 2048) {
     throw new Error("URL exceeds maximum length");
   }
+
+  // Check injected security policy against normalized URL (prevents encoding/case bypass)
+  const normalizedUrl = parsed.href;
+  if (securityPolicy && !securityPolicy.isUrlAllowed(normalizedUrl)) {
+    throw new Error(`Blocked by external security policy: ${normalizedUrl}`);
+  }
+
   return parsed;
 }
 
