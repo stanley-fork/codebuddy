@@ -1,5 +1,5 @@
 import * as fs from "fs";
-import { readFile, access, stat } from "fs/promises";
+import { readFile, access, stat, mkdir, writeFile } from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
@@ -54,6 +54,7 @@ const CODEBUDDY_DIR = ".codebuddy";
  * path string) to prevent accidental reads of credentials and secrets.
  */
 const DEFAULT_BLOCKED_PATH_PATTERNS: readonly string[] = [
+  // Cloud credentials
   ".ssh",
   ".gnupg",
   ".gpg",
@@ -62,14 +63,27 @@ const DEFAULT_BLOCKED_PATH_PATTERNS: readonly string[] = [
   ".gcloud",
   ".kube",
   ".docker",
+  // Auth & token files
   "credentials",
   ".netrc",
   ".npmrc",
   ".pypirc",
+  // Private keys
   "id_rsa",
   "id_ed25519",
+  "id_ecdsa",
+  "id_dsa",
   "private_key",
   ".secret",
+  // Environment variable files (common credential leakage vector)
+  ".env",
+  ".env.local",
+  ".env.production",
+  ".env.staging",
+  ".env.development",
+  // Token / password stores
+  ".token",
+  ".htpasswd",
 ];
 
 /**
@@ -124,6 +138,8 @@ export class ExternalSecurityConfigService
     pattern: string;
     error: string;
   }> = [];
+  private configFileExists = false;
+  private loadConfigPromise: Promise<void> | null = null;
 
   private configDir = "";
   private configFile = "";
@@ -206,9 +222,20 @@ export class ExternalSecurityConfigService
 
   // ── Config loading ───────────────────────────────────────────────
 
-  private async loadConfig(): Promise<void> {
+  /** Serialize concurrent calls to prevent torn state. */
+  private loadConfig(): Promise<void> {
+    this.loadConfigPromise = (this.loadConfigPromise ?? Promise.resolve())
+      .then(() => this._loadConfigInternal())
+      .catch((err) => {
+        this.logger.error(`loadConfig chain error: ${err}`);
+      });
+    return this.loadConfigPromise;
+  }
+
+  private async _loadConfigInternal(): Promise<void> {
     if (!this.configFile) {
       this.config = {};
+      this.configFileExists = false;
       this.compilePatterns();
       return;
     }
@@ -218,6 +245,7 @@ export class ExternalSecurityConfigService
       await access(this.configFile, fs.constants.R_OK);
     } catch {
       this.config = {};
+      this.configFileExists = false;
       this.compilePatterns();
       return;
     }
@@ -233,11 +261,13 @@ export class ExternalSecurityConfigService
       } else {
         this.config = parsed;
       }
+      this.configFileExists = true;
     } catch (err) {
       this.logger.error(
         `Failed to load external security config: ${err instanceof Error ? err.message : String(err)}`,
       );
       this.config = {};
+      this.configFileExists = false;
     }
 
     this.compilePatterns();
@@ -296,6 +326,7 @@ export class ExternalSecurityConfigService
     this.compiledCommandDenyPatterns = this.compileRegexArray(
       [...DEFAULT_COMMAND_DENY_PATTERNS, ...userCommandPatterns],
       "commandDenyPatterns",
+      "", // case-SENSITIVE for shell commands
     );
 
     const userNetworkAllow = this.truncatePatterns(
@@ -306,6 +337,7 @@ export class ExternalSecurityConfigService
     this.compiledNetworkAllowPatterns = this.compileRegexArray(
       userNetworkAllow,
       "networkAllowPatterns",
+      "i", // case-insensitive for URLs
     );
 
     const userNetworkDeny = this.truncatePatterns(
@@ -316,6 +348,7 @@ export class ExternalSecurityConfigService
     this.compiledNetworkDenyPatterns = this.compileRegexArray(
       [...DEFAULT_NETWORK_DENY_PATTERNS, ...userNetworkDeny],
       "networkDenyPatterns",
+      "i", // case-insensitive for URLs
     );
 
     // Merge blocked path patterns (exact segment matches)
@@ -347,11 +380,12 @@ export class ExternalSecurityConfigService
   private compileRegexArray(
     sources: readonly string[],
     category: string = "unknown",
+    flags: string = "i",
   ): RegExp[] {
     const result: RegExp[] = [];
     for (const src of sources) {
       try {
-        result.push(new RegExp(src, "i"));
+        result.push(new RegExp(src, flags));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.logger.warn(
@@ -366,14 +400,16 @@ export class ExternalSecurityConfigService
   // ── File watcher ─────────────────────────────────────────────────
 
   private startWatcher(): void {
-    if (!this.configDir || !fs.existsSync(this.configDir)) {
+    if (!this.configDir) {
       return;
     }
 
     try {
+      // Watch the parent workspace for directory creation
+      // (covers the case where .codebuddy/ is created after initialization)
       const pattern = new vscode.RelativePattern(
-        this.configDir,
-        CONFIG_FILENAME,
+        this.workspaceRoot || this.configDir,
+        `${CODEBUDDY_DIR}/${CONFIG_FILENAME}`,
       );
       this.vsCodeWatcher = vscode.workspace.createFileSystemWatcher(pattern);
 
@@ -393,20 +429,27 @@ export class ExternalSecurityConfigService
         clearTimeout(this.reloadDebounceTimer);
         this.logger.warn("Security config deleted — reverting to defaults");
         this.config = {};
+        this.configFileExists = false;
         this.compilePatterns();
       });
-    } catch {
-      this.logger.warn("Could not start file watcher for security config");
+    } catch (err) {
+      this.logger.warn(
+        `Could not start file watcher for security config: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
   // ── Public query API ─────────────────────────────────────────────
 
-  /** Returns `true` if the command should be blocked. */
+  /**
+   * Returns `true` if the command should be blocked.
+   * @param command — Pre-normalized command string from the caller.
+   *   Applies only minimal safety trimming — callers own normalization.
+   */
   public isCommandBlocked(command: string): boolean {
-    const normalized = command.trim().replace(/\s+/g, " ");
+    const input = command.trim();
     return this.compiledCommandDenyPatterns.some((rx) =>
-      this.safeTest(rx, normalized),
+      this.safeTest(rx, input),
     );
   }
 
@@ -505,22 +548,28 @@ export class ExternalSecurityConfigService
       // path.relative returns ".." prefix for paths outside allowedRoot
       // path.isAbsolute catches edge cases on Windows where relative might be absolute
       if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
-        return { allowed: true, readWrite: entry.allowReadWrite ?? false };
+        // Re-verify via real path resolution to catch symlink escapes
+        try {
+          const allowedRootReal = fs.realpathSync.native(allowedRoot);
+          if (
+            resolved === allowedRootReal ||
+            resolved.startsWith(allowedRootReal + path.sep)
+          ) {
+            return { allowed: true, readWrite: entry.allowReadWrite ?? false };
+          }
+        } catch {
+          // allowedRoot doesn't exist — trust path.relative check only
+          return { allowed: true, readWrite: entry.allowReadWrite ?? false };
+        }
       }
     }
 
     return { allowed: false, readWrite: false };
   }
 
-  /** Returns `true` if a config file exists and is readable. */
+  /** Returns `true` if a config file exists and is readable (cached from last load). */
   public hasConfig(): boolean {
-    if (!this.configFile) return false;
-    try {
-      fs.accessSync(this.configFile, fs.constants.R_OK);
-      return true;
-    } catch {
-      return false;
-    }
+    return this.configFileExists;
   }
 
   /** Returns a diagnostic summary for the Doctor command. */
@@ -615,11 +664,18 @@ export class ExternalSecurityConfigService
       this.logger.warn("Cannot scaffold security config — no workspace folder");
       return false;
     }
-    if (fs.existsSync(this.configFile)) {
-      return false;
+
+    // Async existence check
+    try {
+      await access(this.configFile, fs.constants.F_OK);
+      return false; // Already exists
+    } catch {
+      // Does not exist — proceed
     }
 
-    const defaultConfig: ExternalSecurityConfig = {
+    const defaultConfig = {
+      $schema: "https://codebuddy.dev/schemas/security-config-v1.json",
+      version: 1,
       allowedPaths: [
         {
           path: this.workspaceRoot,
@@ -627,14 +683,14 @@ export class ExternalSecurityConfigService
           description: path.basename(this.workspaceRoot),
         },
       ],
-      commandDenyPatterns: [],
-      networkAllowPatterns: [],
-      networkDenyPatterns: [],
-      blockedPathPatterns: [],
+      commandDenyPatterns: [] as string[],
+      networkAllowPatterns: [] as string[],
+      networkDenyPatterns: [] as string[],
+      blockedPathPatterns: [] as string[],
     };
 
-    fs.mkdirSync(this.configDir, { recursive: true });
-    fs.writeFileSync(
+    await mkdir(this.configDir, { recursive: true });
+    await writeFile(
       this.configFile,
       JSON.stringify(defaultConfig, null, 2) + "\n",
       { encoding: "utf-8", mode: 0o600 },
@@ -650,9 +706,9 @@ export class ExternalSecurityConfigService
     return { ...this.config };
   }
 
-  /** Returns the path to the config file. */
-  public getConfigPath(): string {
-    return this.configFile;
+  /** Returns the path to the config file, or `undefined` if no workspace. */
+  public getConfigPath(): string | undefined {
+    return this.configFile || undefined;
   }
 
   // ── Helpers ──────────────────────────────────────────────────────
@@ -683,11 +739,27 @@ export class ExternalSecurityConfigService
     return p;
   }
 
+  /**
+   * Resolves a path canonically, following all symlinks.
+   * For non-existent paths, resolves the deepest existing ancestor
+   * and appends the remaining segments — prevents symlink escape.
+   */
   private resolvePath(p: string): string {
     const expanded = this.expandPath(p);
     try {
-      return fs.realpathSync(expanded);
+      return fs.realpathSync.native(expanded);
     } catch {
+      // File doesn't exist yet — resolve the deepest existing ancestor
+      const parts = expanded.split(path.sep);
+      for (let i = parts.length - 1; i > 0; i--) {
+        const partial = parts.slice(0, i).join(path.sep);
+        try {
+          const real = fs.realpathSync.native(partial);
+          return path.join(real, ...parts.slice(i));
+        } catch {
+          continue;
+        }
+      }
       return path.resolve(expanded);
     }
   }

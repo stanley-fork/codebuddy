@@ -12,6 +12,11 @@ export function setSecurityPolicy(policy: ISecurityPolicy): void {
   securityPolicy = policy;
 }
 
+/** @internal — test use only. Resets the module-level security policy to null. */
+export function resetSecurityPolicy(): void {
+  securityPolicy = null;
+}
+
 /** Article shape used throughout scraping — compatible with Readability.parse() output */
 interface ScrapedArticle {
   title: string;

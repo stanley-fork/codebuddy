@@ -5,7 +5,7 @@
  * ExternalSecurityConfigService — avoiding circular dependencies.
  */
 export interface ISecurityPolicy {
-  /** Returns `true` if the command should be blocked. */
+  /** Returns `true` if the command should be blocked. @param command Pre-normalized command string. */
   isCommandBlocked(command: string): boolean;
   /** Returns `true` if the URL is allowed to be fetched. */
   isUrlAllowed(url: string): boolean;
