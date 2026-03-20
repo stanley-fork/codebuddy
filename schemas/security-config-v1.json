@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/olasunkanmi-SE/codebuddy/main/schemas/security-config-v1.json",
+  "title": "CodeBuddy Security Config",
+  "description": "Controls what the CodeBuddy extension is allowed to do in your workspace — file access, terminal commands, network requests, and sensitive path blocking.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for editor autocompletion."
+    },
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version. Must be 1."
+    },
+    "allowedPaths": {
+      "type": "array",
+      "description": "Directories the extension is allowed to access. Each entry specifies a path and whether read-write is permitted.",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute or ~-relative path to an allowed directory."
+          },
+          "allowReadWrite": {
+            "type": "boolean",
+            "default": false,
+            "description": "true = read-write access, false = read-only. Defaults to false."
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable note explaining why this path is allowed."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "commandDenyPatterns": {
+      "type": "array",
+      "description": "Regex patterns for terminal commands that should be blocked. Merged with built-in defaults.",
+      "items": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "A regex pattern (e.g. \"rm\\\\s+-rf\\\\s+/\") that matches commands to deny."
+      }
+    },
+    "networkAllowPatterns": {
+      "type": "array",
+      "description": "URL patterns the extension is permitted to fetch. If present, only matching URLs are allowed (allowlist mode).",
+      "items": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "A regex pattern matching allowed URLs."
+      }
+    },
+    "networkDenyPatterns": {
+      "type": "array",
+      "description": "URL patterns the extension must never fetch. Evaluated before allow patterns (denylist takes priority).",
+      "items": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "A regex pattern matching blocked URLs."
+      }
+    },
+    "blockedPathPatterns": {
+      "type": "array",
+      "description": "Glob or regex patterns for sensitive file/directory paths that should never be read or listed.",
+      "items": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "A pattern matching paths to block (e.g. \".env\", \"secrets/\")."
+      }
+    }
+  },
+  "required": ["version"],
+  "additionalProperties": false
+}

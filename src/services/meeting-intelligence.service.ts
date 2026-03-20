@@ -12,6 +12,7 @@ import { QwenLLM } from "../llms/qwen/qwen";
 import { GLMLLM } from "../llms/glm/glm";
 import { LocalLLM } from "../llms/local/local";
 import { getAPIKeyAndModel, getGenerativeAiModel } from "../utils/utils";
+import { SESSION_TOKEN_HEADER } from "./credential-proxy.service";
 import { TeamGraphStore } from "./team-graph-store";
 import { MemoryTool } from "../tools/memory";
 import type {
@@ -161,6 +162,11 @@ export class MeetingIntelligenceService {
         apiKey: creds.apiKey,
         model: creds.model || providerName,
         baseUrl: creds.baseUrl,
+        ...(creds.proxySessionToken && {
+          defaultHeaders: {
+            [SESSION_TOKEN_HEADER]: creds.proxySessionToken,
+          },
+        }),
       });
     }
 

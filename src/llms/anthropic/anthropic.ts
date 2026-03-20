@@ -36,6 +36,9 @@ export class AnthropicLLM
     this.client = new Anthropic({
       apiKey: this.config.apiKey,
       baseURL: this.config.baseUrl, // Optional, for proxies
+      ...(this.config.defaultHeaders && {
+        defaultHeaders: this.config.defaultHeaders,
+      }),
     });
     this.response = undefined;
     this.orchestrator = Orchestrator.getInstance();

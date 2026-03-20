@@ -4,6 +4,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import { getAPIKeyAndModel, getGenerativeAiModel } from "../utils/utils";
+import { SESSION_TOKEN_HEADER } from "./credential-proxy.service";
 import { SqliteVectorStore, VectorDocument } from "./sqlite-vector-store";
 import { EmbeddingService } from "./embedding";
 
@@ -85,7 +86,8 @@ export class ResearchNotesExtractor {
   private initializeProvider(): void {
     try {
       const providerName = getGenerativeAiModel() || "Gemini";
-      const { apiKey, model, baseUrl } = getAPIKeyAndModel(providerName);
+      const { apiKey, model, baseUrl, proxySessionToken } =
+        getAPIKeyAndModel(providerName);
       this.provider = providerName.toLowerCase();
       this.modelName = model;
 
@@ -97,17 +99,30 @@ export class ResearchNotesExtractor {
         return;
       }
 
+      // Build proxy default headers when session token is present
+      const proxyDefaultHeaders = proxySessionToken
+        ? { [SESSION_TOKEN_HEADER]: proxySessionToken }
+        : undefined;
+
       // Initialize LLM client based on provider
       switch (this.provider) {
         case "gemini":
           this.genAI = new GoogleGenerativeAI(apiKey);
           break;
         case "anthropic":
-          this.anthropic = new Anthropic({ apiKey });
+          this.anthropic = new Anthropic({
+            apiKey,
+            ...(baseUrl && { baseURL: baseUrl }),
+            ...(proxyDefaultHeaders && { defaultHeaders: proxyDefaultHeaders }),
+          });
           break;
         default:
           // OpenAI-compatible providers (OpenAI, DeepSeek, Groq, Qwen, GLM, Local)
-          this.openai = new OpenAI({ apiKey, baseURL: baseUrl });
+          this.openai = new OpenAI({
+            apiKey,
+            baseURL: baseUrl,
+            ...(proxyDefaultHeaders && { defaultHeaders: proxyDefaultHeaders }),
+          });
           break;
       }
 

@@ -215,7 +215,14 @@ export class ExternalSecurityConfigService
         await access(this.configFile, fs.constants.R_OK);
         fileExists = true;
       } catch {
-        // file doesn't exist
+        // Auto-scaffold security.json on first use
+        const created = await this.scaffoldDefaultConfig();
+        if (created) {
+          fileExists = true;
+          this.logger.info(
+            "Auto-created default security config at " + this.configFile,
+          );
+        }
       }
     }
     this.logger.info(
@@ -391,8 +398,20 @@ export class ExternalSecurityConfigService
     category: string = "unknown",
     flags: string = "i",
   ): RegExp[] {
+    const MAX_PATTERN_LENGTH = 200;
     const result: RegExp[] = [];
     for (const src of sources) {
+      if (src.length > MAX_PATTERN_LENGTH) {
+        this.logger.warn(
+          `Regex in ${category} exceeds ${MAX_PATTERN_LENGTH} chars, skipped: ${src.slice(0, 40)}…`,
+        );
+        this.invalidPatterns.push({
+          category,
+          pattern: src.slice(0, 40) + "…",
+          error: `Pattern exceeds ${MAX_PATTERN_LENGTH} character limit`,
+        });
+        continue;
+      }
       try {
         result.push(new RegExp(src, flags));
       } catch (err) {
@@ -693,7 +712,8 @@ export class ExternalSecurityConfigService
     }
 
     const defaultConfig = {
-      $schema: "https://codebuddy.dev/schemas/security-config-v1.json",
+      $schema:
+        "https://raw.githubusercontent.com/olasunkanmi-SE/codebuddy/main/schemas/security-config-v1.json",
       version: 1,
       allowedPaths: [
         {

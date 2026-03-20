@@ -1,7 +1,3 @@
-import { ChatAnthropic } from "@langchain/anthropic";
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-import { ChatGroq } from "@langchain/groq";
-import { ChatOpenAI } from "@langchain/openai";
 import { BaseStore } from "@langchain/langgraph";
 import { rgPath } from "@vscode/ripgrep";
 import { execFile } from "child_process";
@@ -31,17 +27,14 @@ import { ToolProvider } from "../langgraph/tools/provider";
 import { DEVELOPER_SYSTEM_PROMPT } from "./prompts";
 import { createDeveloperSubagents } from "./subagents";
 import { getAPIKeyAndModel, getGenerativeAiModel } from "../../utils/utils";
+import { SESSION_TOKEN_HEADER } from "../../services/credential-proxy.service";
+import { buildChatModel, type ChatModel } from "../factory/chat-model.factory";
 
 const execFileAsync = promisify(execFile);
 
 export class DeveloperAgent {
   private config: ICodeBuddyAgentConfig;
-  private model:
-    | ChatAnthropic
-    | ChatGroq
-    | ChatOpenAI
-    | ChatGoogleGenerativeAI
-    | undefined;
+  private model: ChatModel | undefined;
   private tools: StructuredTool[];
   private readonly logger: Logger;
   constructor(config: ICodeBuddyAgentConfig = {}) {
@@ -161,12 +154,7 @@ export class DeveloperAgent {
    * Creates the appropriate LangChain chat model based on current settings.
    * @returns The LangChain model instance or undefined if configuration is invalid.
    */
-  private createChatModel():
-    | ChatAnthropic
-    | ChatGroq
-    | ChatOpenAI
-    | ChatGoogleGenerativeAI
-    | undefined {
+  private createChatModel(): ChatModel | undefined {
     const provider = getGenerativeAiModel()?.toLowerCase();
     if (!provider) {
       this.logger.warn("No generative AI provider selected in settings");
@@ -174,68 +162,33 @@ export class DeveloperAgent {
     }
 
     try {
-      const { apiKey, model: modelName, baseUrl } = getAPIKeyAndModel(provider);
+      const {
+        apiKey,
+        model: modelName,
+        baseUrl,
+        proxySessionToken,
+      } = getAPIKeyAndModel(provider);
       if (!apiKey) {
         this.logger.warn(`No API key found for provider: ${provider}`);
         return undefined;
       }
 
-      switch (provider) {
-        case "anthropic":
-          return new ChatAnthropic({
-            anthropicApiKey: apiKey,
-            modelName: modelName || "claude-sonnet-4-20250514",
-          });
-        case "openai":
-          return new ChatOpenAI({
-            openAIApiKey: apiKey,
-            modelName: modelName || "gpt-4o",
-            configuration: baseUrl ? { baseURL: baseUrl } : undefined,
-          });
-        case "groq":
-          return new ChatGroq({
-            apiKey,
-            model: modelName || "llama-3.3-70b-versatile",
-          });
-        case "gemini":
-          return new ChatGoogleGenerativeAI({
-            apiKey,
-            model: modelName || "gemini-2.0-flash",
-          });
-        case "deepseek":
-          return new ChatOpenAI({
-            openAIApiKey: apiKey,
-            modelName: modelName || "deepseek-chat",
-            configuration: { baseURL: baseUrl || "https://api.deepseek.com" },
-          });
-        case "qwen":
-          return new ChatOpenAI({
-            openAIApiKey: apiKey,
-            modelName: modelName || "qwen-plus",
-            configuration: {
-              baseURL:
-                baseUrl ||
-                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-            },
-          });
-        case "glm":
-          return new ChatOpenAI({
-            openAIApiKey: apiKey,
-            modelName: modelName || "glm-4-plus",
-            configuration: {
-              baseURL: baseUrl || "https://open.bigmodel.cn/api/paas/v4",
-            },
-          });
-        case "local":
-          return new ChatOpenAI({
-            openAIApiKey: apiKey || "not-needed",
-            modelName: modelName || "local-model",
-            configuration: { baseURL: baseUrl || "http://localhost:11434/v1" },
-          });
-        default:
-          this.logger.warn(`Unsupported provider: ${provider}`);
-          return undefined;
+      // Build proxy default headers when session token is present
+      const proxyDefaultHeaders = proxySessionToken
+        ? { [SESSION_TOKEN_HEADER]: proxySessionToken }
+        : undefined;
+
+      const model = buildChatModel({
+        provider,
+        apiKey,
+        modelName,
+        baseUrl,
+        proxyDefaultHeaders,
+      });
+      if (!model) {
+        this.logger.warn(`Unsupported provider: ${provider}`);
       }
+      return model;
     } catch (error) {
       this.logger.error(`Failed to create chat model for ${provider}`, error);
       return undefined;

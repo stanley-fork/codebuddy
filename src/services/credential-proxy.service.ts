@@ -1,0 +1,788 @@
+import * as crypto from "node:crypto";
+import * as http from "node:http";
+import * as https from "node:https";
+import * as vscode from "vscode";
+import { Logger, LogLevel } from "../infrastructure/logger/logger";
+import type { SecretStorageService } from "./secret-storage";
+import { APP_CONFIG } from "../application/constant";
+
+// ─── Types ───────────────────────────────────────────────────────────
+
+interface ProviderRoute {
+  /** Real upstream base URL (no trailing slash). */
+  target: string;
+  /** Config key in APP_CONFIG for the API key. */
+  configKey: string;
+  /** Header name for the credential. */
+  authHeader: string;
+  /** Header value format — `%s` is replaced with the API key. */
+  authFormat: string;
+  /** Extra headers to inject (e.g. anthropic-version). */
+  extraHeaders?: Record<string, string>;
+}
+
+export interface ProxyAuditEntry {
+  timestamp: number;
+  provider: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  latencyMs: number;
+}
+
+interface TokenBucket {
+  tokens: number;
+  lastRefill: number;
+  maxTokens: number;
+  refillRate: number; // tokens per ms
+}
+
+/** Session token header — only callers that know the token can use the proxy. */
+export const SESSION_TOKEN_HEADER = "x-codebuddy-proxy-token";
+
+/** Explicit proxy lifecycle states (prevents invalid state combinations). */
+type ProxyState = "idle" | "starting" | "running" | "draining" | "stopped";
+
+/** Safe error code → response mapping for upstream failures. */
+const UPSTREAM_ERROR_MAP: Record<string, { status: number; message: string }> =
+  {
+    ECONNREFUSED: { status: 502, message: "Upstream refused connection" },
+    ECONNRESET: { status: 502, message: "Upstream reset connection" },
+    ETIMEDOUT: { status: 504, message: "Upstream connection timed out" },
+    ENOTFOUND: { status: 502, message: "Upstream host not found" },
+    ECONNABORTED: { status: 504, message: "Request timed out" },
+  };
+
+// ─── Provider routing table ──────────────────────────────────────────
+
+const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
+  anthropic: {
+    target: "https://api.anthropic.com",
+    configKey: APP_CONFIG.anthropicApiKey,
+    authHeader: "x-api-key",
+    authFormat: "%s",
+    extraHeaders: { "anthropic-version": "2023-06-01" },
+  },
+  openai: {
+    target: "https://api.openai.com",
+    configKey: APP_CONFIG.openaiApiKey,
+    authHeader: "authorization",
+    authFormat: "Bearer %s",
+  },
+  groq: {
+    target: "https://api.groq.com/openai",
+    configKey: APP_CONFIG.groqApiKey,
+    authHeader: "authorization",
+    authFormat: "Bearer %s",
+  },
+  deepseek: {
+    target: "https://api.deepseek.com",
+    configKey: APP_CONFIG.deepseekApiKey,
+    authHeader: "authorization",
+    authFormat: "Bearer %s",
+  },
+  qwen: {
+    target: "https://dashscope-intl.aliyuncs.com/compatible-mode",
+    configKey: APP_CONFIG.qwenApiKey,
+    authHeader: "authorization",
+    authFormat: "Bearer %s",
+  },
+  glm: {
+    target: "https://open.bigmodel.cn/api/paas",
+    configKey: APP_CONFIG.glmApiKey,
+    authHeader: "authorization",
+    authFormat: "Bearer %s",
+  },
+  grok: {
+    target: "https://api.x.ai",
+    configKey: APP_CONFIG.grokApiKey,
+    authHeader: "authorization",
+    authFormat: "Bearer %s",
+  },
+  tavily: {
+    target: "https://api.tavily.com",
+    configKey: APP_CONFIG.tavilyApiKey,
+    authHeader: "authorization",
+    authFormat: "Bearer %s",
+  },
+  local: {
+    target: "http://localhost:11434",
+    configKey: APP_CONFIG.localApiKey,
+    authHeader: "authorization",
+    authFormat: "Bearer %s",
+  },
+};
+
+/** Set of provider names that have proxy routes. */
+export const PROXY_PROVIDERS = new Set(Object.keys(PROVIDER_ROUTES));
+
+/** Providers exempt from rate limiting (local inference has no API rate caps). */
+const RATE_LIMIT_EXEMPT = new Set(["local"]);
+
+/** Headers that must never be forwarded from the client. */
+const STRIPPED_REQUEST_HEADERS = new Set([
+  "authorization",
+  "x-api-key",
+  "x-goog-api-key",
+  "host",
+  // Let Node.js manage connection/encoding negotiation with upstream
+  "connection",
+  "keep-alive",
+  "transfer-encoding",
+]);
+
+const MAX_AUDIT_ENTRIES = 1000;
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+const UPSTREAM_TIMEOUT_MS = 5 * 60_000; // 5 min — LLM streaming responses can take minutes
+const CLIENT_RECEIVE_TIMEOUT_MS = 30_000; // 30 s — max idle time between request body chunks
+
+// ─── Service ─────────────────────────────────────────────────────────
+
+export class CredentialProxyService implements vscode.Disposable {
+  private static instance: CredentialProxyService | undefined;
+  private readonly logger: Logger;
+  private server: http.Server | undefined;
+  private port = 0;
+  private state: ProxyState = "idle";
+  private secretStorage: SecretStorageService | undefined;
+  private readonly rateBuckets = new Map<string, TokenBucket>();
+  private configWatcher: vscode.Disposable | undefined;
+  private cachedRateLimits: Record<string, number> | undefined;
+  private startPromise: Promise<void> | undefined;
+  private sessionToken = "";
+  private readonly activeConnections = new Set<import("node:net").Socket>();
+
+  // Ring buffer for audit log — O(1) writes
+  private readonly auditBuffer: (ProxyAuditEntry | undefined)[] = new Array(
+    MAX_AUDIT_ENTRIES,
+  ).fill(undefined);
+  private auditHead = 0;
+  private auditCount = 0;
+
+  private constructor() {
+    this.logger = Logger.initialize("CredentialProxy", {
+      minLevel: LogLevel.DEBUG,
+      enableConsole: true,
+      enableFile: true,
+      enableTelemetry: true,
+    });
+  }
+
+  public static getInstance(): CredentialProxyService {
+    if (!CredentialProxyService.instance) {
+      CredentialProxyService.instance = new CredentialProxyService();
+    }
+    return CredentialProxyService.instance;
+  }
+
+  /** Whether the singleton has been created (avoids side-effectful getInstance). */
+  public static isInstantiated(): boolean {
+    return CredentialProxyService.instance !== undefined;
+  }
+
+  // resetForTesting lives outside the class — see _resetSingletonForTesting export.
+
+  /** Start the proxy server. Resolves once listening. Promise-coalesced to prevent races. */
+  public start(secretStorage: SecretStorageService): Promise<void> {
+    if (this.state === "running") return Promise.resolve();
+    if (this.state === "starting") return this.startPromise!;
+    if (this.state === "draining") {
+      return Promise.reject(
+        new Error(
+          "Cannot restart while draining. Wait for dispose() to complete.",
+        ),
+      );
+    }
+    // Reset from stopped state for restart
+    if (this.state === "stopped") {
+      this.state = "idle";
+    }
+
+    this.secretStorage = secretStorage;
+    this.sessionToken = crypto.randomBytes(32).toString("hex");
+    this.state = "starting";
+    this.startPromise = this.doStart()
+      .then(() => {
+        this.state = "running";
+      })
+      .catch((err) => {
+        this.state = "stopped";
+        throw err;
+      })
+      .finally(() => {
+        this.startPromise = undefined;
+      });
+    return this.startPromise;
+  }
+
+  private doStart(): Promise<void> {
+    // Cache rate limit config and listen for changes (guard against double-register)
+    this.refreshConfigCache();
+    if (!this.configWatcher) {
+      this.configWatcher = vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("codebuddy.credentialProxy.rateLimits")) {
+          this.refreshConfigCache();
+          this.rateBuckets.clear();
+          this.logger.info("Rate limit config updated — buckets reset");
+        }
+      });
+    }
+
+    return new Promise((resolve, reject) => {
+      const srv = http.createServer((req, res) => this.handleRequest(req, res));
+      let started = false;
+
+      // Track active sockets for force-close on dispose
+      srv.on("connection", (socket) => {
+        this.activeConnections.add(socket);
+        socket.once("close", () => this.activeConnections.delete(socket));
+      });
+
+      srv.on("error", (err) => {
+        this.logger.error(`Credential proxy server error: ${err.message}`);
+        if (!started) {
+          // Startup failure — clean up watcher and reject
+          this.configWatcher?.dispose();
+          this.configWatcher = undefined;
+          reject(err);
+        }
+        // Runtime error on a running server — logged, but server stays up
+      });
+
+      // Bind to localhost only — never expose to network
+      srv.listen(0, "127.0.0.1", () => {
+        started = true;
+        const addr = srv.address();
+        if (addr && typeof addr === "object") {
+          this.port = addr.port;
+        }
+        this.server = srv;
+        this.logger.info(
+          `Credential proxy listening on 127.0.0.1:${this.port}`,
+        );
+        resolve();
+      });
+    });
+  }
+
+  /** The port the proxy is listening on (0 if not started). */
+  public getPort(): number {
+    return this.port;
+  }
+
+  /** Whether the proxy server is currently running. */
+  public isRunning(): boolean {
+    return this.state === "running";
+  }
+
+  /** Check whether a provider name has a proxy route. */
+  public static hasRoute(provider: string): boolean {
+    return provider in PROVIDER_ROUTES;
+  }
+
+  /** Build the proxy base URL for a given provider. */
+  public getProxyUrl(provider: string): string {
+    return `http://127.0.0.1:${this.port}/${provider}`;
+  }
+
+  /** Per-session secret token — callers must include this in requests. */
+  public getSessionToken(): string {
+    return this.sessionToken;
+  }
+
+  /** Get the audit log (defensive frozen copy). */
+  public getAuditLog(): readonly ProxyAuditEntry[] {
+    // Ring buffer read: when full, auditHead points to the oldest (next-write) slot.
+    // When partially filled, entries start at index 0.
+    const count = Math.min(this.auditCount, MAX_AUDIT_ENTRIES);
+    const oldestSlot = count < MAX_AUDIT_ENTRIES ? 0 : this.auditHead;
+    const result: ProxyAuditEntry[] = new Array(count);
+
+    for (let i = 0; i < count; i++) {
+      const entry = this.auditBuffer[(oldestSlot + i) % MAX_AUDIT_ENTRIES]!;
+      result[i] = { ...entry }; // shallow copy — ProxyAuditEntry fields are all primitives
+    }
+
+    return Object.freeze(result) as readonly ProxyAuditEntry[];
+  }
+
+  public dispose(): void {
+    // Always clean up the config watcher regardless of state
+    this.configWatcher?.dispose();
+    this.configWatcher = undefined;
+
+    if (this.state === "stopped" || this.state === "draining") return;
+    this.state = "draining";
+
+    // Wipe session secrets and caches so a disposed proxy cannot be re-used
+    this.sessionToken = "";
+    this.rateBuckets.clear();
+    this.cachedRateLimits = undefined;
+
+    if (this.server) {
+      const srv = this.server;
+      this.server = undefined;
+      this.port = 0;
+      // Force-close idle keep-alive connections to accelerate drain (Node 18.2+)
+      srv.closeIdleConnections?.();
+      // Force-destroy active sockets after a grace period
+      const DRAIN_GRACE_MS = 2000;
+      const forceClose = setTimeout(() => {
+        for (const socket of this.activeConnections) {
+          socket.destroy();
+        }
+        this.activeConnections.clear();
+      }, DRAIN_GRACE_MS);
+      srv.close(() => {
+        clearTimeout(forceClose);
+        this.activeConnections.clear();
+        this.state = "stopped";
+        this.logger.info("Credential proxy stopped — all connections drained");
+      });
+    } else {
+      this.state = "stopped";
+    }
+    // Do NOT null instance — callers should check isRunning()
+  }
+
+  // ── Config cache ─────────────────────────────────────────────────
+
+  private refreshConfigCache(): void {
+    this.cachedRateLimits = vscode.workspace
+      .getConfiguration("codebuddy.credentialProxy")
+      .get<Record<string, number>>("rateLimits");
+  }
+
+  // ── Auth header formatting ───────────────────────────────────────
+
+  private formatAuthValue(format: string, apiKey: string): string {
+    if (!format.includes("%s")) {
+      this.logger.warn(
+        "authFormat missing %s placeholder — using key directly",
+      );
+      return apiKey;
+    }
+    return format.replace("%s", apiKey);
+  }
+
+  // ── Request handling ─────────────────────────────────────────────
+
+  private handleRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const startTime = Date.now();
+    const reqUrl = req.url ?? "/";
+
+    // Idempotent error writer — prevents double-response from concurrent error paths.
+    let responseSent = false;
+    const sendError = (
+      status: number,
+      body: Record<string, unknown>,
+      extraHeaders?: Record<string, string>,
+    ): void => {
+      if (responseSent || res.headersSent) return;
+      responseSent = true;
+      res.writeHead(status, {
+        "content-type": "application/json",
+        ...extraHeaders,
+      });
+      res.end(JSON.stringify(body));
+    };
+
+    // Handle incoming request errors to prevent unhandled exceptions
+    req.on("error", (err) => {
+      this.logger.warn(`Incoming request error: ${err.message}`);
+      sendError(400, { error: "Client connection error" });
+    });
+
+    // Validate session token — rejects any caller that isn't our own extension
+    const token = req.headers[SESSION_TOKEN_HEADER];
+    if (token !== this.sessionToken) {
+      sendError(403, { error: "Forbidden" });
+      return;
+    }
+
+    // Parse /<provider>/rest/of/path
+    const slashIdx = reqUrl.indexOf("/", 1);
+    const provider =
+      slashIdx > 0 ? reqUrl.substring(1, slashIdx) : reqUrl.substring(1);
+    const remainingPath = slashIdx > 0 ? reqUrl.substring(slashIdx) : "/";
+
+    const route = PROVIDER_ROUTES[provider];
+    if (!route) {
+      sendError(404, { error: `Unknown provider: ${provider}` });
+      this.recordAudit(
+        provider,
+        req.method ?? "?",
+        remainingPath,
+        404,
+        startTime,
+      );
+      return;
+    }
+
+    // Rate limiting — local providers are exempt (no upstream API rate caps)
+    if (!RATE_LIMIT_EXEMPT.has(provider) && !this.checkRateLimit(provider)) {
+      sendError(
+        429,
+        { error: "Rate limit exceeded", provider },
+        { "retry-after": "1" },
+      );
+      this.recordAudit(
+        provider,
+        req.method ?? "?",
+        remainingPath,
+        429,
+        startTime,
+      );
+      return;
+    }
+
+    // Resolve API key
+    const apiKey = this.secretStorage?.getApiKey(route.configKey);
+    if (!apiKey && provider !== "local") {
+      sendError(401, {
+        error: `No API key configured for ${provider}`,
+      });
+      this.recordAudit(
+        provider,
+        req.method ?? "?",
+        remainingPath,
+        401,
+        startTime,
+      );
+      return;
+    }
+
+    // Build upstream URL — guard against malformed paths
+    const targetUrl = this.buildTargetUrl(remainingPath, route.target);
+    if (!targetUrl) {
+      sendError(400, { error: "Invalid request path" });
+      this.recordAudit(
+        provider,
+        req.method ?? "?",
+        remainingPath,
+        400,
+        startTime,
+      );
+      return;
+    }
+
+    // Build headers — strip auth, host, and transfer-encoding headers
+    const headers: Record<string, string | string[]> = {};
+    for (const [key, val] of Object.entries(req.headers)) {
+      if (val === undefined) continue;
+      if (STRIPPED_REQUEST_HEADERS.has(key.toLowerCase())) continue;
+      headers[key] = val as string | string[];
+    }
+
+    // Inject credential
+    if (apiKey) {
+      headers[route.authHeader] = this.formatAuthValue(
+        route.authFormat,
+        apiKey,
+      );
+    }
+
+    // Inject extra headers (e.g. anthropic-version)
+    if (route.extraHeaders) {
+      for (const [k, v] of Object.entries(route.extraHeaders)) {
+        headers[k] = v;
+      }
+    }
+
+    // Forward the request
+    const transport = targetUrl.protocol === "https:" ? https : http;
+    const proxyReq = transport.request(
+      targetUrl,
+      {
+        method: req.method,
+        headers,
+      },
+      (proxyRes) => {
+        const statusCode = proxyRes.statusCode ?? 502;
+        // Forward response headers and status
+        res.writeHead(statusCode, proxyRes.headers);
+        // Stream response body (supports SSE)
+        proxyRes.pipe(res, { end: true });
+
+        // Handle upstream stream errors (e.g. connection drop during SSE)
+        proxyRes.on("error", (err) => {
+          this.logger.warn(
+            `Upstream response stream error [${provider}]: code=${(err as NodeJS.ErrnoException).code ?? "unknown"}`,
+          );
+          if (!res.destroyed) {
+            res.destroy(err);
+          }
+        });
+
+        // Handle client disconnect — free upstream socket
+        res.on("error", (err) => {
+          this.logger.debug(
+            `Client response error [${provider}]: code=${(err as NodeJS.ErrnoException).code ?? "unknown"}`,
+          );
+          if (!proxyRes.destroyed) {
+            proxyRes.destroy();
+          }
+        });
+
+        this.recordAudit(
+          provider,
+          req.method ?? "?",
+          remainingPath,
+          statusCode,
+          startTime,
+        );
+      },
+    );
+
+    // Upstream socket timeout — prevents hung connections from exhausting capacity
+    proxyReq.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
+      proxyReq.destroy(
+        new Error(`Upstream timeout after ${UPSTREAM_TIMEOUT_MS}ms`),
+      );
+    });
+
+    proxyReq.on("error", (err: NodeJS.ErrnoException) => {
+      // Log only the safe errno code — err.message may contain URLs with credentials
+      this.logger.error(
+        `Proxy upstream error [${provider}]: code=${err.code ?? "unknown"}`,
+      );
+      const mapped = err.code ? UPSTREAM_ERROR_MAP[err.code] : undefined;
+      const status = mapped?.status ?? 502;
+      const clientMessage = mapped?.message ?? "Upstream error";
+
+      sendError(status, { error: clientMessage, provider });
+      this.recordAudit(
+        provider,
+        req.method ?? "?",
+        remainingPath,
+        status,
+        startTime,
+      );
+    });
+
+    // Pipe request body with size limit enforcement
+    this.pipeWithLimit(
+      req,
+      proxyReq,
+      sendError,
+      provider,
+      remainingPath,
+      startTime,
+    );
+  }
+
+  // ── URL construction (with path-traversal protection) ──────────
+  // Query parameters from the original request are preserved automatically:
+  // `new URL(remainingPath, target)` parses the ?query portion from remainingPath.
+
+  private buildTargetUrl(remainingPath: string, target: string): URL | null {
+    try {
+      const targetOrigin = new URL(target);
+
+      // Strip null bytes and fragments (client-side only per RFC 7230)
+      const sanitizedPath = remainingPath.replace(/\0/g, "").split("#")[0];
+
+      const resolved = new URL(sanitizedPath, target);
+
+      // CRITICAL: Ensure path traversal hasn't escaped the target origin
+      if (resolved.origin !== targetOrigin.origin) {
+        this.logger.warn(
+          `Path traversal attempt blocked: ${remainingPath} resolved to ${resolved.origin}`,
+        );
+        return null;
+      }
+
+      return resolved;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Body forwarding with size limit (single-consumer) ─────────
+
+  private pipeWithLimit(
+    req: http.IncomingMessage,
+    proxyReq: http.ClientRequest,
+    sendError: (
+      status: number,
+      body: Record<string, unknown>,
+      extraHeaders?: Record<string, string>,
+    ) => void,
+    provider: string,
+    remainingPath: string,
+    startTime: number,
+  ): void {
+    let received = 0;
+    let aborted = false;
+
+    // Slow-loris protection: fire 408 if no data arrives within the timeout window.
+    // Reset on every chunk; cleared on end/error/close.
+    let receiveTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(
+      () => {
+        if (aborted) return;
+        aborted = true;
+        req.destroy();
+        proxyReq.destroy();
+        sendError(408, { error: "Request body receive timeout" });
+        this.recordAudit(
+          provider,
+          req.method ?? "?",
+          remainingPath,
+          408,
+          startTime,
+        );
+      },
+      CLIENT_RECEIVE_TIMEOUT_MS,
+    );
+    const clearReceiveTimer = (): void => {
+      if (receiveTimer) {
+        clearTimeout(receiveTimer);
+        receiveTimer = undefined;
+      }
+    };
+    const resetReceiveTimer = (): void => {
+      clearReceiveTimer();
+      receiveTimer = setTimeout(() => {
+        if (aborted) return;
+        aborted = true;
+        req.destroy();
+        proxyReq.destroy();
+        sendError(408, { error: "Request body receive timeout" });
+        this.recordAudit(
+          provider,
+          req.method ?? "?",
+          remainingPath,
+          408,
+          startTime,
+        );
+      }, CLIENT_RECEIVE_TIMEOUT_MS);
+    };
+
+    // Single-consumer: manual write() avoids dual pipe+data ownership ambiguity
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      resetReceiveTimer();
+
+      received += chunk.length;
+      if (received > MAX_BODY_BYTES) {
+        aborted = true;
+        req.destroy();
+        proxyReq.destroy();
+        sendError(413, { error: "Request body too large" });
+        this.recordAudit(
+          provider,
+          req.method ?? "?",
+          remainingPath,
+          413,
+          startTime,
+        );
+        return;
+      }
+
+      // Backpressure: if upstream buffer is full, pause the client read
+      const canContinue = proxyReq.write(chunk);
+      if (!canContinue) {
+        req.pause();
+        proxyReq.once("drain", () => {
+          if (!aborted) req.resume();
+        });
+      }
+    });
+
+    req.on("end", () => {
+      clearReceiveTimer();
+      if (!aborted) proxyReq.end();
+    });
+
+    // req.on("error") is already handled in handleRequest via sendError — only
+    // abort the upstream here to avoid duplicate response writes.
+    req.on("error", () => {
+      clearReceiveTimer();
+      if (!aborted) {
+        aborted = true;
+        proxyReq.destroy();
+      }
+    });
+
+    // If client disconnects mid-stream, abort the upstream request
+    req.on("close", () => {
+      clearReceiveTimer();
+      if (!aborted && !req.complete) {
+        aborted = true;
+        proxyReq.destroy(new Error("Client disconnected"));
+      }
+    });
+  }
+
+  // ── Rate limiting (token bucket, cached config) ──────────────────
+
+  private checkRateLimit(provider: string): boolean {
+    const limits = this.cachedRateLimits;
+    const MIN_RPM = 1;
+    const MAX_RPM = 3600;
+    const rawRpm = limits?.[provider] ?? 60;
+    const maxRpm = Math.max(MIN_RPM, Math.min(MAX_RPM, Math.floor(rawRpm)));
+    const refillRate = maxRpm / 60_000;
+
+    let bucket = this.rateBuckets.get(provider);
+    if (!bucket) {
+      bucket = {
+        tokens: maxRpm,
+        lastRefill: Date.now(),
+        maxTokens: maxRpm,
+        refillRate,
+      };
+      this.rateBuckets.set(provider, bucket);
+    }
+
+    // Refill
+    const now = Date.now();
+    const elapsed = now - bucket.lastRefill;
+    bucket.tokens = Math.min(
+      bucket.maxTokens,
+      bucket.tokens + elapsed * bucket.refillRate,
+    );
+    bucket.lastRefill = now;
+
+    if (bucket.tokens < 1) return false;
+    bucket.tokens -= 1;
+    return true;
+  }
+
+  // ── Audit log (ring buffer — O(1) writes) ────────────────────────
+
+  private recordAudit(
+    provider: string,
+    method: string,
+    path: string,
+    statusCode: number,
+    startTime: number,
+  ): void {
+    const endTime = Date.now();
+    this.auditBuffer[this.auditHead] = {
+      timestamp: startTime,
+      provider,
+      method,
+      path,
+      statusCode,
+      latencyMs: endTime - startTime,
+    };
+    this.auditHead = (this.auditHead + 1) % MAX_AUDIT_ENTRIES;
+    if (this.auditCount < MAX_AUDIT_ENTRIES) this.auditCount++;
+  }
+}
+
+/**
+ * Test-only escape hatch — only available when NODE_ENV === "test".
+ * Production callers cannot accidentally (or maliciously) reset the singleton.
+ */
+export const _resetSingletonForTesting =
+  process.env.NODE_ENV === "test"
+    ? (): void => {
+        CredentialProxyService["instance"]?.dispose();
+        CredentialProxyService["instance"] = undefined;
+      }
+    : undefined;

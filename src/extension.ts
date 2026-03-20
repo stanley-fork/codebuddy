@@ -70,6 +70,8 @@ import {
   runSecurityDiagnostics,
 } from "./commands/security-config.command";
 import { DoctorService } from "./services/doctor.service";
+import { CredentialProxyService } from "./services/credential-proxy.service";
+import { setProxyContext, clearProxyContext } from "./services/proxy-context";
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -256,6 +258,30 @@ export async function activate(context: vscode.ExtensionContext) {
     const secretStorageService = SecretStorageService.initialize(context);
     await secretStorageService.migrateApiKeys();
     context.subscriptions.push(secretStorageService);
+
+    // Initialize Credential Proxy (must be after SecretStorage, before webview providers)
+    if (getConfigValue("codebuddy.credentialProxy.enabled")) {
+      const credProxy = CredentialProxyService.getInstance();
+      try {
+        await credProxy.start(secretStorageService);
+        setProxyContext(credProxy);
+        context.subscriptions.push({
+          dispose: () => {
+            clearProxyContext();
+            credProxy.dispose();
+          },
+        });
+        logger.info(`Credential proxy started on port ${credProxy.getPort()}`);
+      } catch (err) {
+        logger.error(
+          `Credential proxy failed to start — falling back to direct SDK calls: ${(err as Error).message}`,
+        );
+        vscode.window.showWarningMessage(
+          "CodeBuddy: Credential proxy could not start. API keys will be passed directly to SDKs. See Output › CodeBuddy for details.",
+        );
+        // Do NOT push to subscriptions — proxy is not running
+      }
+    }
 
     // Initialize Doctor Service (security audit framework)
     const doctorService = DoctorService.getInstance();
@@ -487,6 +513,44 @@ export async function activate(context: vscode.ExtensionContext) {
             preserveFocus: false,
           });
         }
+      }),
+    );
+
+    // Register Credential Proxy command.
+    // proxyAuditChannel is lazily created on first invocation and added to
+    // context.subscriptions for cleanup. On extension host reload, a new
+    // activate() closure is created — the old channel is disposed by VS Code.
+    let proxyAuditChannel: vscode.OutputChannel | undefined;
+    context.subscriptions.push(
+      vscode.commands.registerCommand("codebuddy.credentialProxyAudit", () => {
+        if (!CredentialProxyService.isInstantiated()) {
+          vscode.window.showWarningMessage(
+            "Credential proxy is not enabled. Enable via codebuddy.credentialProxy.enabled setting.",
+          );
+          return;
+        }
+        const proxy = CredentialProxyService.getInstance();
+        if (!proxyAuditChannel) {
+          proxyAuditChannel = vscode.window.createOutputChannel(
+            "CodeBuddy Credential Proxy",
+          );
+          context.subscriptions.push(proxyAuditChannel);
+        }
+        proxyAuditChannel.clear();
+        const entries = proxy.getAuditLog();
+        proxyAuditChannel.appendLine(
+          `=== Credential Proxy Audit — ${new Date().toLocaleTimeString()} ===`,
+        );
+        proxyAuditChannel.appendLine(
+          `Status: ${proxy.isRunning() ? `running on port ${proxy.getPort()}` : "not running"}`,
+        );
+        proxyAuditChannel.appendLine(`Entries: ${entries.length}\n`);
+        for (const e of entries) {
+          proxyAuditChannel.appendLine(
+            `[${new Date(e.timestamp).toISOString()}] ${e.method} ${e.provider}${e.path} → ${e.statusCode} (${e.latencyMs}ms)`,
+          );
+        }
+        proxyAuditChannel.show();
       }),
     );
 
