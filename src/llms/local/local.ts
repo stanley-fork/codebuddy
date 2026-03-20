@@ -44,6 +44,9 @@ export class LocalLLM
     this.client = new OpenAI({
       apiKey: this.config.apiKey || "not-needed",
       baseURL: baseURL,
+      ...(this.config.defaultHeaders && {
+        defaultHeaders: this.config.defaultHeaders,
+      }),
     });
     this.response = undefined;
     this.orchestrator = Orchestrator.getInstance();
@@ -72,6 +75,9 @@ export class LocalLLM
       this.client = new OpenAI({
         apiKey: this.config.apiKey || "not-needed",
         baseURL: baseURL,
+        ...(this.config.defaultHeaders && {
+          defaultHeaders: this.config.defaultHeaders,
+        }),
       });
     }
   }
@@ -92,6 +98,9 @@ export class LocalLLM
     this.client = new OpenAI({
       apiKey: this.config.apiKey || "not-needed",
       baseURL: baseURL,
+      ...(this.config.defaultHeaders && {
+        defaultHeaders: this.config.defaultHeaders,
+      }),
     });
   }
 
@@ -232,6 +241,9 @@ export class LocalLLM
         this.client = new OpenAI({
           apiKey: this.config.apiKey || "not-needed",
           baseURL: newBaseUrl,
+          ...(this.config.defaultHeaders && {
+            defaultHeaders: this.config.defaultHeaders,
+          }),
         });
 
         // Update the persistent configuration so future requests succeed immediately

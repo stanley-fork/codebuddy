@@ -290,6 +290,11 @@
         "category": "CodeBuddy"
       },
       {
+        "command": "codebuddy.credentialProxyAudit",
+        "title": "Credential Proxy Audit Log",
+        "category": "CodeBuddy"
+      },
+      {
         "command": "CodeBuddy.rules.open",
         "title": "%commands.rulesOpen%",
         "category": "CodeBuddy"
@@ -641,6 +646,29 @@
             "type": "boolean",
             "default": false,
             "description": "%config.compactMode%"
+          },
+          "codebuddy.credentialProxy.enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Route LLM API calls through a local proxy that injects credentials from OS keychain. API keys never reach SDK clients."
+          },
+          "codebuddy.credentialProxy.rateLimits": {
+            "type": "object",
+            "default": {
+              "anthropic": 60,
+              "openai": 60,
+              "groq": 30,
+              "deepseek": 60,
+              "qwen": 60,
+              "glm": 60,
+              "grok": 60
+            },
+            "description": "Per-provider rate limits (requests per minute) for the credential proxy.",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600
+            }
           },
           "codebuddy.nickname": {
             "type": "string",

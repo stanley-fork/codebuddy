@@ -38,6 +38,9 @@ export class DeepseekLLM
     this.client = new OpenAI({
       apiKey: this.config.apiKey,
       baseURL: config.baseUrl || "https://api.deepseek.com/v1",
+      ...(this.config.defaultHeaders && {
+        defaultHeaders: this.config.defaultHeaders,
+      }),
     });
     this.response = undefined;
     this.orchestrator = Orchestrator.getInstance();
@@ -78,6 +81,9 @@ export class DeepseekLLM
     this.client = new OpenAI({
       apiKey: this.config.apiKey,
       baseURL: config.baseUrl || "https://api.deepseek.com/v1",
+      ...(this.config.defaultHeaders && {
+        defaultHeaders: this.config.defaultHeaders,
+      }),
     });
   }
 
