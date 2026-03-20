@@ -4,6 +4,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import { getAPIKeyAndModel, getGenerativeAiModel } from "../utils/utils";
+import { SESSION_TOKEN_HEADER } from "./credential-proxy.service";
 import { SqliteVectorStore, VectorDocument } from "./sqlite-vector-store";
 import { EmbeddingService } from "./embedding";
 
@@ -100,7 +101,7 @@ export class ResearchNotesExtractor {
 
       // Build proxy default headers when session token is present
       const proxyDefaultHeaders = proxySessionToken
-        ? { "x-codebuddy-proxy-token": proxySessionToken }
+        ? { [SESSION_TOKEN_HEADER]: proxySessionToken }
         : undefined;
 
       // Initialize LLM client based on provider

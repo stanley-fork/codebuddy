@@ -71,6 +71,7 @@ import {
 } from "./commands/security-config.command";
 import { DoctorService } from "./services/doctor.service";
 import { CredentialProxyService } from "./services/credential-proxy.service";
+import { setProxyContext, clearProxyContext } from "./services/proxy-context";
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -262,7 +263,13 @@ export async function activate(context: vscode.ExtensionContext) {
     if (getConfigValue("codebuddy.credentialProxy.enabled")) {
       const credProxy = CredentialProxyService.getInstance();
       await credProxy.start(secretStorageService);
-      context.subscriptions.push(credProxy);
+      setProxyContext(credProxy);
+      context.subscriptions.push({
+        dispose: () => {
+          clearProxyContext();
+          credProxy.dispose();
+        },
+      });
       logger.info(`Credential proxy started on port ${credProxy.getPort()}`);
     }
 

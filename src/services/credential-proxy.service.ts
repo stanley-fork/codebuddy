@@ -134,6 +134,7 @@ const STRIPPED_REQUEST_HEADERS = new Set([
 const MAX_AUDIT_ENTRIES = 1000;
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 const UPSTREAM_TIMEOUT_MS = 5 * 60_000; // 5 min — LLM streaming responses can take minutes
+const CLIENT_RECEIVE_TIMEOUT_MS = 30_000; // 30 s — max idle time between request body chunks
 
 // ─── Service ─────────────────────────────────────────────────────────
 
@@ -299,7 +300,7 @@ export class CredentialProxyService implements vscode.Disposable {
       result[i] = { ...entry }; // shallow copy — ProxyAuditEntry fields are all primitives
     }
 
-    return Object.freeze(result);
+    return result;
   }
 
   public dispose(): void {
@@ -309,6 +310,11 @@ export class CredentialProxyService implements vscode.Disposable {
 
     if (this.state === "stopped" || this.state === "draining") return;
     this.state = "draining";
+
+    // Wipe session secrets and caches so a disposed proxy cannot be re-used
+    this.sessionToken = "";
+    this.rateBuckets.clear();
+    this.cachedRateLimits = undefined;
 
     if (this.server) {
       const srv = this.server;
@@ -355,13 +361,19 @@ export class CredentialProxyService implements vscode.Disposable {
     const startTime = Date.now();
     const reqUrl = req.url ?? "/";
 
+    // Idempotent error writer — prevents double-response from concurrent error paths.
+    let responseSent = false;
+    const sendError = (status: number, body: Record<string, unknown>): void => {
+      if (responseSent || res.headersSent) return;
+      responseSent = true;
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+
     // Handle incoming request errors to prevent unhandled exceptions
     req.on("error", (err) => {
       this.logger.warn(`Incoming request error: ${err.message}`);
-      if (!res.headersSent) {
-        res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "Client connection error" }));
-      }
+      sendError(400, { error: "Client connection error" });
     });
 
     // Validate session token — rejects any caller that isn't our own extension
@@ -527,10 +539,7 @@ export class CredentialProxyService implements vscode.Disposable {
       const status = mapped?.status ?? 502;
       const clientMessage = mapped?.message ?? "Upstream error";
 
-      if (!res.headersSent) {
-        res.writeHead(status, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: clientMessage, provider }));
-      }
+      sendError(status, { error: clientMessage, provider });
       this.recordAudit(
         provider,
         req.method ?? "?",
@@ -541,10 +550,19 @@ export class CredentialProxyService implements vscode.Disposable {
     });
 
     // Pipe request body with size limit enforcement
-    this.pipeWithLimit(req, proxyReq, res, provider, remainingPath, startTime);
+    this.pipeWithLimit(
+      req,
+      proxyReq,
+      sendError,
+      provider,
+      remainingPath,
+      startTime,
+    );
   }
 
   // ── URL construction (with path-traversal protection) ──────────
+  // Query parameters from the original request are preserved automatically:
+  // `new URL(remainingPath, target)` parses the ?query portion from remainingPath.
 
   private buildTargetUrl(remainingPath: string, target: string): URL | null {
     try {
@@ -574,7 +592,7 @@ export class CredentialProxyService implements vscode.Disposable {
   private pipeWithLimit(
     req: http.IncomingMessage,
     proxyReq: http.ClientRequest,
-    res: http.ServerResponse,
+    sendError: (status: number, body: Record<string, unknown>) => void,
     provider: string,
     remainingPath: string,
     startTime: number,
@@ -582,19 +600,60 @@ export class CredentialProxyService implements vscode.Disposable {
     let received = 0;
     let aborted = false;
 
+    // Slow-loris protection: fire 408 if no data arrives within the timeout window.
+    // Reset on every chunk; cleared on end/error/close.
+    let receiveTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(
+      () => {
+        if (aborted) return;
+        aborted = true;
+        req.destroy();
+        proxyReq.destroy();
+        sendError(408, { error: "Request body receive timeout" });
+        this.recordAudit(
+          provider,
+          req.method ?? "?",
+          remainingPath,
+          408,
+          startTime,
+        );
+      },
+      CLIENT_RECEIVE_TIMEOUT_MS,
+    );
+    const clearReceiveTimer = (): void => {
+      if (receiveTimer) {
+        clearTimeout(receiveTimer);
+        receiveTimer = undefined;
+      }
+    };
+    const resetReceiveTimer = (): void => {
+      clearReceiveTimer();
+      receiveTimer = setTimeout(() => {
+        if (aborted) return;
+        aborted = true;
+        req.destroy();
+        proxyReq.destroy();
+        sendError(408, { error: "Request body receive timeout" });
+        this.recordAudit(
+          provider,
+          req.method ?? "?",
+          remainingPath,
+          408,
+          startTime,
+        );
+      }, CLIENT_RECEIVE_TIMEOUT_MS);
+    };
+
     // Single-consumer: manual write() avoids dual pipe+data ownership ambiguity
     req.on("data", (chunk: Buffer) => {
       if (aborted) return;
+      resetReceiveTimer();
 
       received += chunk.length;
       if (received > MAX_BODY_BYTES) {
         aborted = true;
         req.destroy();
         proxyReq.destroy();
-        if (!res.headersSent) {
-          res.writeHead(413, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "Request body too large" }));
-        }
+        sendError(413, { error: "Request body too large" });
         this.recordAudit(
           provider,
           req.method ?? "?",
@@ -616,18 +675,23 @@ export class CredentialProxyService implements vscode.Disposable {
     });
 
     req.on("end", () => {
+      clearReceiveTimer();
       if (!aborted) proxyReq.end();
     });
 
-    req.on("error", (err) => {
+    // req.on("error") is already handled in handleRequest via sendError — only
+    // abort the upstream here to avoid duplicate response writes.
+    req.on("error", () => {
+      clearReceiveTimer();
       if (!aborted) {
         aborted = true;
-        proxyReq.destroy(err);
+        proxyReq.destroy();
       }
     });
 
     // If client disconnects mid-stream, abort the upstream request
     req.on("close", () => {
+      clearReceiveTimer();
       if (!aborted && !req.complete) {
         aborted = true;
         proxyReq.destroy(new Error("Client disconnected"));
