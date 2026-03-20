@@ -71,6 +71,7 @@ import {
   DoctorHandler,
 } from "./handlers";
 import { HandlerContext, MessageHandlerRegistry } from "./handlers/types";
+import { AccessControlService } from "../services/access-control.service";
 
 export interface ImessageAndSystemInstruction {
   systemInstruction: string;
@@ -684,6 +685,25 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
               break;
             }
             case "user-input": {
+              // ── Access control gate ──
+              try {
+                const acl = AccessControlService.getInstance();
+                if (!acl.checkAccess("user-input")) {
+                  await this.currentWebView?.webview.postMessage({
+                    type: "onStreamError",
+                    payload: {
+                      requestId: message.requestId,
+                      error:
+                        "Access denied. Your user account is not authorized to use CodeBuddy in this workspace. " +
+                        "Contact a workspace admin to update .codebuddy/access.json.",
+                    },
+                  });
+                  break;
+                }
+              } catch {
+                // Service not initialized — allow (open mode default)
+              }
+
               this.UserMessageCounter += 1;
               const selectedGenerativeAiModel = getConfigValue(
                 "generativeAi.option",
