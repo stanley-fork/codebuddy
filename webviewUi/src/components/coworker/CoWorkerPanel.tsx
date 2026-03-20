@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import styled from "styled-components";
 import { vscode } from "../../utils/vscode";
 import { useStandupStore } from "../../stores/standup.store";
+import { DoctorSection } from "./DoctorSection";
 
 interface CoWorkerPanelProps {
   isOpen: boolean;
@@ -105,11 +106,11 @@ const Content = styled.div`
   }
 `;
 
-const Section = styled.div`
+export const Section = styled.div`
   margin-bottom: 20px;
 `;
 
-const SectionTitle = styled.h3`
+export const SectionTitle = styled.h3`
   margin: 0 0 12px 0;
   font-size: 11px;
   font-weight: 600;
@@ -142,7 +143,7 @@ const TaskLabel = styled.div`
   margin-bottom: 4px;
 `;
 
-const TaskDescription = styled.div`
+export const TaskDescription = styled.div`
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
   line-height: 1.4;
@@ -179,7 +180,7 @@ const ToggleThumb = styled.div<{ $checked: boolean }>`
   transition: left 0.2s ease;
 `;
 
-const TriggerButton = styled.button`
+export const TriggerButton = styled.button`
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
@@ -262,7 +263,7 @@ const IngestButton = styled.button<{ $loading?: boolean }>`
   }
 `;
 
-const QuickActions = styled.div`
+export const QuickActions = styled.div`
   display: flex;
   gap: 6px;
   margin-top: 10px;
@@ -340,7 +341,7 @@ const DeleteButton = styled.button`
   }
 `;
 
-const ErrorText = styled.div`
+export const ErrorText = styled.div`
   color: var(--vscode-editorError-foreground, #f14c4c);
   font-size: 11px;
   margin-top: 4px;
@@ -465,6 +466,9 @@ export const CoWorkerPanel: React.FC<CoWorkerPanelProps> = ({
               })}
             </Section>
           ))}
+
+          {/* ── Security Pulse (Doctor) Section ── */}
+          <DoctorSection isOpen={isOpen} />
 
           {/* ── Meeting Intelligence Section ── */}
           <Section>
