@@ -632,6 +632,7 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     // ── Access Control: status bar indicator + switch/audit commands ──
+    // Priority 49: between permission profile (50) and language indicator (48)
     const accessStatusBar = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Right,
       49,
@@ -706,10 +707,10 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
       accessAuditChannel,
       vscode.commands.registerCommand("codebuddy.accessControlAudit", () => {
-        accessAuditChannel.clear();
         const entries = accessControl.getAuditLog();
+        accessAuditChannel.appendLine("");
         accessAuditChannel.appendLine(
-          `=== Access Control Audit Log (${entries.length} entries) ===`,
+          `=== Access Control Audit Log (${entries.length} entries) — ${new Date().toISOString()} ===`,
         );
         accessAuditChannel.appendLine(
           `Mode: ${accessControl.getMode()} | User: ${accessControl.getCurrentUser() ?? "unknown"}`,
@@ -725,6 +726,23 @@ export async function activate(context: vscode.ExtensionContext) {
           accessAuditChannel.appendLine("No audit entries recorded yet.");
         }
         accessAuditChannel.show();
+      }),
+    );
+
+    // Re-read access control setting when VS Code config changes
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("codebuddy.accessControl.defaultMode")) {
+          const newMode = vscode.workspace
+            .getConfiguration("codebuddy")
+            .get<
+              import("./services/access-control.service").AccessControlMode
+            >("accessControl.defaultMode", "open");
+          // Only apply if no file-based config is loaded (file has highest priority)
+          if (newMode) {
+            accessControl.setMode(newMode, false);
+          }
+        }
       }),
     );
 

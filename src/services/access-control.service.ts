@@ -69,6 +69,18 @@ const MAX_AUDIT_ENTRIES = 500;
 /** Maximum number of users in allow/deny list. */
 const MAX_USERS = 200;
 
+/** Maximum number of admins. */
+const MAX_ADMINS = 50;
+
+/** Identity resolution cache TTL (5 minutes). */
+const IDENTITY_TTL_MS = 5 * 60 * 1000;
+
+/** Minimum interval between checkAccess audit writes (100ms). */
+const CHECK_ACCESS_MIN_INTERVAL_MS = 100;
+
+/** Basic email format validation pattern. */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 // ─── Service ─────────────────────────────────────────────────────────
 
 const logger = Logger.initialize("AccessControlService", {
@@ -93,11 +105,20 @@ export class AccessControlService implements vscode.Disposable {
   private workspacePath: string | undefined;
   private loadInFlight: Promise<void> | undefined;
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Set to true at the end of initialize(). Used by the ACL gate to distinguish
+   *  "service not yet ready" from "service is up but mode is open". */
+  private initialized = false;
 
   /** Cached current user identity. */
   private currentUser: string | undefined;
+  /** Timestamp of last identity resolution (for TTL cache). */
+  private identityResolvedAt = 0;
   /** In-memory audit log (bounded). */
   private auditLog: AccessAuditEntry[] = [];
+  /** Timestamp of last checkAccess call (simple rate limiter). */
+  private lastCheckAt = 0;
+  /** Disposables owned by this service (auth listener, etc.). */
+  private readonly _disposables: vscode.Disposable[] = [];
 
   /** Event fired when the access mode or user list changes. */
   private readonly _onAccessChanged =
@@ -140,6 +161,8 @@ export class AccessControlService implements vscode.Disposable {
       this.startWatching(workspacePath);
     }
 
+    this.initialized = true;
+
     logger.info(
       `Access control initialized: mode=${this.mode}, ` +
         `user=${this.currentUser ?? "unknown"}, ` +
@@ -153,6 +176,8 @@ export class AccessControlService implements vscode.Disposable {
       this.debounceTimer = undefined;
     }
     this.configWatcher?.dispose();
+    for (const d of this._disposables) d.dispose();
+    this._disposables.length = 0;
     this._onAccessChanged.dispose();
   }
 
@@ -162,7 +187,26 @@ export class AccessControlService implements vscode.Disposable {
     AccessControlService.instance = undefined;
   }
 
+  /**
+   * Whether the service has completed initialization.
+   * Used by the ACL gate to distinguish "not ready" from "running in open mode".
+   */
+  public isServiceInitialized(): boolean {
+    return this.initialized;
+  }
+
   // ── User Identity ────────────────────────────────────────────────
+
+  /**
+   * Ensure the cached user identity is still fresh.
+   * Re-resolves if the TTL has expired.
+   */
+  private async ensureFreshIdentity(): Promise<void> {
+    const now = Date.now();
+    if (now - this.identityResolvedAt < IDENTITY_TTL_MS) return;
+    await this.resolveCurrentUser();
+    this.identityResolvedAt = now;
+  }
 
   /**
    * Resolve the current user via (in order):
@@ -180,6 +224,7 @@ export class AccessControlService implements vscode.Disposable {
       );
       if (session?.account?.label) {
         this.currentUser = session.account.label.toLowerCase();
+        this.identityResolvedAt = Date.now();
         logger.debug(`User identity from GitHub: ${this.currentUser}`);
         return;
       }
@@ -192,6 +237,7 @@ export class AccessControlService implements vscode.Disposable {
       const email = await this.getGitEmail();
       if (email) {
         this.currentUser = email.toLowerCase();
+        this.identityResolvedAt = Date.now();
         logger.debug(`User identity from git config: ${this.currentUser}`);
         return;
       }
@@ -205,13 +251,14 @@ export class AccessControlService implements vscode.Disposable {
 
   private getGitEmail(): Promise<string | undefined> {
     return new Promise((resolve) => {
+      const safeCwd = this.getSafeWorkspaceCwd();
       execFile(
         "git",
-        ["config", "user.email"],
+        ["config", "--get", "user.email"],
         {
           encoding: "utf8",
           timeout: 3000,
-          cwd: this.workspacePath ?? undefined,
+          cwd: safeCwd,
         },
         (err, stdout) => {
           if (err) {
@@ -219,10 +266,38 @@ export class AccessControlService implements vscode.Disposable {
             return;
           }
           const email = (stdout as string)?.trim();
-          resolve(email || undefined);
+          // Basic email format check — don't trust arbitrary git config output
+          resolve(email && EMAIL_RE.test(email) ? email : undefined);
         },
       );
     });
+  }
+
+  /**
+   * Validate workspacePath against VS Code's known workspace folders
+   * before using it as a subprocess cwd.
+   */
+  private getSafeWorkspaceCwd(): string | undefined {
+    if (!this.workspacePath) return undefined;
+
+    const knownFolders =
+      vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [];
+    const resolved = path.resolve(this.workspacePath);
+    const isKnown = knownFolders.some((f) => {
+      const resolvedFolder = path.resolve(f);
+      return (
+        resolved === resolvedFolder ||
+        resolved.startsWith(resolvedFolder + path.sep)
+      );
+    });
+
+    if (!isKnown) {
+      logger.warn(
+        `workspacePath "${resolved}" is not a known VS Code workspace folder — rejecting as git cwd`,
+      );
+      return undefined;
+    }
+    return resolved;
   }
 
   /**
@@ -255,10 +330,18 @@ export class AccessControlService implements vscode.Disposable {
   private async _loadConfigInner(workspacePath: string): Promise<void> {
     const configPath = path.join(workspacePath, CODEBUDDY_DIR, CONFIG_FILENAME);
 
-    // Path traversal guard
+    // Path traversal guard — use trailing separator to prevent prefix collision
+    // e.g., "/workspace-evil" must not match "/workspace"
     const resolved = path.resolve(configPath);
-    if (!resolved.startsWith(path.resolve(workspacePath))) {
-      logger.warn("Access config path escapes workspace — ignoring");
+    const resolvedWorkspace = path.resolve(workspacePath);
+    const boundary = resolvedWorkspace.endsWith(path.sep)
+      ? resolvedWorkspace
+      : resolvedWorkspace + path.sep;
+    if (resolved !== resolvedWorkspace && !resolved.startsWith(boundary)) {
+      logger.warn(
+        `Access config path escapes workspace boundary — ignoring. ` +
+          `resolved=${resolved}, workspace=${resolvedWorkspace}`,
+      );
       return;
     }
 
@@ -299,13 +382,16 @@ export class AccessControlService implements vscode.Disposable {
       this.config = parsed as AccessControlConfig;
       this.configLoaded = true;
 
-      // Validate mode
+      // Validate mode — file-based config has highest priority
       if (this.config.mode && VALID_MODES.includes(this.config.mode)) {
         this.mode = this.config.mode;
+        logger.info(
+          `Access mode set by .codebuddy/access.json: ${this.mode} ` +
+            `(overrides VS Code setting)`,
+        );
       }
 
       this.applyConfig();
-      logger.info(`Access config loaded: mode=${this.mode}`);
     } catch (err) {
       logger.warn(`Failed to parse access config: ${err}`);
       this.applyConfig();
@@ -331,7 +417,7 @@ export class AccessControlService implements vscode.Disposable {
       Array.isArray(admins)
         ? admins
             .filter((u): u is string => typeof u === "string" && u.length > 0)
-            .slice(0, MAX_USERS)
+            .slice(0, MAX_ADMINS)
             .map((u) => u.toLowerCase())
         : [],
     );
@@ -372,6 +458,20 @@ export class AccessControlService implements vscode.Disposable {
       }
       logger.info("Access config deleted — reverting to open mode");
     });
+
+    // Re-resolve identity when GitHub auth sessions change
+    const authDisposable = vscode.authentication.onDidChangeSessions(
+      async (e) => {
+        if (e.provider.id === "github") {
+          logger.debug(
+            "GitHub auth session changed — re-resolving user identity",
+          );
+          await this.resolveCurrentUser();
+          this._onAccessChanged.fire(this.mode);
+        }
+      },
+    );
+    this._disposables.push(authDisposable);
   }
 
   // ── Access Control Queries ───────────────────────────────────────
@@ -385,6 +485,7 @@ export class AccessControlService implements vscode.Disposable {
 
   /**
    * Check whether the current user is allowed to use the agent.
+   * Re-resolves identity if the cached value has expired (5-minute TTL).
    *
    * - `open` mode: always allowed.
    * - `allow` mode: only users in the list are allowed.
@@ -392,6 +493,15 @@ export class AccessControlService implements vscode.Disposable {
    *
    * If user identity is unknown and mode is not `open`, access is denied
    * for safety.
+   */
+  public async isCurrentUserAllowedAsync(): Promise<boolean> {
+    await this.ensureFreshIdentity();
+    return this.isUserAllowed(this.currentUser);
+  }
+
+  /**
+   * Synchronous check using the cached identity.
+   * Use `isCurrentUserAllowedAsync()` when freshness matters.
    */
   public isCurrentUserAllowed(): boolean {
     return this.isUserAllowed(this.currentUser);
@@ -437,11 +547,21 @@ export class AccessControlService implements vscode.Disposable {
   /**
    * Check access and record an audit entry.
    * Returns true if the action is allowed.
+   *
+   * Includes a simple rate limiter — if called faster than
+   * CHECK_ACCESS_MIN_INTERVAL_MS, the check still runs but
+   * audit logging is throttled to prevent log flooding.
    */
   public checkAccess(action: string): boolean {
     const allowed = this.isCurrentUserAllowed();
 
-    this.recordAudit(action, allowed);
+    const now = Date.now();
+    const shouldLog = now - this.lastCheckAt >= CHECK_ACCESS_MIN_INTERVAL_MS;
+    this.lastCheckAt = now;
+
+    if (shouldLog) {
+      this.recordAudit(action, allowed);
+    }
 
     if (!allowed && this.logDenied) {
       logger.warn(
@@ -479,7 +599,7 @@ export class AccessControlService implements vscode.Disposable {
   /**
    * Get recent denied entries (for diagnostics / doctor check).
    */
-  public getRecentDenied(count = 10): AccessAuditEntry[] {
+  public getRecentDenied(count = 10): readonly AccessAuditEntry[] {
     return this.auditLog.filter((e) => !e.allowed).slice(-count);
   }
 
@@ -520,18 +640,21 @@ export class AccessControlService implements vscode.Disposable {
   public getDiagnostics(): AccessDiagnostic[] {
     const diags: AccessDiagnostic[] = [];
 
-    // Config presence
+    // Config presence — surface the active config source
     if (!this.configLoaded) {
       diags.push({
         severity: "info",
         message:
-          "No .codebuddy/access.json found. Access control defaults to open mode.",
+          `Mode "${this.mode}" is set by VS Code setting "codebuddy.accessControl.defaultMode". ` +
+          "Add .codebuddy/access.json to share config with your team.",
         code: "no-config",
       });
     } else {
       diags.push({
         severity: "info",
-        message: `Access config loaded. Mode: ${this.mode}, users: ${this.normalizedUsers.size}, admins: ${this.normalizedAdmins.size}.`,
+        message:
+          `Mode "${this.mode}" is set by .codebuddy/access.json (highest priority — overrides VS Code settings). ` +
+          `Users: ${this.normalizedUsers.size}, admins: ${this.normalizedAdmins.size}.`,
         code: "config-loaded",
       });
     }

@@ -18,7 +18,6 @@
     "users": {
       "type": "array",
       "description": "User identifiers (emails or GitHub usernames) for the allowlist (mode=allow) or denylist (mode=deny).",
-      "minItems": 1,
       "maxItems": 200,
       "uniqueItems": true,
       "items": {
@@ -30,7 +29,6 @@
     "admins": {
       "type": "array",
       "description": "Users with admin privileges — always allowed and can perform sensitive operations without escalation.",
-      "minItems": 1,
       "maxItems": 50,
       "uniqueItems": true,
       "items": {
