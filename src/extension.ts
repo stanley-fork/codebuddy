@@ -73,7 +73,15 @@ import { DoctorService } from "./services/doctor.service";
 import { CredentialProxyService } from "./services/credential-proxy.service";
 import { setProxyContext, clearProxyContext } from "./services/proxy-context";
 import { PermissionScopeService } from "./services/permission-scope.service";
-import { AccessControlService } from "./services/access-control.service";
+import {
+  AccessControlService,
+  type AccessControlMode,
+} from "./services/access-control.service";
+
+/** QuickPick item augmented with the target access mode. */
+interface AccessModeQuickPickItem extends vscode.QuickPickItem {
+  mode: AccessControlMode;
+}
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -659,10 +667,6 @@ export async function activate(context: vscode.ExtensionContext) {
       accessStatusBar,
     );
 
-    interface AccessModeQuickPickItem extends vscode.QuickPickItem {
-      mode: import("./services/access-control.service").AccessControlMode;
-    }
-
     context.subscriptions.push(
       vscode.commands.registerCommand(
         "codebuddy.switchAccessMode",
@@ -695,7 +699,7 @@ export async function activate(context: vscode.ExtensionContext) {
             title: "Switch Access Control Mode",
           });
           if (selected) {
-            accessControl.setMode(selected.mode);
+            accessControl.setMode(selected.mode, "command");
           }
         },
       ),
@@ -738,9 +742,9 @@ export async function activate(context: vscode.ExtensionContext) {
             .get<
               import("./services/access-control.service").AccessControlMode
             >("accessControl.defaultMode", "open");
-          // Only apply if no file-based config is loaded (file has highest priority)
+          // "setting" source — setMode will ignore if file-based config is active
           if (newMode) {
-            accessControl.setMode(newMode, false);
+            accessControl.setMode(newMode, "setting", false);
           }
         }
       }),
