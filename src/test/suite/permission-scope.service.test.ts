@@ -170,7 +170,10 @@ suite("PermissionScopeService", () => {
     assert.strictEqual(svc.isToolAllowed("edit_file"), true);
   });
 
-  test("trusted profile only enforces custom deny patterns", async () => {
+  test("trusted profile enforces catastrophic patterns but skips standard deny", async () => {
+    // SECURITY: trusted profile bypasses standard deny patterns but
+    // catastrophic patterns (rm -rf /, mkfs, dd of=/dev, fork bomb) are
+    // always enforced as an irreversible-damage safety floor.
     const ws = setupTmpWorkspace({
       profile: "trusted",
       commandDenyPatterns: ["dangerous_custom_cmd"],
@@ -178,8 +181,12 @@ suite("PermissionScopeService", () => {
     const svc = PermissionScopeService.getInstance();
     await svc.initialize(ws);
 
-    // Built-in dangerous patterns are NOT enforced in trusted
-    assert.strictEqual(svc.isCommandDenied("rm -rf /"), false);
+    // Catastrophic patterns ARE enforced even in trusted
+    assert.strictEqual(svc.isCommandDenied("rm -rf /"), true);
+    assert.strictEqual(svc.isCommandDenied("mkfs /dev/sda1"), true);
+    assert.strictEqual(svc.isCommandDenied("dd if=/dev/zero of=/dev/sda"), true);
+    // Standard dangerous patterns (non-catastrophic) are NOT enforced in trusted
+    assert.strictEqual(svc.isCommandDenied("chmod 777 /etc/passwd"), false);
     // Custom patterns ARE enforced
     assert.strictEqual(svc.isCommandDenied("dangerous_custom_cmd"), true);
   });
@@ -400,5 +407,39 @@ suite("PermissionScopeService", () => {
     const findings = await permissionScopeCheck.run(mockContext());
     assert.ok(findings.length > 0);
     assert.ok(findings.every((f) => f.check === "permission-scope"));
+  });
+
+  // ── Additional Coverage ──────────────────────────────────────────
+
+  test("restricted profile does NOT auto-approve", async () => {
+    const ws = setupTmpWorkspace({ profile: "restricted" });
+    const svc = PermissionScopeService.getInstance();
+    await svc.initialize(ws);
+    assert.strictEqual(svc.shouldAutoApprove(), false);
+  });
+
+  test("rejects oversized config file gracefully", async () => {
+    const ws = setupTmpWorkspace();
+    const dir = path.join(ws, ".codebuddy");
+    fs.mkdirSync(dir, { recursive: true });
+    // Write a config file exceeding 64 KB
+    const bigPayload = JSON.stringify({ profile: "trusted", commandDenyPatterns: Array(5000).fill("x".repeat(100)) });
+    fs.writeFileSync(path.join(dir, "permissions.json"), bigPayload);
+
+    const svc = PermissionScopeService.getInstance();
+    await svc.initialize(ws);
+    // Should fall back to default, not parse the oversized file
+    assert.strictEqual(svc.getActiveProfile(), "standard");
+  });
+
+  test("setActiveProfile does not fire when profile unchanged", async () => {
+    const svc = PermissionScopeService.getInstance();
+    await svc.initialize();
+
+    let fireCount = 0;
+    svc.onProfileChanged(() => { fireCount++; });
+
+    svc.setActiveProfile("standard", false); // same as current
+    assert.strictEqual(fireCount, 0, "should not fire when profile unchanged");
   });
 });
