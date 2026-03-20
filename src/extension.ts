@@ -69,6 +69,7 @@ import {
   openSecurityConfig,
   runSecurityDiagnostics,
 } from "./commands/security-config.command";
+import { DoctorService } from "./services/doctor.service";
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -256,6 +257,15 @@ export async function activate(context: vscode.ExtensionContext) {
     await secretStorageService.migrateApiKeys();
     context.subscriptions.push(secretStorageService);
 
+    // Initialize Doctor Service (security audit framework)
+    const doctorService = DoctorService.getInstance();
+    doctorService.configure({
+      secretStorage: secretStorageService,
+      securityConfig: externalSecurityConfig,
+      workspacePath: workspacePath ?? "",
+    });
+    context.subscriptions.push(doctorService);
+
     // Use dynamic import for DeveloperAgent to ensure it's loaded AFTER telemetry initialization
     const { DeveloperAgent } = await import("./agents/developer/agent");
     new DeveloperAgent({});
@@ -440,7 +450,42 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.commands.registerCommand("codebuddy.securityDiagnostics", () =>
         runSecurityDiagnostics(securityChannel),
       ),
+      vscode.commands.registerCommand("codebuddy.runDoctor", async () => {
+        const findings = await doctorService.execute();
+        doctorService.displayFindings(findings);
+      }),
+      vscode.commands.registerCommand("codebuddy.doctorAutoFix", async () => {
+        const findings = await doctorService.execute();
+        const fixable = findings.filter((f) => f.autoFixable);
+        if (fixable.length === 0) {
+          vscode.window.showInformationMessage(
+            "Doctor: No auto-fixable issues found.",
+          );
+          return;
+        }
+        const action = await vscode.window.showInformationMessage(
+          `Doctor found ${fixable.length} auto-fixable issue(s). Apply fixes?`,
+          "Apply All",
+          "Cancel",
+        );
+        if (action === "Apply All") {
+          const count = await doctorService.autoFixAll(findings);
+          vscode.window.showInformationMessage(
+            `Doctor: Applied ${count} fix(es).`,
+          );
+          // Re-run to show updated state
+          const updated = await doctorService.execute();
+          doctorService.displayFindings(updated);
+        }
+      }),
     );
+
+    // Run Doctor in background (after all services ready — non-blocking)
+    setImmediate(() => {
+      doctorService.runBackground().catch((err) => {
+        logger.error("Doctor background scan failed:", err);
+      });
+    });
 
     // Initialize Diff Review Service
     const diffReviewService = DiffReviewService.getInstance();
