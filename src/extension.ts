@@ -70,6 +70,7 @@ import {
   runSecurityDiagnostics,
 } from "./commands/security-config.command";
 import { DoctorService } from "./services/doctor.service";
+import { CredentialProxyService } from "./services/credential-proxy.service";
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -256,6 +257,14 @@ export async function activate(context: vscode.ExtensionContext) {
     const secretStorageService = SecretStorageService.initialize(context);
     await secretStorageService.migrateApiKeys();
     context.subscriptions.push(secretStorageService);
+
+    // Initialize Credential Proxy (must be after SecretStorage, before webview providers)
+    if (getConfigValue("codebuddy.credentialProxy.enabled")) {
+      const credProxy = CredentialProxyService.getInstance();
+      await credProxy.start(secretStorageService);
+      context.subscriptions.push(credProxy);
+      logger.info(`Credential proxy started on port ${credProxy.getPort()}`);
+    }
 
     // Initialize Doctor Service (security audit framework)
     const doctorService = DoctorService.getInstance();
@@ -487,6 +496,30 @@ export async function activate(context: vscode.ExtensionContext) {
             preserveFocus: false,
           });
         }
+      }),
+    );
+
+    // Register Credential Proxy command
+    context.subscriptions.push(
+      vscode.commands.registerCommand("codebuddy.credentialProxyAudit", () => {
+        const proxy = CredentialProxyService.getInstance();
+        const channel = vscode.window.createOutputChannel(
+          "CodeBuddy Credential Proxy",
+        );
+        const entries = proxy.getAuditLog();
+        channel.appendLine(
+          `=== Credential Proxy Audit — ${new Date().toLocaleTimeString()} ===`,
+        );
+        channel.appendLine(
+          `Status: ${proxy.isRunning() ? `running on port ${proxy.getPort()}` : "not running"}`,
+        );
+        channel.appendLine(`Entries: ${entries.length}\n`);
+        for (const e of entries) {
+          channel.appendLine(
+            `[${new Date(e.timestamp).toISOString()}] ${e.method} ${e.provider}${e.path} → ${e.statusCode} (${e.latencyMs}ms)`,
+          );
+        }
+        channel.show();
       }),
     );
 
