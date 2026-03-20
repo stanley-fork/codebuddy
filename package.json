@@ -148,6 +148,16 @@
           "group": "CodeBuddy@10",
           "when": "editorHasSelection"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "codebuddy.openSecurityConfig",
+          "when": "workspaceFolderCount != 0"
+        },
+        {
+          "command": "codebuddy.securityDiagnostics",
+          "when": "workspaceFolderCount != 0"
+        }
       ]
     },
     "commands": [

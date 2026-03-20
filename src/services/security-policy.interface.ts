@@ -11,4 +11,9 @@ export interface ISecurityPolicy {
   isUrlAllowed(url: string): boolean;
   /** Returns `true` if the filesystem path is sensitive / blocked. */
   isPathBlocked(filePath: string): boolean;
+  /** Checks whether an external path (outside the workspace) is explicitly allowed. */
+  isExternalPathAllowed(filePath: string): {
+    allowed: boolean;
+    readWrite: boolean;
+  };
 }

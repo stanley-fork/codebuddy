@@ -54,9 +54,10 @@ export function validateArticleUrl(rawUrl: string): URL {
     throw new Error("URL exceeds maximum length");
   }
 
-  // Check injected security policy (fail-closed when injected)
-  if (securityPolicy && !securityPolicy.isUrlAllowed(rawUrl)) {
-    throw new Error(`Blocked by external security policy: ${rawUrl}`);
+  // Check injected security policy against normalized URL (prevents encoding/case bypass)
+  const normalizedUrl = parsed.href;
+  if (securityPolicy && !securityPolicy.isUrlAllowed(normalizedUrl)) {
+    throw new Error(`Blocked by external security policy: ${normalizedUrl}`);
   }
 
   return parsed;
