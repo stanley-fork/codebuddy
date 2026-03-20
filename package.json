@@ -157,6 +157,14 @@
         {
           "command": "codebuddy.securityDiagnostics",
           "when": "workspaceFolderCount != 0"
+        },
+        {
+          "command": "codebuddy.runDoctor",
+          "when": "workspaceFolderCount != 0"
+        },
+        {
+          "command": "codebuddy.doctorAutoFix",
+          "when": "workspaceFolderCount != 0"
         }
       ]
     },
@@ -269,6 +277,16 @@
       {
         "command": "codebuddy.securityDiagnostics",
         "title": "Run Security Diagnostics",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.runDoctor",
+        "title": "Run Doctor",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.doctorAutoFix",
+        "title": "Doctor Auto-Fix",
         "category": "CodeBuddy"
       },
       {
