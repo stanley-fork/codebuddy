@@ -12,30 +12,6 @@ export interface DoctorFindingDTO {
 /** Timeout for scan operations (30 s — generous for slow checks). */
 const SCAN_TIMEOUT_MS = 30_000;
 
-// Module-level timeout handle — not part of observable state
-let scanTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
-
-function clearScanTimeout() {
-  if (scanTimeoutHandle !== null) {
-    clearTimeout(scanTimeoutHandle);
-    scanTimeoutHandle = null;
-  }
-}
-
-function startScanTimeout(set: (partial: Partial<DoctorState>) => void) {
-  clearScanTimeout();
-  scanTimeoutHandle = setTimeout(() => {
-    const { isScanning } = useDoctorStore.getState();
-    if (isScanning) {
-      set({
-        isScanning: false,
-        lastError: "Doctor scan timed out. The extension may be busy.",
-      });
-    }
-    scanTimeoutHandle = null;
-  }, SCAN_TIMEOUT_MS);
-}
-
 interface DoctorState {
   /** Latest findings from a doctor scan. */
   findings: DoctorFindingDTO[];
@@ -67,41 +43,66 @@ interface DoctorState {
   setScanning: (val: boolean) => void;
 }
 
-export const useDoctorStore = create<DoctorState>()((set) => ({
-  findings: [],
-  lastScanTime: null,
-  isScanning: false,
-  lastError: null,
-  lastFixesApplied: null,
+export const useDoctorStore = create<DoctorState>()((set, get) => {
+  // Private, per-store-instance — not module-level
+  let _scanTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
-  runScan: () => {
-    set({ isScanning: true, lastError: null, lastFixesApplied: null });
-    vscode.postMessage({ command: "doctor-run" });
-    startScanTimeout(set);
-  },
+  const clearScanTimeout = () => {
+    if (_scanTimeoutHandle !== null) {
+      clearTimeout(_scanTimeoutHandle);
+      _scanTimeoutHandle = null;
+    }
+  };
 
-  runAutoFix: () => {
-    set({ isScanning: true, lastError: null });
-    vscode.postMessage({ command: "doctor-auto-fix" });
-    startScanTimeout(set);
-  },
-
-  hydrate: () => {
-    set({ isScanning: true });
-    vscode.postMessage({ command: "doctor-hydrate" });
-    startScanTimeout(set);
-  },
-
-  setResults: (findings, timestamp, error, fixesApplied) => {
+  const startScanTimeout = () => {
     clearScanTimeout();
-    set({
-      findings,
-      lastScanTime: timestamp,
-      isScanning: false,
-      lastError: error ?? null,
-      lastFixesApplied: fixesApplied ?? null,
-    });
-  },
+    _scanTimeoutHandle = setTimeout(() => {
+      if (get().isScanning) {
+        set({
+          isScanning: false,
+          lastError: "Doctor scan timed out. The extension may be busy.",
+        });
+      }
+      _scanTimeoutHandle = null;
+    }, SCAN_TIMEOUT_MS);
+  };
 
-  setScanning: (val) => set({ isScanning: val }),
-}));
+  return {
+    findings: [],
+    lastScanTime: null,
+    isScanning: false,
+    lastError: null,
+    lastFixesApplied: null,
+
+    runScan: () => {
+      set({ isScanning: true, lastError: null, lastFixesApplied: null });
+      vscode.postMessage({ command: "doctor-run" });
+      startScanTimeout();
+    },
+
+    runAutoFix: () => {
+      set({ isScanning: true, lastError: null });
+      vscode.postMessage({ command: "doctor-auto-fix" });
+      startScanTimeout();
+    },
+
+    hydrate: () => {
+      set({ isScanning: true });
+      vscode.postMessage({ command: "doctor-hydrate" });
+      startScanTimeout();
+    },
+
+    setResults: (findings, timestamp, error, fixesApplied) => {
+      clearScanTimeout();
+      set({
+        findings,
+        lastScanTime: timestamp,
+        isScanning: false,
+        lastError: error ?? null,
+        lastFixesApplied: fixesApplied ?? null,
+      });
+    },
+
+    setScanning: (val) => set({ isScanning: val }),
+  };
+});

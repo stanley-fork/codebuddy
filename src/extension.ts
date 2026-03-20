@@ -458,11 +458,13 @@ export async function activate(context: vscode.ExtensionContext) {
         });
       }),
       vscode.commands.registerCommand("codebuddy.doctorAutoFix", async () => {
-        // Use cached findings if available, otherwise run a scan
-        const cached = doctorService.getCachedFindings();
-        const findings =
-          cached.length > 0 ? cached : await doctorService.execute();
-        const fixable = findings.filter((f) => f.autoFixable);
+        // Ensure we have findings to work with
+        if (doctorService.getCachedFindings().length === 0) {
+          await doctorService.execute();
+        }
+        const fixable = doctorService
+          .getCachedFindings()
+          .filter((f) => f.autoFixable);
         if (fixable.length === 0) {
           vscode.window.showInformationMessage(
             "Doctor: No auto-fixable issues found.",
@@ -475,12 +477,11 @@ export async function activate(context: vscode.ExtensionContext) {
           "Cancel",
         );
         if (action === "Apply All") {
-          const count = await doctorService.autoFixAll(findings);
+          const { applied, updated } =
+            await doctorService.runAutoFixWithRefresh();
           vscode.window.showInformationMessage(
-            `Doctor: Applied ${count} fix(es).`,
+            `Doctor: Applied ${applied} fix(es).`,
           );
-          // Re-run to show updated state
-          const updated = await doctorService.execute();
           doctorService.displayFindings(updated, {
             showChannel: true,
             preserveFocus: false,

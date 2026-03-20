@@ -62,7 +62,20 @@ export class DoctorHandler implements WebviewMessageHandler {
     const svc = DoctorService.getInstance();
 
     switch (message.command) {
-      case "doctor-hydrate":
+      case "doctor-hydrate": {
+        // Return cached findings immediately — no re-scan
+        const cached = svc.getCachedFindings();
+        if (cached.length > 0) {
+          ctx.webview.webview.postMessage({
+            command: "doctor-results",
+            findings: cached.map(toDTO),
+            timestamp: Date.now(),
+          });
+          break;
+        }
+        // No cache yet — fall through to a fresh scan on first open
+      }
+      // falls through
       case "doctor-run": {
         try {
           const findings = await svc.execute();
@@ -88,12 +101,7 @@ export class DoctorHandler implements WebviewMessageHandler {
 
       case "doctor-auto-fix": {
         try {
-          // Use service-level cache — consistent across all panels
-          const findingsToFix = svc.getCachedFindings();
-          const applied = await svc.autoFixAll(findingsToFix);
-
-          // Re-run checks after fix to get updated state
-          const updated = await svc.execute();
+          const { applied, updated } = await svc.runAutoFixWithRefresh();
 
           ctx.webview.webview.postMessage({
             command: "doctor-results",
