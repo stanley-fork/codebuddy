@@ -8,7 +8,7 @@
   },
   "publisher": "fiatinnovations",
   "description": "%description%",
-  "version": "4.1.15",
+  "version": "4.1.16",
   "engines": {
     "vscode": "^1.78.0"
   },
@@ -148,6 +148,24 @@
           "group": "CodeBuddy@10",
           "when": "editorHasSelection"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "codebuddy.openSecurityConfig",
+          "when": "workspaceFolderCount != 0"
+        },
+        {
+          "command": "codebuddy.securityDiagnostics",
+          "when": "workspaceFolderCount != 0"
+        },
+        {
+          "command": "codebuddy.runDoctor",
+          "when": "workspaceFolderCount != 0"
+        },
+        {
+          "command": "codebuddy.doctorAutoFix",
+          "when": "workspaceFolderCount != 0"
+        }
       ]
     },
     "commands": [
@@ -249,6 +267,26 @@
       {
         "command": "codebuddy.createBranchFromGitLab",
         "title": "%commands.createBranchFromGitLab%",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.openSecurityConfig",
+        "title": "Open External Security Config",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.securityDiagnostics",
+        "title": "Run Security Diagnostics",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.runDoctor",
+        "title": "Run Doctor",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.doctorAutoFix",
+        "title": "Doctor Auto-Fix",
         "category": "CodeBuddy"
       },
       {

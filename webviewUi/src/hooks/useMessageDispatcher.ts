@@ -9,6 +9,7 @@ import { useNotificationsStore } from "../stores/notifications.store";
 import { useContentStore } from "../stores/content.store";
 import { useChatStore } from "../stores/chat.store";
 import { useStandupStore } from "../stores/standup.store";
+import { useDoctorStore } from "../stores/doctor.store";
 import type { IWebviewMessage } from "./useStreamingChat";
 
 interface ConfigData {
@@ -407,6 +408,18 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
               useStandupStore.getState().addStandupSummary(s);
             }
           }
+          break;
+
+        // ── Doctor ──
+        case "doctor-results":
+          useDoctorStore
+            .getState()
+            .setResults(
+              message.findings ?? [],
+              message.timestamp ?? Date.now(),
+              message.error,
+              message.fixesApplied,
+            );
           break;
 
         default:
