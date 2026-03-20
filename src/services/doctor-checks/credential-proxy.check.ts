@@ -26,7 +26,20 @@ export const credentialProxyCheck: DoctorCheckModule = {
       ];
     }
 
-    // Proxy is enabled — check if it's actually running
+    // Proxy is enabled — check if it's actually running.
+    // Use isInstantiated() to avoid creating the singleton as a doctor-check side effect.
+    if (!CredentialProxyService.isInstantiated()) {
+      return [
+        {
+          check: "credential-proxy",
+          severity: "critical",
+          message:
+            "Credential proxy is enabled but the service is not initialized. Restart the extension.",
+          autoFixable: false,
+        },
+      ];
+    }
+
     const proxy = CredentialProxyService.getInstance();
     const findings: DoctorFinding[] = [];
 

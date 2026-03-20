@@ -315,6 +315,28 @@ suite("credentialProxyCheck (doctor)", () => {
     assert.ok(findings[0].message.includes("disabled"));
   });
 
+  test("returns critical finding when proxy enabled but not instantiated", async () => {
+    const configStub = sinon.stub(vscode.workspace, "getConfiguration");
+    configStub.callsFake((section?: string) => {
+      if (section === "codebuddy.credentialProxy") {
+        return {
+          get: (key: string, defaultVal: any) => {
+            if (key === "enabled") return true;
+            return defaultVal;
+          },
+        } as any;
+      }
+      return { get: (_k: string, d: any) => d } as any;
+    });
+
+    // No singleton exists — resetForTesting() was called in setup
+    const findings = await credentialProxyCheck.run(makeContext());
+    assert.ok(findings.length >= 1);
+    const critical = findings.find((f) => f.severity === "critical");
+    assert.ok(critical, "expected a critical finding");
+    assert.ok(critical!.message.includes("not initialized"));
+  });
+
   test("returns critical finding when proxy enabled but not running", async () => {
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
     configStub.callsFake((section?: string) => {

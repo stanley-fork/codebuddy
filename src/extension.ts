@@ -499,7 +499,10 @@ export async function activate(context: vscode.ExtensionContext) {
       }),
     );
 
-    // Register Credential Proxy command
+    // Register Credential Proxy command.
+    // proxyAuditChannel is lazily created on first invocation and added to
+    // context.subscriptions for cleanup. On extension host reload, a new
+    // activate() closure is created — the old channel is disposed by VS Code.
     let proxyAuditChannel: vscode.OutputChannel | undefined;
     context.subscriptions.push(
       vscode.commands.registerCommand("codebuddy.credentialProxyAudit", () => {
