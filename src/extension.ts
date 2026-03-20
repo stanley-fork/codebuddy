@@ -262,15 +262,25 @@ export async function activate(context: vscode.ExtensionContext) {
     // Initialize Credential Proxy (must be after SecretStorage, before webview providers)
     if (getConfigValue("codebuddy.credentialProxy.enabled")) {
       const credProxy = CredentialProxyService.getInstance();
-      await credProxy.start(secretStorageService);
-      setProxyContext(credProxy);
-      context.subscriptions.push({
-        dispose: () => {
-          clearProxyContext();
-          credProxy.dispose();
-        },
-      });
-      logger.info(`Credential proxy started on port ${credProxy.getPort()}`);
+      try {
+        await credProxy.start(secretStorageService);
+        setProxyContext(credProxy);
+        context.subscriptions.push({
+          dispose: () => {
+            clearProxyContext();
+            credProxy.dispose();
+          },
+        });
+        logger.info(`Credential proxy started on port ${credProxy.getPort()}`);
+      } catch (err) {
+        logger.error(
+          `Credential proxy failed to start — falling back to direct SDK calls: ${(err as Error).message}`,
+        );
+        vscode.window.showWarningMessage(
+          "CodeBuddy: Credential proxy could not start. API keys will be passed directly to SDKs. See Output › CodeBuddy for details.",
+        );
+        // Do NOT push to subscriptions — proxy is not running
+      }
     }
 
     // Initialize Doctor Service (security audit framework)

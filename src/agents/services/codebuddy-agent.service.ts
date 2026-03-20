@@ -37,6 +37,7 @@ import { CostTrackingService } from "../../services/cost-tracking.service";
 import { CheckpointService } from "../../services/checkpoint.service";
 import { getGenerativeAiModel, getAPIKeyAndModel } from "../../utils/utils";
 import { SESSION_TOKEN_HEADER } from "../../services/credential-proxy.service";
+import { buildChatModel, type ChatModel } from "../factory/chat-model.factory";
 import { Orchestrator } from "../../orchestrator";
 import {
   AgentSafetyGuard,
@@ -58,10 +59,6 @@ import {
   type CompactionMessage,
   type CompactionToolCall,
 } from "../../services/context-window-compaction.service";
-import { ChatAnthropic } from "@langchain/anthropic";
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-import { ChatGroq } from "@langchain/groq";
-import { ChatOpenAI } from "@langchain/openai";
 import {
   AIMessage,
   HumanMessage,
@@ -413,7 +410,7 @@ export class CodeBuddyAgentService {
 
   /** Cached LLM client for summarization, keyed by provider:model. */
   private cachedSummarizationModel: {
-    model: ChatAnthropic | ChatGroq | ChatOpenAI | ChatGoogleGenerativeAI;
+    model: ChatModel;
     cacheKey: string;
   } | null = null;
 
@@ -533,12 +530,7 @@ export class CodeBuddyAgentService {
    * Get or create a cached chat model for summarization.
    * The model is cached by provider:modelName and invalidated when settings change.
    */
-  private createSummarizationModel():
-    | ChatAnthropic
-    | ChatGroq
-    | ChatOpenAI
-    | ChatGoogleGenerativeAI
-    | undefined {
+  private createSummarizationModel(): ChatModel | undefined {
     const provider = getGenerativeAiModel()?.toLowerCase();
     if (!provider) return undefined;
     try {
@@ -560,91 +552,13 @@ export class CodeBuddyAgentService {
         ? { [SESSION_TOKEN_HEADER]: proxySessionToken }
         : undefined;
 
-      let model:
-        | ChatAnthropic
-        | ChatGroq
-        | ChatOpenAI
-        | ChatGoogleGenerativeAI
-        | undefined;
-      switch (provider) {
-        case "anthropic":
-          model = new ChatAnthropic({
-            anthropicApiKey: apiKey,
-            modelName: modelName || "claude-sonnet-4-20250514",
-            ...(baseUrl && {
-              clientOptions: {
-                baseURL: baseUrl,
-                defaultHeaders: proxyDefaultHeaders,
-              },
-            }),
-          });
-          break;
-        case "openai":
-          model = new ChatOpenAI({
-            openAIApiKey: apiKey,
-            modelName: modelName || "gpt-4o",
-            configuration: baseUrl
-              ? { baseURL: baseUrl, defaultHeaders: proxyDefaultHeaders }
-              : undefined,
-          });
-          break;
-        case "groq":
-          model = new ChatGroq({
-            apiKey,
-            model: modelName || "llama-3.3-70b-versatile",
-          });
-          break;
-        case "gemini":
-          model = new ChatGoogleGenerativeAI({
-            apiKey,
-            model: modelName || "gemini-2.0-flash",
-          });
-          break;
-        case "deepseek":
-          model = new ChatOpenAI({
-            openAIApiKey: apiKey,
-            modelName: modelName || "deepseek-chat",
-            configuration: {
-              baseURL: baseUrl || "https://api.deepseek.com",
-              defaultHeaders: proxyDefaultHeaders,
-            },
-          });
-          break;
-        case "qwen":
-          model = new ChatOpenAI({
-            openAIApiKey: apiKey,
-            modelName: modelName || "qwen-plus",
-            configuration: {
-              baseURL:
-                baseUrl ||
-                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-              defaultHeaders: proxyDefaultHeaders,
-            },
-          });
-          break;
-        case "glm":
-          model = new ChatOpenAI({
-            openAIApiKey: apiKey,
-            modelName: modelName || "glm-4-plus",
-            configuration: {
-              baseURL: baseUrl || "https://open.bigmodel.cn/api/paas/v4",
-              defaultHeaders: proxyDefaultHeaders,
-            },
-          });
-          break;
-        case "local":
-          model = new ChatOpenAI({
-            openAIApiKey: apiKey || "not-needed",
-            modelName: modelName || "local-model",
-            configuration: {
-              baseURL: baseUrl || "http://localhost:11434/v1",
-              defaultHeaders: proxyDefaultHeaders,
-            },
-          });
-          break;
-        default:
-          return undefined;
-      }
+      const model = buildChatModel({
+        provider,
+        apiKey,
+        modelName,
+        baseUrl,
+        proxyDefaultHeaders,
+      });
 
       if (model) {
         this.cachedSummarizationModel = { model, cacheKey };
