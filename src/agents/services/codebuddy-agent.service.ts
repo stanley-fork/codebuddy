@@ -36,6 +36,7 @@ import { InputValidator } from "../../services/input-validator";
 import { CostTrackingService } from "../../services/cost-tracking.service";
 import { CheckpointService } from "../../services/checkpoint.service";
 import { getGenerativeAiModel, getAPIKeyAndModel } from "../../utils/utils";
+import { SESSION_TOKEN_HEADER } from "../../services/credential-proxy.service";
 import { Orchestrator } from "../../orchestrator";
 import {
   AgentSafetyGuard,
@@ -556,7 +557,7 @@ export class CodeBuddyAgentService {
 
       // Build proxy default headers when session token is present
       const proxyDefaultHeaders = proxySessionToken
-        ? { "x-codebuddy-proxy-token": proxySessionToken }
+        ? { [SESSION_TOKEN_HEADER]: proxySessionToken }
         : undefined;
 
       let model:

@@ -31,6 +31,7 @@ import { ToolProvider } from "../langgraph/tools/provider";
 import { DEVELOPER_SYSTEM_PROMPT } from "./prompts";
 import { createDeveloperSubagents } from "./subagents";
 import { getAPIKeyAndModel, getGenerativeAiModel } from "../../utils/utils";
+import { SESSION_TOKEN_HEADER } from "../../services/credential-proxy.service";
 
 const execFileAsync = promisify(execFile);
 
@@ -187,7 +188,7 @@ export class DeveloperAgent {
 
       // Build proxy default headers when session token is present
       const proxyDefaultHeaders = proxySessionToken
-        ? { "x-codebuddy-proxy-token": proxySessionToken }
+        ? { [SESSION_TOKEN_HEADER]: proxySessionToken }
         : undefined;
 
       switch (provider) {

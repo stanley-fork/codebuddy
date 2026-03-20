@@ -238,6 +238,7 @@ suite("CredentialProxyService", () => {
     // Request WITHOUT session token header
     const res = await proxyRequest(proxy.getPort(), "/openai/v1/chat");
     assert.strictEqual(res.statusCode, 403);
+    assert.strictEqual(res.headers["content-type"], "application/json");
     const body = JSON.parse(res.body);
     assert.strictEqual(body.error, "Forbidden");
   });
@@ -249,6 +250,7 @@ suite("CredentialProxyService", () => {
     await proxy.start(mockSecretStorage());
     const res = await authedProxyRequest(proxy, "/unknown-provider/v1/chat");
     assert.strictEqual(res.statusCode, 404);
+    assert.strictEqual(res.headers["content-type"], "application/json");
     const body = JSON.parse(res.body);
     assert.ok(body.error.includes("unknown-provider"));
   });
@@ -258,6 +260,7 @@ suite("CredentialProxyService", () => {
     await proxy.start(mockSecretStorage({})); // no keys
     const res = await authedProxyRequest(proxy, "/openai/v1/chat/completions");
     assert.strictEqual(res.statusCode, 401);
+    assert.strictEqual(res.headers["content-type"], "application/json");
     const body = JSON.parse(res.body);
     assert.ok(body.error.includes("openai"));
   });
@@ -293,6 +296,7 @@ suite("CredentialProxyService", () => {
     // Second request should be rate-limited
     const res2 = await authedProxyRequest(proxy, "/openai/v1/models");
     assert.strictEqual(res2.statusCode, 429);
+    assert.strictEqual(res2.headers["content-type"], "application/json");
     const body = JSON.parse(res2.body);
     assert.ok(body.error.includes("Rate limit"));
   });

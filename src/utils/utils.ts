@@ -12,11 +12,8 @@ import * as crypto from "crypto";
 import { Buffer } from "buffer";
 import { spawn } from "child_process";
 import { SecretStorageService } from "../services/secret-storage";
-import {
-  CredentialProxyService,
-  PROXY_PROVIDERS,
-  SESSION_TOKEN_HEADER,
-} from "../services/credential-proxy.service";
+import { PROXY_PROVIDERS } from "../services/credential-proxy.service";
+import { getProxyContext } from "../services/proxy-context";
 
 type GetConfigValueType<T> = (key: string) => T | undefined;
 
@@ -207,12 +204,6 @@ export const createOpenAIClient = (
   });
 };
 
-/** Build default headers map for proxy session token (undefined when not proxied). */
-export const proxyHeaders = (
-  token?: string,
-): Record<string, string> | undefined =>
-  token ? { [SESSION_TOKEN_HEADER]: token } : undefined;
-
 export const getGenerativeAiModel = (): string | undefined => {
   return getConfigValue("generativeAi.option");
 };
@@ -368,8 +359,8 @@ export const getAPIKeyAndModel = (
     lowerCaseModel !== "gemini" &&
     PROXY_PROVIDERS.has(lowerCaseModel)
   ) {
-    const proxy = CredentialProxyService.getInstance();
-    if (proxy.isRunning()) {
+    const proxy = getProxyContext();
+    if (proxy?.isRunning()) {
       return {
         apiKey: "proxy-managed",
         model: modelName,

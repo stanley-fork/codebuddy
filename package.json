@@ -666,7 +666,8 @@
             "description": "Per-provider rate limits (requests per minute) for the credential proxy.",
             "additionalProperties": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 3600
             }
           },
           "codebuddy.nickname": {
