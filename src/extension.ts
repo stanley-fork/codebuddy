@@ -500,26 +500,31 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     // Register Credential Proxy command
+    let proxyAuditChannel: vscode.OutputChannel | undefined;
     context.subscriptions.push(
       vscode.commands.registerCommand("codebuddy.credentialProxyAudit", () => {
         const proxy = CredentialProxyService.getInstance();
-        const channel = vscode.window.createOutputChannel(
-          "CodeBuddy Credential Proxy",
-        );
+        if (!proxyAuditChannel) {
+          proxyAuditChannel = vscode.window.createOutputChannel(
+            "CodeBuddy Credential Proxy",
+          );
+          context.subscriptions.push(proxyAuditChannel);
+        }
+        proxyAuditChannel.clear();
         const entries = proxy.getAuditLog();
-        channel.appendLine(
+        proxyAuditChannel.appendLine(
           `=== Credential Proxy Audit — ${new Date().toLocaleTimeString()} ===`,
         );
-        channel.appendLine(
+        proxyAuditChannel.appendLine(
           `Status: ${proxy.isRunning() ? `running on port ${proxy.getPort()}` : "not running"}`,
         );
-        channel.appendLine(`Entries: ${entries.length}\n`);
+        proxyAuditChannel.appendLine(`Entries: ${entries.length}\n`);
         for (const e of entries) {
-          channel.appendLine(
+          proxyAuditChannel.appendLine(
             `[${new Date(e.timestamp).toISOString()}] ${e.method} ${e.provider}${e.path} → ${e.statusCode} (${e.latencyMs}ms)`,
           );
         }
-        channel.show();
+        proxyAuditChannel.show();
       }),
     );
 

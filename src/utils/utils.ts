@@ -12,7 +12,10 @@ import * as crypto from "crypto";
 import { Buffer } from "buffer";
 import { spawn } from "child_process";
 import { SecretStorageService } from "../services/secret-storage";
-import { CredentialProxyService } from "../services/credential-proxy.service";
+import {
+  CredentialProxyService,
+  PROXY_PROVIDERS,
+} from "../services/credential-proxy.service";
 
 type GetConfigValueType<T> = (key: string) => T | undefined;
 
@@ -347,19 +350,16 @@ export const getAPIKeyAndModel = (
   // Gemini is excluded because its SDK doesn't support baseURL override.
   if (
     lowerCaseModel !== "gemini" &&
+    PROXY_PROVIDERS.has(lowerCaseModel) &&
     getConfigValue("codebuddy.credentialProxy.enabled")
   ) {
-    try {
-      const proxy = CredentialProxyService.getInstance();
-      if (proxy.isRunning()) {
-        return {
-          apiKey: "proxy-managed",
-          model: modelName,
-          baseUrl: proxy.getProxyUrl(lowerCaseModel),
-        };
-      }
-    } catch {
-      // Proxy not initialized yet — fall through to direct mode
+    const proxy = CredentialProxyService.getInstance();
+    if (proxy.isRunning()) {
+      return {
+        apiKey: "proxy-managed",
+        model: modelName,
+        baseUrl: proxy.getProxyUrl(lowerCaseModel),
+      };
     }
   }
 
