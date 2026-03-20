@@ -165,6 +165,10 @@
         {
           "command": "codebuddy.doctorAutoFix",
           "when": "workspaceFolderCount != 0"
+        },
+        {
+          "command": "codebuddy.switchPermissionProfile",
+          "when": "workspaceFolderCount != 0"
         }
       ]
     },
@@ -292,6 +296,11 @@
       {
         "command": "codebuddy.credentialProxyAudit",
         "title": "Credential Proxy Audit Log",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.switchPermissionProfile",
+        "title": "Switch Permission Profile",
         "category": "CodeBuddy"
       },
       {
@@ -651,6 +660,12 @@
             "type": "boolean",
             "default": false,
             "description": "Route LLM API calls through a local proxy that injects credentials from OS keychain. API keys never reach SDK clients."
+          },
+          "codebuddy.permissionScope.defaultProfile": {
+            "type": "string",
+            "enum": ["restricted", "standard", "trusted"],
+            "default": "standard",
+            "description": "Default permission profile: restricted (read-only, no terminal), standard (read/write, safe terminal), trusted (full access, auto-approve). Overridden by .codebuddy/permissions.json if present."
           },
           "codebuddy.credentialProxy.rateLimits": {
             "type": "object",

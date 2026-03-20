@@ -4,6 +4,7 @@ import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import { EventEmitter } from "events";
 import { l10n } from "vscode";
 import type { ISecurityPolicy } from "./security-policy.interface";
+import type { PermissionScopeService } from "./permission-scope.service";
 
 /**
  * A fixed-capacity circular buffer that overwrites the oldest entries
@@ -165,6 +166,8 @@ export class DeepTerminalService extends EventEmitter {
   private approvalPatterns: RegExp[] = [...APPROVAL_REQUIRED_PATTERNS];
   /** Injected external security policy — avoids circular require(). */
   private securityPolicy: ISecurityPolicy | null = null;
+  /** Injected permission scope — provides profile-based command gating. */
+  private permissionScope: PermissionScopeService | null = null;
 
   /**
    * @param logger  Pre-initialised logger instance. When omitted the service
@@ -209,6 +212,14 @@ export class DeepTerminalService extends EventEmitter {
    */
   public setSecurityPolicy(policy: ISecurityPolicy): void {
     this.securityPolicy = policy;
+  }
+
+  /**
+   * Inject a permission scope service for profile-based command gating.
+   * Called once during extension activation after PermissionScopeService.initialize().
+   */
+  public setPermissionScope(scope: PermissionScopeService): void {
+    this.permissionScope = scope;
   }
 
   /**
@@ -294,6 +305,21 @@ export class DeepTerminalService extends EventEmitter {
    */
   private validateCommand(command: string): void {
     const normalised = this.normalise(command);
+
+    // Permission scope check — runs before pattern checks.
+    // In "restricted" mode, ALL commands are blocked.
+    if (this.permissionScope?.isCommandDenied(normalised)) {
+      const profile = this.permissionScope.getActiveProfile();
+      const msg =
+        profile === "restricted"
+          ? `Terminal commands are disabled in "${profile}" permission profile`
+          : `Blocked by permission scope (${profile}): "${command}"`;
+      this.logger.warn(msg);
+      throw new Error(
+        `${msg}. Change the permission profile or update .codebuddy/permissions.json.`,
+      );
+    }
+
     for (const pattern of this.blockedPatterns) {
       if (pattern.test(normalised)) {
         const msg = `Blocked dangerous command: "${command}"`;

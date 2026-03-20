@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codebuddy.dev/schemas/permissions-v1.json",
+  "title": "CodeBuddy Permission Scope Config",
+  "description": "Controls the active permission profile and tool/command scoping for the CodeBuddy agent in this workspace.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for editor autocompletion."
+    },
+    "profile": {
+      "type": "string",
+      "enum": ["restricted", "standard", "trusted"],
+      "default": "standard",
+      "description": "Permission profile: restricted (read-only, no terminal), standard (read/write, safe terminal), trusted (full access, auto-approve)."
+    },
+    "commandDenyPatterns": {
+      "type": "array",
+      "description": "Extra regex patterns for terminal commands to deny, merged with the built-in dangerous command list.",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+        "description": "A regex pattern matching commands to block."
+      }
+    },
+    "toolAllowlist": {
+      "type": "array",
+      "description": "Tool names explicitly allowed regardless of profile restrictions.",
+      "minItems": 1,
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exact tool name (e.g. \"manage_terminal\")."
+      }
+    },
+    "toolBlocklist": {
+      "type": "array",
+      "description": "Tool names explicitly blocked regardless of profile. Blocklist takes priority over allowlist.",
+      "minItems": 1,
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exact tool name (e.g. \"delete_file\")."
+      }
+    }
+  },
+  "additionalProperties": false
+}

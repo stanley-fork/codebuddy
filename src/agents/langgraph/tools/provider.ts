@@ -50,6 +50,7 @@ import {
 import { LangChainArchitectureTool } from "./architecture";
 import { LangChainStandupTool } from "./standup";
 import { LangChainTeamGraphTool } from "./team-graph";
+import { PermissionScopeService } from "../../../services/permission-scope.service";
 
 const logger = Logger.initialize("ToolProvider", {
   minLevel: LogLevel.DEBUG,
@@ -572,8 +573,8 @@ export class ToolProvider {
   }
 
   /**
-   * Get tools asynchronously, ensuring MCP tools are loaded first
-   * Use this when you need to guarantee all tools are available
+   * Get tools asynchronously, ensuring MCP tools are loaded first.
+   * Applies permission scope filtering.
    */
   public static async getToolsAsync(): Promise<StructuredTool[]> {
     await ToolProvider.ensureMCPToolsLoaded();
@@ -581,7 +582,8 @@ export class ToolProvider {
   }
 
   /**
-   * Get tools for a role asynchronously, ensuring MCP tools are loaded first
+   * Get tools for a role asynchronously, ensuring MCP tools are loaded first.
+   * Applies permission scope filtering.
    */
   public static async getToolsForRoleAsync(
     role: string,
@@ -595,7 +597,7 @@ export class ToolProvider {
       logger.error("Attempted to get tools before initialization.");
       throw new Error("ToolProvider must be initialized before getting tools.");
     }
-    return ToolProvider.instance.tools;
+    return ToolProvider.applyPermissionFilter(ToolProvider.instance.tools);
   }
 
   /**
@@ -612,10 +614,10 @@ export class ToolProvider {
 
     const allowedPatterns = TOOL_ROLE_MAPPING[role];
 
-    // Unknown role or no mapping - return all tools
+    // Unknown role or no mapping - return all tools (still permission-filtered)
     if (!allowedPatterns) {
       logger.debug(`No tool mapping for role "${role}", returning all tools`);
-      return ToolProvider.instance.tools;
+      return ToolProvider.applyPermissionFilter(ToolProvider.instance.tools);
     }
 
     // '*' means all tools (for generalist roles like debugger)
@@ -623,7 +625,7 @@ export class ToolProvider {
       logger.debug(
         `Role "${role}" has access to all ${ToolProvider.instance.tools.length} tools`,
       );
-      return ToolProvider.instance.tools;
+      return ToolProvider.applyPermissionFilter(ToolProvider.instance.tools);
     }
 
     // Filter tools by matching name patterns
@@ -646,10 +648,32 @@ export class ToolProvider {
       logger.debug(
         `No MCP tools matched for "${role}", returning ${coreTools.length} core tools`,
       );
-      return coreTools;
+      return ToolProvider.applyPermissionFilter(coreTools);
     }
 
-    return filteredTools;
+    return ToolProvider.applyPermissionFilter(filteredTools);
+  }
+
+  /**
+   * Apply PermissionScopeService filtering to a tool list.
+   * Strips tools that the active permission profile does not allow.
+   */
+  private static applyPermissionFilter(
+    tools: StructuredTool[],
+  ): StructuredTool[] {
+    try {
+      const scope = PermissionScopeService.getInstance();
+      const filtered = scope.filterTools(tools);
+      if (filtered.length !== tools.length) {
+        logger.debug(
+          `Permission scope (${scope.getActiveProfile()}) filtered ${tools.length} → ${filtered.length} tools`,
+        );
+      }
+      return filtered;
+    } catch {
+      // Service not yet initialized — return unfiltered
+      return tools;
+    }
   }
 
   // Method to add more tools at runtime - Open/Closed Principle
