@@ -46,6 +46,7 @@ function cleanUp(): void {
 // ---------------------------------------------------------------------------
 
 suite("ExternalSecurityConfigService", () => {
+  setup(() => ExternalSecurityConfigService.resetInstance());
   teardown(() => cleanUp());
 
   // ── Singleton ──────────────────────────────────────────────────
@@ -210,11 +211,11 @@ suite("ExternalSecurityConfigService", () => {
       assert.deepStrictEqual(config, {});
     });
 
-    test("getConfigPath returns empty string when no workspace", () => {
+    test("getConfigPath returns undefined when no workspace", () => {
       const svc = ExternalSecurityConfigService.getInstance();
       const configPath = svc.getConfigPath();
-      // Without initialization (no workspace), path may be empty
-      assert.strictEqual(typeof configPath, "string");
+      // Without initialization (no workspace), path is undefined
+      assert.strictEqual(configPath, undefined);
     });
   });
 
@@ -337,6 +338,7 @@ suite("ExternalSecurityConfigService", () => {
       const content = JSON.parse(fs.readFileSync(TEST_CONFIG_FILE, "utf-8"));
       assert.ok(content.allowedPaths);
       assert.ok(content.allowedPaths.length > 0);
+      assert.strictEqual(content.version, 1, "Should include schema version");
     });
 
     test("returns false if config already exists", async () => {
@@ -388,6 +390,22 @@ suite("ExternalSecurityConfigService", () => {
       // .aws at the end of a path (not followed by /)
       assert.strictEqual(
         svc.isPathBlocked("/home/user/.aws"),
+        true,
+      );
+    });
+
+    test("blocks .env files", () => {
+      const svc = ExternalSecurityConfigService.getInstance();
+      assert.strictEqual(
+        svc.isPathBlocked("/home/user/project/.env"),
+        true,
+      );
+      assert.strictEqual(
+        svc.isPathBlocked("/home/user/project/.env.local"),
+        true,
+      );
+      assert.strictEqual(
+        svc.isPathBlocked("/home/user/project/.env.production"),
         true,
       );
     });

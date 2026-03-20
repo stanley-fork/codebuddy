@@ -65,6 +65,10 @@ import { CodebuddyIgnoreService } from "./services/codebuddy-ignore.service";
 import { ExternalSecurityConfigService } from "./services/external-security-config.service";
 import { DeepTerminalService } from "./services/deep-terminal.service";
 import { setSecurityPolicy as setBrowserSecurityPolicy } from "./webview-providers/handlers/browser-handler";
+import {
+  openSecurityConfig,
+  runSecurityDiagnostics,
+} from "./commands/security-config.command";
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -431,58 +435,10 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
       vscode.commands.registerCommand(
         "codebuddy.openSecurityConfig",
-        async () => {
-          const svc = ExternalSecurityConfigService.getInstance();
-          if (!svc.hasConfig()) {
-            const action = await vscode.window.showInformationMessage(
-              "No security config found. Create .codebuddy/security.json?",
-              "Create",
-              "Cancel",
-            );
-            if (action === "Create") {
-              const created = await svc.scaffoldDefaultConfig();
-              if (created) {
-                const configPath = svc.getConfigPath();
-                if (configPath) {
-                  const doc =
-                    await vscode.workspace.openTextDocument(configPath);
-                  await vscode.window.showTextDocument(doc);
-                }
-              }
-            }
-            return;
-          }
-          const configPath = svc.getConfigPath();
-          if (!configPath) return;
-          const doc = await vscode.workspace.openTextDocument(configPath);
-          await vscode.window.showTextDocument(doc);
-        },
+        openSecurityConfig,
       ),
-      vscode.commands.registerCommand(
-        "codebuddy.securityDiagnostics",
-        async () => {
-          const svc = ExternalSecurityConfigService.getInstance();
-          const diagnostics = await svc.getDiagnostics();
-          securityChannel.clear();
-          securityChannel.appendLine(
-            "=== CodeBuddy Security Diagnostics ===\n",
-          );
-          for (const d of diagnostics) {
-            const icon =
-              d.severity === "critical"
-                ? "❌"
-                : d.severity === "warn"
-                  ? "⚠️"
-                  : "ℹ️";
-            securityChannel.appendLine(
-              `${icon} [${d.severity.toUpperCase()}] ${d.message}`,
-            );
-          }
-          securityChannel.appendLine(
-            `\nTotal: ${diagnostics.length} finding(s)`,
-          );
-          securityChannel.show();
-        },
+      vscode.commands.registerCommand("codebuddy.securityDiagnostics", () =>
+        runSecurityDiagnostics(securityChannel),
       ),
     );
 
