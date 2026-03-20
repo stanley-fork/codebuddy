@@ -161,6 +161,11 @@ export class MeetingIntelligenceService {
         apiKey: creds.apiKey,
         model: creds.model || providerName,
         baseUrl: creds.baseUrl,
+        ...(creds.proxySessionToken && {
+          defaultHeaders: {
+            "x-codebuddy-proxy-token": creds.proxySessionToken,
+          },
+        }),
       });
     }
 

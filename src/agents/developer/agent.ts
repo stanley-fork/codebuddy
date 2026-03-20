@@ -174,23 +174,41 @@ export class DeveloperAgent {
     }
 
     try {
-      const { apiKey, model: modelName, baseUrl } = getAPIKeyAndModel(provider);
+      const {
+        apiKey,
+        model: modelName,
+        baseUrl,
+        proxySessionToken,
+      } = getAPIKeyAndModel(provider);
       if (!apiKey) {
         this.logger.warn(`No API key found for provider: ${provider}`);
         return undefined;
       }
+
+      // Build proxy default headers when session token is present
+      const proxyDefaultHeaders = proxySessionToken
+        ? { "x-codebuddy-proxy-token": proxySessionToken }
+        : undefined;
 
       switch (provider) {
         case "anthropic":
           return new ChatAnthropic({
             anthropicApiKey: apiKey,
             modelName: modelName || "claude-sonnet-4-20250514",
+            ...(baseUrl && {
+              clientOptions: {
+                baseURL: baseUrl,
+                defaultHeaders: proxyDefaultHeaders,
+              },
+            }),
           });
         case "openai":
           return new ChatOpenAI({
             openAIApiKey: apiKey,
             modelName: modelName || "gpt-4o",
-            configuration: baseUrl ? { baseURL: baseUrl } : undefined,
+            configuration: baseUrl
+              ? { baseURL: baseUrl, defaultHeaders: proxyDefaultHeaders }
+              : undefined,
           });
         case "groq":
           return new ChatGroq({
@@ -206,7 +224,10 @@ export class DeveloperAgent {
           return new ChatOpenAI({
             openAIApiKey: apiKey,
             modelName: modelName || "deepseek-chat",
-            configuration: { baseURL: baseUrl || "https://api.deepseek.com" },
+            configuration: {
+              baseURL: baseUrl || "https://api.deepseek.com",
+              defaultHeaders: proxyDefaultHeaders,
+            },
           });
         case "qwen":
           return new ChatOpenAI({
@@ -216,6 +237,7 @@ export class DeveloperAgent {
               baseURL:
                 baseUrl ||
                 "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+              defaultHeaders: proxyDefaultHeaders,
             },
           });
         case "glm":
@@ -224,13 +246,17 @@ export class DeveloperAgent {
             modelName: modelName || "glm-4-plus",
             configuration: {
               baseURL: baseUrl || "https://open.bigmodel.cn/api/paas/v4",
+              defaultHeaders: proxyDefaultHeaders,
             },
           });
         case "local":
           return new ChatOpenAI({
             openAIApiKey: apiKey || "not-needed",
             modelName: modelName || "local-model",
-            configuration: { baseURL: baseUrl || "http://localhost:11434/v1" },
+            configuration: {
+              baseURL: baseUrl || "http://localhost:11434/v1",
+              defaultHeaders: proxyDefaultHeaders,
+            },
           });
         default:
           this.logger.warn(`Unsupported provider: ${provider}`);

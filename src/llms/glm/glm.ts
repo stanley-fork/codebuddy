@@ -38,6 +38,9 @@ export class GLMLLM
     this.client = new OpenAI({
       apiKey: this.config.apiKey,
       baseURL: config.baseUrl || "https://open.bigmodel.cn/api/paas/v4",
+      ...(this.config.defaultHeaders && {
+        defaultHeaders: this.config.defaultHeaders,
+      }),
     });
     this.response = undefined;
     this.orchestrator = Orchestrator.getInstance();
@@ -77,6 +80,9 @@ export class GLMLLM
     this.client = new OpenAI({
       apiKey: this.config.apiKey,
       baseURL: config.baseUrl || "https://open.bigmodel.cn/api/paas/v4",
+      ...(this.config.defaultHeaders && {
+        defaultHeaders: this.config.defaultHeaders,
+      }),
     });
   }
 

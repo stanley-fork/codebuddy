@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as http from "node:http";
 import * as https from "node:https";
 import * as vscode from "vscode";
@@ -35,6 +36,22 @@ interface TokenBucket {
   maxTokens: number;
   refillRate: number; // tokens per ms
 }
+
+/** Session token header — only callers that know the token can use the proxy. */
+export const SESSION_TOKEN_HEADER = "x-codebuddy-proxy-token";
+
+/** Explicit proxy lifecycle states (prevents invalid state combinations). */
+type ProxyState = "idle" | "starting" | "running" | "draining" | "stopped";
+
+/** Safe error code → response mapping for upstream failures. */
+const UPSTREAM_ERROR_MAP: Record<string, { status: number; message: string }> =
+  {
+    ECONNREFUSED: { status: 502, message: "Upstream refused connection" },
+    ECONNRESET: { status: 502, message: "Upstream reset connection" },
+    ETIMEDOUT: { status: 504, message: "Upstream connection timed out" },
+    ENOTFOUND: { status: 502, message: "Upstream host not found" },
+    ECONNABORTED: { status: 504, message: "Request timed out" },
+  };
 
 // ─── Provider routing table ──────────────────────────────────────────
 
@@ -116,7 +133,7 @@ const STRIPPED_REQUEST_HEADERS = new Set([
 
 const MAX_AUDIT_ENTRIES = 1000;
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
-const UPSTREAM_TIMEOUT_MS = 30_000; // 30 s
+const UPSTREAM_TIMEOUT_MS = 5 * 60_000; // 5 min — LLM streaming responses can take minutes
 
 // ─── Service ─────────────────────────────────────────────────────────
 
@@ -125,13 +142,13 @@ export class CredentialProxyService implements vscode.Disposable {
   private readonly logger: Logger;
   private server: http.Server | undefined;
   private port = 0;
-  private disposed = false;
-  private draining = false;
+  private state: ProxyState = "idle";
   private secretStorage: SecretStorageService | undefined;
   private readonly rateBuckets = new Map<string, TokenBucket>();
   private configWatcher: vscode.Disposable | undefined;
   private cachedRateLimits: Record<string, number> | undefined;
   private startPromise: Promise<void> | undefined;
+  private sessionToken = "";
 
   // Ring buffer for audit log — O(1) writes
   private readonly auditBuffer: (ProxyAuditEntry | undefined)[] = new Array(
@@ -169,19 +186,34 @@ export class CredentialProxyService implements vscode.Disposable {
 
   /** Start the proxy server. Resolves once listening. Promise-coalesced to prevent races. */
   public start(secretStorage: SecretStorageService): Promise<void> {
-    if (this.disposed) {
-      this.disposed = false;
-      this.draining = false;
+    if (this.state === "running") return Promise.resolve();
+    if (this.state === "starting") return this.startPromise!;
+    if (this.state === "draining") {
+      return Promise.reject(
+        new Error(
+          "Cannot restart while draining. Wait for dispose() to complete.",
+        ),
+      );
     }
-    // Return existing start promise if already in progress (single-flight)
-    if (this.startPromise) return this.startPromise;
-    // Already running — no-op
-    if (this.server) return Promise.resolve();
+    // Reset from stopped state for restart
+    if (this.state === "stopped") {
+      this.state = "idle";
+    }
 
     this.secretStorage = secretStorage;
-    this.startPromise = this.doStart().finally(() => {
-      this.startPromise = undefined;
-    });
+    this.sessionToken = crypto.randomBytes(32).toString("hex");
+    this.state = "starting";
+    this.startPromise = this.doStart()
+      .then(() => {
+        this.state = "running";
+      })
+      .catch((err) => {
+        this.state = "stopped";
+        throw err;
+      })
+      .finally(() => {
+        this.startPromise = undefined;
+      });
     return this.startPromise;
   }
 
@@ -200,17 +232,22 @@ export class CredentialProxyService implements vscode.Disposable {
 
     return new Promise((resolve, reject) => {
       const srv = http.createServer((req, res) => this.handleRequest(req, res));
+      let started = false;
 
       srv.on("error", (err) => {
         this.logger.error(`Credential proxy server error: ${err.message}`);
-        // Clean up the watcher if server fails to start
-        this.configWatcher?.dispose();
-        this.configWatcher = undefined;
-        reject(err);
+        if (!started) {
+          // Startup failure — clean up watcher and reject
+          this.configWatcher?.dispose();
+          this.configWatcher = undefined;
+          reject(err);
+        }
+        // Runtime error on a running server — logged, but server stays up
       });
 
       // Bind to localhost only — never expose to network
       srv.listen(0, "127.0.0.1", () => {
+        started = true;
         const addr = srv.address();
         if (addr && typeof addr === "object") {
           this.port = addr.port;
@@ -229,9 +266,9 @@ export class CredentialProxyService implements vscode.Disposable {
     return this.port;
   }
 
-  /** Whether the proxy server is currently running and not draining. */
+  /** Whether the proxy server is currently running. */
   public isRunning(): boolean {
-    return this.server !== undefined && this.server.listening && !this.draining;
+    return this.state === "running";
   }
 
   /** Check whether a provider name has a proxy route. */
@@ -242,6 +279,11 @@ export class CredentialProxyService implements vscode.Disposable {
   /** Build the proxy base URL for a given provider. */
   public getProxyUrl(provider: string): string {
     return `http://127.0.0.1:${this.port}/${provider}`;
+  }
+
+  /** Per-session secret token — callers must include this in requests. */
+  public getSessionToken(): string {
+    return this.sessionToken;
   }
 
   /** Get the audit log (defensive frozen copy). */
@@ -261,13 +303,12 @@ export class CredentialProxyService implements vscode.Disposable {
   }
 
   public dispose(): void {
-    // Always clean up the config watcher regardless of disposed state
+    // Always clean up the config watcher regardless of state
     this.configWatcher?.dispose();
     this.configWatcher = undefined;
 
-    if (this.disposed) return;
-    this.disposed = true;
-    this.draining = true;
+    if (this.state === "stopped" || this.state === "draining") return;
+    this.state = "draining";
 
     if (this.server) {
       const srv = this.server;
@@ -276,11 +317,11 @@ export class CredentialProxyService implements vscode.Disposable {
       // Force-close idle keep-alive connections to accelerate drain (Node 18.2+)
       srv.closeIdleConnections?.();
       srv.close(() => {
-        this.draining = false;
+        this.state = "stopped";
         this.logger.info("Credential proxy stopped — all connections drained");
       });
     } else {
-      this.draining = false;
+      this.state = "stopped";
     }
     // Do NOT null instance — callers should check isRunning()
   }
@@ -302,7 +343,7 @@ export class CredentialProxyService implements vscode.Disposable {
       );
       return apiKey;
     }
-    return format.replaceAll("%s", apiKey);
+    return format.replace("%s", apiKey);
   }
 
   // ── Request handling ─────────────────────────────────────────────
@@ -323,6 +364,14 @@ export class CredentialProxyService implements vscode.Disposable {
       }
     });
 
+    // Validate session token — rejects any caller that isn't our own extension
+    const token = req.headers[SESSION_TOKEN_HEADER];
+    if (token !== this.sessionToken) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" }));
+      return;
+    }
+
     // Parse /<provider>/rest/of/path
     const slashIdx = reqUrl.indexOf("/", 1);
     const provider =
@@ -333,6 +382,13 @@ export class CredentialProxyService implements vscode.Disposable {
     if (!route) {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: `Unknown provider: ${provider}` }));
+      this.recordAudit(
+        provider,
+        req.method ?? "?",
+        remainingPath,
+        404,
+        startTime,
+      );
       return;
     }
 
@@ -425,6 +481,26 @@ export class CredentialProxyService implements vscode.Disposable {
         // Stream response body (supports SSE)
         proxyRes.pipe(res, { end: true });
 
+        // Handle upstream stream errors (e.g. connection drop during SSE)
+        proxyRes.on("error", (err) => {
+          this.logger.warn(
+            `Upstream response stream error [${provider}]: code=${(err as NodeJS.ErrnoException).code ?? "unknown"}`,
+          );
+          if (!res.destroyed) {
+            res.destroy(err);
+          }
+        });
+
+        // Handle client disconnect — free upstream socket
+        res.on("error", (err) => {
+          this.logger.debug(
+            `Client response error [${provider}]: code=${(err as NodeJS.ErrnoException).code ?? "unknown"}`,
+          );
+          if (!proxyRes.destroyed) {
+            proxyRes.destroy();
+          }
+        });
+
         this.recordAudit(
           provider,
           req.method ?? "?",
@@ -442,32 +518,24 @@ export class CredentialProxyService implements vscode.Disposable {
       );
     });
 
-    proxyReq.on("error", (err) => {
-      this.logger.error(`Proxy upstream error for ${provider}: ${err.message}`);
-      const isTimeout = err.message.includes("timeout");
-      // Scrub error message — upstream errors may contain request URLs with credentials
-      const safeDetail = isTimeout
-        ? "Request timed out"
-        : "Connection refused or network error";
+    proxyReq.on("error", (err: NodeJS.ErrnoException) => {
+      // Log only the safe errno code — err.message may contain URLs with credentials
+      this.logger.error(
+        `Proxy upstream error [${provider}]: code=${err.code ?? "unknown"}`,
+      );
+      const mapped = err.code ? UPSTREAM_ERROR_MAP[err.code] : undefined;
+      const status = mapped?.status ?? 502;
+      const clientMessage = mapped?.message ?? "Upstream error";
+
       if (!res.headersSent) {
-        res.writeHead(isTimeout ? 504 : 502, {
-          "content-type": "application/json",
-        });
-        res.end(
-          JSON.stringify({
-            error: isTimeout
-              ? "Upstream timeout"
-              : "Upstream connection failed",
-            provider,
-            detail: safeDetail,
-          }),
-        );
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: clientMessage, provider }));
       }
       this.recordAudit(
         provider,
         req.method ?? "?",
         remainingPath,
-        isTimeout ? 504 : 502,
+        status,
         startTime,
       );
     });
@@ -537,7 +605,14 @@ export class CredentialProxyService implements vscode.Disposable {
         return;
       }
 
-      proxyReq.write(chunk);
+      // Backpressure: if upstream buffer is full, pause the client read
+      const canContinue = proxyReq.write(chunk);
+      if (!canContinue) {
+        req.pause();
+        proxyReq.once("drain", () => {
+          if (!aborted) req.resume();
+        });
+      }
     });
 
     req.on("end", () => {
@@ -548,6 +623,14 @@ export class CredentialProxyService implements vscode.Disposable {
       if (!aborted) {
         aborted = true;
         proxyReq.destroy(err);
+      }
+    });
+
+    // If client disconnects mid-stream, abort the upstream request
+    req.on("close", () => {
+      if (!aborted && !req.complete) {
+        aborted = true;
+        proxyReq.destroy(new Error("Client disconnected"));
       }
     });
   }

@@ -11,6 +11,8 @@ export interface ILlmConfig {
   tools?: any[];
   apiKey: string;
   baseUrl?: string;
+  /** Extra HTTP headers to include in every SDK request (e.g. proxy session token). */
+  defaultHeaders?: Record<string, string>;
   systemInstruction?: string;
   cachedContent?: any;
   additionalConfig?: Record<string, any>;

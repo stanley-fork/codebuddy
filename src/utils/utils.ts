@@ -15,6 +15,7 @@ import { SecretStorageService } from "../services/secret-storage";
 import {
   CredentialProxyService,
   PROXY_PROVIDERS,
+  SESSION_TOKEN_HEADER,
 } from "../services/credential-proxy.service";
 
 type GetConfigValueType<T> = (key: string) => T | undefined;
@@ -182,29 +183,35 @@ export const getXGroKBaseURL = () => {
   return "https://api.x.ai/";
 };
 
-export const createAnthropicClient = (apiKey: string, baseURL?: string) => {
-  if (baseURL) {
-    return new Anthropic({
-      apiKey,
-      baseURL,
-    });
-  }
+export const createAnthropicClient = (
+  apiKey: string,
+  baseURL?: string,
+  defaultHeaders?: Record<string, string>,
+) => {
   return new Anthropic({
     apiKey,
+    ...(baseURL && { baseURL }),
+    ...(defaultHeaders && { defaultHeaders }),
   });
 };
 
-export const createOpenAIClient = (apiKey: string, baseURL?: string) => {
-  if (baseURL) {
-    return new OpenAI({
-      apiKey,
-      baseURL,
-    });
-  }
+export const createOpenAIClient = (
+  apiKey: string,
+  baseURL?: string,
+  defaultHeaders?: Record<string, string>,
+) => {
   return new OpenAI({
     apiKey,
+    ...(baseURL && { baseURL }),
+    ...(defaultHeaders && { defaultHeaders }),
   });
 };
+
+/** Build default headers map for proxy session token (undefined when not proxied). */
+export const proxyHeaders = (
+  token?: string,
+): Record<string, string> | undefined =>
+  token ? { [SESSION_TOKEN_HEADER]: token } : undefined;
 
 export const getGenerativeAiModel = (): string | undefined => {
   return getConfigValue("generativeAi.option");
@@ -256,7 +263,12 @@ export const showInfoMessage = (message?: string): void => {
  */
 export const getAPIKeyAndModel = (
   model: string,
-): { apiKey: string; model?: string; baseUrl?: string } => {
+): {
+  apiKey: string;
+  model?: string;
+  baseUrl?: string;
+  proxySessionToken?: string;
+} => {
   // Read API keys from OS keychain (SecretStorage) first, fall back to settings.
   // SecretStorageService may not be initialized yet if called during provider module load.
   const getSecureApiKey = (configKey: string): string | undefined => {
@@ -348,6 +360,8 @@ export const getAPIKeyAndModel = (
   // When credential proxy is enabled, redirect through localhost proxy.
   // The proxy injects real credentials — the SDK gets a dummy key.
   // Gemini is excluded because its SDK doesn't support baseURL override.
+  // NOTE: `lowerCaseModel` is the provider name (e.g. "openai", "anthropic"),
+  // not the model name (e.g. "gpt-4o") — see the switch cases above.
   // Check enabled first (cheap bool read) before set lookups and getInstance().
   if (
     getConfigValue("codebuddy.credentialProxy.enabled") &&
@@ -360,6 +374,7 @@ export const getAPIKeyAndModel = (
         apiKey: "proxy-managed",
         model: modelName,
         baseUrl: proxy.getProxyUrl(lowerCaseModel),
+        proxySessionToken: proxy.getSessionToken(),
       };
     }
   }
