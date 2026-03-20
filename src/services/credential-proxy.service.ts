@@ -150,6 +150,7 @@ export class CredentialProxyService implements vscode.Disposable {
   private cachedRateLimits: Record<string, number> | undefined;
   private startPromise: Promise<void> | undefined;
   private sessionToken = "";
+  private readonly activeConnections = new Set<import("node:net").Socket>();
 
   // Ring buffer for audit log — O(1) writes
   private readonly auditBuffer: (ProxyAuditEntry | undefined)[] = new Array(
@@ -179,11 +180,7 @@ export class CredentialProxyService implements vscode.Disposable {
     return CredentialProxyService.instance !== undefined;
   }
 
-  /** For tests that need a truly fresh instance. */
-  public static resetForTesting(): void {
-    CredentialProxyService.instance?.dispose();
-    CredentialProxyService.instance = undefined;
-  }
+  // resetForTesting lives outside the class — see _resetSingletonForTesting export.
 
   /** Start the proxy server. Resolves once listening. Promise-coalesced to prevent races. */
   public start(secretStorage: SecretStorageService): Promise<void> {
@@ -234,6 +231,12 @@ export class CredentialProxyService implements vscode.Disposable {
     return new Promise((resolve, reject) => {
       const srv = http.createServer((req, res) => this.handleRequest(req, res));
       let started = false;
+
+      // Track active sockets for force-close on dispose
+      srv.on("connection", (socket) => {
+        this.activeConnections.add(socket);
+        socket.once("close", () => this.activeConnections.delete(socket));
+      });
 
       srv.on("error", (err) => {
         this.logger.error(`Credential proxy server error: ${err.message}`);
@@ -300,7 +303,7 @@ export class CredentialProxyService implements vscode.Disposable {
       result[i] = { ...entry }; // shallow copy — ProxyAuditEntry fields are all primitives
     }
 
-    return result;
+    return Object.freeze(result) as readonly ProxyAuditEntry[];
   }
 
   public dispose(): void {
@@ -322,7 +325,17 @@ export class CredentialProxyService implements vscode.Disposable {
       this.port = 0;
       // Force-close idle keep-alive connections to accelerate drain (Node 18.2+)
       srv.closeIdleConnections?.();
+      // Force-destroy active sockets after a grace period
+      const DRAIN_GRACE_MS = 2000;
+      const forceClose = setTimeout(() => {
+        for (const socket of this.activeConnections) {
+          socket.destroy();
+        }
+        this.activeConnections.clear();
+      }, DRAIN_GRACE_MS);
       srv.close(() => {
+        clearTimeout(forceClose);
+        this.activeConnections.clear();
         this.state = "stopped";
         this.logger.info("Credential proxy stopped — all connections drained");
       });
@@ -363,10 +376,17 @@ export class CredentialProxyService implements vscode.Disposable {
 
     // Idempotent error writer — prevents double-response from concurrent error paths.
     let responseSent = false;
-    const sendError = (status: number, body: Record<string, unknown>): void => {
+    const sendError = (
+      status: number,
+      body: Record<string, unknown>,
+      extraHeaders?: Record<string, string>,
+    ): void => {
       if (responseSent || res.headersSent) return;
       responseSent = true;
-      res.writeHead(status, { "content-type": "application/json" });
+      res.writeHead(status, {
+        "content-type": "application/json",
+        ...extraHeaders,
+      });
       res.end(JSON.stringify(body));
     };
 
@@ -379,8 +399,7 @@ export class CredentialProxyService implements vscode.Disposable {
     // Validate session token — rejects any caller that isn't our own extension
     const token = req.headers[SESSION_TOKEN_HEADER];
     if (token !== this.sessionToken) {
-      res.writeHead(403, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "Forbidden" }));
+      sendError(403, { error: "Forbidden" });
       return;
     }
 
@@ -392,8 +411,7 @@ export class CredentialProxyService implements vscode.Disposable {
 
     const route = PROVIDER_ROUTES[provider];
     if (!route) {
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: `Unknown provider: ${provider}` }));
+      sendError(404, { error: `Unknown provider: ${provider}` });
       this.recordAudit(
         provider,
         req.method ?? "?",
@@ -406,11 +424,11 @@ export class CredentialProxyService implements vscode.Disposable {
 
     // Rate limiting — local providers are exempt (no upstream API rate caps)
     if (!RATE_LIMIT_EXEMPT.has(provider) && !this.checkRateLimit(provider)) {
-      res.writeHead(429, {
-        "content-type": "application/json",
-        "retry-after": "1",
-      });
-      res.end(JSON.stringify({ error: "Rate limit exceeded", provider }));
+      sendError(
+        429,
+        { error: "Rate limit exceeded", provider },
+        { "retry-after": "1" },
+      );
       this.recordAudit(
         provider,
         req.method ?? "?",
@@ -424,12 +442,9 @@ export class CredentialProxyService implements vscode.Disposable {
     // Resolve API key
     const apiKey = this.secretStorage?.getApiKey(route.configKey);
     if (!apiKey && provider !== "local") {
-      res.writeHead(401, { "content-type": "application/json" });
-      res.end(
-        JSON.stringify({
-          error: `No API key configured for ${provider}`,
-        }),
-      );
+      sendError(401, {
+        error: `No API key configured for ${provider}`,
+      });
       this.recordAudit(
         provider,
         req.method ?? "?",
@@ -443,8 +458,7 @@ export class CredentialProxyService implements vscode.Disposable {
     // Build upstream URL — guard against malformed paths
     const targetUrl = this.buildTargetUrl(remainingPath, route.target);
     if (!targetUrl) {
-      res.writeHead(400, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "Invalid request path" }));
+      sendError(400, { error: "Invalid request path" });
       this.recordAudit(
         provider,
         req.method ?? "?",
@@ -592,7 +606,11 @@ export class CredentialProxyService implements vscode.Disposable {
   private pipeWithLimit(
     req: http.IncomingMessage,
     proxyReq: http.ClientRequest,
-    sendError: (status: number, body: Record<string, unknown>) => void,
+    sendError: (
+      status: number,
+      body: Record<string, unknown>,
+      extraHeaders?: Record<string, string>,
+    ) => void,
     provider: string,
     remainingPath: string,
     startTime: number,
@@ -703,7 +721,10 @@ export class CredentialProxyService implements vscode.Disposable {
 
   private checkRateLimit(provider: string): boolean {
     const limits = this.cachedRateLimits;
-    const maxRpm = limits?.[provider] ?? 60;
+    const MIN_RPM = 1;
+    const MAX_RPM = 3600;
+    const rawRpm = limits?.[provider] ?? 60;
+    const maxRpm = Math.max(MIN_RPM, Math.min(MAX_RPM, Math.floor(rawRpm)));
     const refillRate = maxRpm / 60_000;
 
     let bucket = this.rateBuckets.get(provider);
@@ -753,3 +774,15 @@ export class CredentialProxyService implements vscode.Disposable {
     if (this.auditCount < MAX_AUDIT_ENTRIES) this.auditCount++;
   }
 }
+
+/**
+ * Test-only escape hatch — only available when NODE_ENV === "test".
+ * Production callers cannot accidentally (or maliciously) reset the singleton.
+ */
+export const _resetSingletonForTesting =
+  process.env.NODE_ENV === "test"
+    ? (): void => {
+        CredentialProxyService["instance"]?.dispose();
+        CredentialProxyService["instance"] = undefined;
+      }
+    : undefined;
