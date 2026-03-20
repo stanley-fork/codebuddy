@@ -4,18 +4,17 @@ import type {
   DoctorFinding,
 } from "./types";
 
-/** Number of hardcoded default patterns in ExternalSecurityConfigService. */
-const DEFAULT_PATTERN_COUNT = 5;
-
 export const terminalRestrictionsCheck: DoctorCheckModule = {
   name: "terminal-restrictions",
 
   async run(ctx: DoctorCheckContext): Promise<DoctorFinding[]> {
     const findings: DoctorFinding[] = [];
 
-    const patterns = ctx.securityConfig.getCommandDenyPatterns();
-    const totalCount = patterns.length;
-    const customCount = totalCount - DEFAULT_PATTERN_COUNT;
+    // Use the service's own knowledge of custom patterns (single source of truth)
+    const customPatterns =
+      ctx.securityConfig.getCustomCommandDenyPatterns?.() ?? [];
+    const totalCount = ctx.securityConfig.getCommandDenyPatterns().length;
+    const customCount = customPatterns.length;
 
     if (customCount > 0) {
       findings.push({

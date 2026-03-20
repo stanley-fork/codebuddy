@@ -43,6 +43,7 @@ function mockSecretStorage(
 function mockSecurityConfig(overrides?: {
   diagnostics?: SecurityDiagnostic[];
   denyPatterns?: RegExp[];
+  customDenyPatterns?: RegExp[];
   hasConfig?: boolean;
 }): DoctorCheckContext["securityConfig"] {
   return {
@@ -51,7 +52,10 @@ function mockSecurityConfig(overrides?: {
       .resolves(overrides?.diagnostics ?? []),
     getCommandDenyPatterns: sinon
       .stub()
-      .returns(overrides?.denyPatterns ?? [/./, /./, /./, /./, /./]),
+      .returns(overrides?.denyPatterns ?? [/./, /./, /./, /./, /./, /./]),
+    getCustomCommandDenyPatterns: sinon
+      .stub()
+      .returns(overrides?.customDenyPatterns ?? []),
     scaffoldDefaultConfig: sinon.stub().resolves(true),
     hasConfig: sinon.stub().returns(overrides?.hasConfig ?? false),
   } as unknown as DoctorCheckContext["securityConfig"];
@@ -82,9 +86,9 @@ function makeContext(
 // ── DoctorService orchestrator ─────────────────────────────────────
 
 suite("DoctorService", () => {
-  teardown(() => {
+  teardown(async () => {
     sinon.restore();
-    DoctorService.resetInstance();
+    await DoctorService.resetInstance();
   });
 
   test("getInstance returns singleton", () => {
@@ -93,11 +97,19 @@ suite("DoctorService", () => {
     assert.strictEqual(a, b);
   });
 
-  test("resetInstance clears singleton", () => {
+  test("resetInstance clears singleton", async () => {
     const a = DoctorService.getInstance();
-    DoctorService.resetInstance();
+    await DoctorService.resetInstance();
     const b = DoctorService.getInstance();
     assert.notStrictEqual(a, b);
+  });
+
+  test("execute() throws if configure() was not called", async () => {
+    const svc = DoctorService.getInstance();
+    await assert.rejects(
+      () => svc.execute(),
+      /configure\(\) must be called/,
+    );
   });
 
   test("execute() returns sorted findings (critical → warn → info)", async () => {
@@ -325,10 +337,11 @@ suite("terminal-restrictions check", () => {
   teardown(() => sinon.restore());
 
   test("reports info when custom patterns exist", async () => {
-    // 5 defaults + 3 custom = 8
-    const patterns = Array.from({ length: 8 }, () => /./);
+    // 6 defaults + 3 custom via getCustomCommandDenyPatterns
+    const allPatterns = Array.from({ length: 9 }, () => /./);
+    const customPatterns = Array.from({ length: 3 }, () => /./);
     const ctx = makeContext({
-      securityConfig: mockSecurityConfig({ denyPatterns: patterns }),
+      securityConfig: mockSecurityConfig({ denyPatterns: allPatterns, customDenyPatterns: customPatterns }),
     });
 
     const findings = await terminalRestrictionsCheck.run(ctx);
@@ -337,10 +350,10 @@ suite("terminal-restrictions check", () => {
   });
 
   test("reports warn when only defaults active", async () => {
-    // Exactly 5 patterns = defaults only
-    const patterns = Array.from({ length: 5 }, () => /./);
+    // 6 default patterns, 0 custom
+    const patterns = Array.from({ length: 6 }, () => /./);
     const ctx = makeContext({
-      securityConfig: mockSecurityConfig({ denyPatterns: patterns }),
+      securityConfig: mockSecurityConfig({ denyPatterns: patterns, customDenyPatterns: [] }),
     });
 
     const findings = await terminalRestrictionsCheck.run(ctx);
@@ -375,6 +388,7 @@ suite("security-config check", () => {
         severity: "info",
         message: "No security config found",
         autoFixable: true,
+        code: "no-config",
       },
     ];
     const config = mockSecurityConfig({ diagnostics: diags });

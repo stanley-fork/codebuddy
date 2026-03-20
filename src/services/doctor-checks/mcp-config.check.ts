@@ -6,15 +6,22 @@ import type {
   DoctorFinding,
 } from "./types";
 
-/** Env var names that commonly hold secrets. */
-const SECRET_ENV_PATTERNS = [
-  /api.?key/i,
-  /secret/i,
-  /password/i,
-  /token/i,
-  /credential/i,
-  /auth/i,
+/** Env var names that commonly hold secrets — tightened to reduce false positives. */
+const SECRET_ENV_PATTERNS: RegExp[] = [
+  /^api[_-]?key$/i, // API_KEY, APIKEY, API-KEY
+  /^.*[_-]api[_-]?key$/i, // OPENAI_API_KEY, MY_API_KEY
+  /[_-]secret$/i, // MY_SECRET, APP_SECRET (suffix only)
+  /^secret[_-]/i, // SECRET_KEY (prefix only)
+  /password/i, // PASSWORD is always a secret
+  /[_-]token$/i, // ACCESS_TOKEN, AUTH_TOKEN (suffix)
+  /^token[_-]/i, // TOKEN_VALUE
+  /credential/i, // CREDENTIALS is always sensitive
+  /[_-]auth[_-]?token/i, // AUTH_TOKEN, OAUTH_TOKEN — not bare AUTH
+  /private[_-]?key/i, // PRIVATE_KEY
 ];
+
+/** Minimum value length to consider as a potential secret. */
+const MIN_SECRET_VALUE_LENGTH = 8;
 
 export const mcpConfigCheck: DoctorCheckModule = {
   name: "mcp-config",
@@ -56,9 +63,10 @@ export const mcpConfigCheck: DoctorCheckModule = {
           );
           const hasRawValue =
             typeof envValue === "string" &&
-            envValue.length > 0 &&
+            envValue.length >= MIN_SECRET_VALUE_LENGTH &&
             !envValue.startsWith("${") && // not a variable reference
-            !envValue.startsWith("$");
+            !envValue.startsWith("$") &&
+            !/^[a-z_]+$/i.test(envValue); // pure identifier-looking values are not secrets
           if (looksLikeSecret && hasRawValue) {
             findings.push({
               check: "mcp-config",

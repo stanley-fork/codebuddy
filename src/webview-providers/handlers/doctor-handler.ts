@@ -51,9 +51,6 @@ function toDTO(f: DoctorFinding): DoctorFindingDTO {
 export class DoctorHandler implements WebviewMessageHandler {
   readonly commands = [...DOCTOR_COMMANDS];
 
-  /** Cache last findings so auto-fix can reuse them. */
-  private lastFindings: DoctorFinding[] = [];
-
   async handle(message: unknown, ctx: HandlerContext): Promise<void> {
     if (!isDoctorMessage(message)) {
       ctx.logger.warn("DoctorHandler received invalid message shape");
@@ -67,7 +64,6 @@ export class DoctorHandler implements WebviewMessageHandler {
       case "doctor-run": {
         try {
           const findings = await svc.execute();
-          this.lastFindings = findings;
 
           ctx.webview.webview.postMessage({
             command: "doctor-results",
@@ -90,11 +86,12 @@ export class DoctorHandler implements WebviewMessageHandler {
 
       case "doctor-auto-fix": {
         try {
-          const applied = await svc.autoFixAll(this.lastFindings);
+          // Use service-level cache — consistent across all panels
+          const findingsToFix = svc.getCachedFindings();
+          const applied = await svc.autoFixAll(findingsToFix);
 
           // Re-run checks after fix to get updated state
           const updated = await svc.execute();
-          this.lastFindings = updated;
 
           ctx.webview.webview.postMessage({
             command: "doctor-results",
