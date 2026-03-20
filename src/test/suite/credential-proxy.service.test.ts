@@ -6,7 +6,7 @@
  * - Provider routing (known provider → 200, unknown → 404)
  * - Auth header stripping & credential injection
  * - Rate limiting (429 on exhaustion)
- * - Audit log recording
+ * - Audit log recording (ring buffer, defensive copy)
  * - Doctor check module findings
  */
 
@@ -22,6 +22,8 @@ import { credentialProxyCheck } from "../../services/doctor-checks/credential-pr
 import type { DoctorCheckContext } from "../../services/doctor-checks/types";
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+const REQUEST_TIMEOUT_MS = 5000;
 
 function mockSecretStorage(
   stored: Record<string, string> = {},
@@ -60,6 +62,14 @@ function proxyRequest(
   options: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => {
+        req.destroy();
+        reject(new Error(`proxyRequest timed out after ${REQUEST_TIMEOUT_MS}ms`));
+      },
+      REQUEST_TIMEOUT_MS,
+    );
+
     const req = http.request(
       {
         hostname: "127.0.0.1",
@@ -71,16 +81,20 @@ function proxyRequest(
       (res) => {
         let body = "";
         res.on("data", (chunk: Buffer) => (body += chunk.toString()));
-        res.on("end", () =>
+        res.on("end", () => {
+          clearTimeout(timer);
           resolve({
             statusCode: res.statusCode ?? 0,
             headers: res.headers,
             body,
-          }),
-        );
+          });
+        });
       },
     );
-    req.on("error", reject);
+    req.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     if (options.body) req.write(options.body);
     req.end();
   });
@@ -117,17 +131,20 @@ function createEchoUpstream(): Promise<{
 // ── Tests ──────────────────────────────────────────────────────────
 
 suite("CredentialProxyService", () => {
-  let proxy: CredentialProxyService;
+  setup(() => {
+    // Ensure a clean singleton before each test
+    CredentialProxyService.resetForTesting();
+  });
 
   teardown(() => {
     sinon.restore();
-    proxy?.dispose();
+    CredentialProxyService.resetForTesting();
   });
 
   // ─ Lifecycle ─────────────────────────────────────────────────────
 
   test("starts and exposes a dynamic port on localhost", async () => {
-    proxy = CredentialProxyService.getInstance();
+    const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage() as any);
 
     assert.ok(proxy.isRunning(), "proxy should be running");
@@ -135,7 +152,7 @@ suite("CredentialProxyService", () => {
   });
 
   test("start() is idempotent", async () => {
-    proxy = CredentialProxyService.getInstance();
+    const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage() as any);
     const port1 = proxy.getPort();
     await proxy.start(mockSecretStorage() as any); // second call
@@ -143,7 +160,7 @@ suite("CredentialProxyService", () => {
   });
 
   test("dispose() stops the server", async () => {
-    proxy = CredentialProxyService.getInstance();
+    const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage() as any);
     assert.ok(proxy.isRunning());
     proxy.dispose();
@@ -151,8 +168,29 @@ suite("CredentialProxyService", () => {
     assert.strictEqual(proxy.getPort(), 0, "port should reset to 0");
   });
 
+  test("getInstance() after dispose returns same instance (not disposed)", async () => {
+    const proxy = CredentialProxyService.getInstance();
+    await proxy.start(mockSecretStorage() as any);
+    proxy.dispose();
+    // Same instance — not resurrected
+    const proxy2 = CredentialProxyService.getInstance();
+    assert.strictEqual(proxy, proxy2, "should be the same instance");
+    assert.ok(!proxy2.isRunning(), "disposed proxy should not be running");
+  });
+
+  test("can restart after dispose", async () => {
+    const proxy = CredentialProxyService.getInstance();
+    await proxy.start(mockSecretStorage() as any);
+    const port1 = proxy.getPort();
+    proxy.dispose();
+    assert.ok(!proxy.isRunning());
+    await proxy.start(mockSecretStorage() as any);
+    assert.ok(proxy.isRunning(), "should be running after restart");
+    assert.ok(proxy.getPort() > 0, "should have a port after restart");
+  });
+
   test("getProxyUrl() returns correct localhost URL with provider path", async () => {
-    proxy = CredentialProxyService.getInstance();
+    const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage() as any);
     const url = proxy.getProxyUrl("openai");
     assert.ok(
@@ -161,10 +199,17 @@ suite("CredentialProxyService", () => {
     );
   });
 
+  test("hasRoute() returns true for known providers, false for unknown", () => {
+    assert.ok(CredentialProxyService.hasRoute("anthropic"));
+    assert.ok(CredentialProxyService.hasRoute("openai"));
+    assert.ok(!CredentialProxyService.hasRoute("gemini"));
+    assert.ok(!CredentialProxyService.hasRoute("unknown"));
+  });
+
   // ─ Routing ───────────────────────────────────────────────────────
 
   test("returns 404 for unknown provider", async () => {
-    proxy = CredentialProxyService.getInstance();
+    const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage() as any);
     const res = await proxyRequest(proxy.getPort(), "/unknown-provider/v1/chat");
     assert.strictEqual(res.statusCode, 404);
@@ -173,7 +218,7 @@ suite("CredentialProxyService", () => {
   });
 
   test("returns 401 when API key is missing for a provider", async () => {
-    proxy = CredentialProxyService.getInstance();
+    const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage({}) as any); // no keys
     const res = await proxyRequest(proxy.getPort(), "/openai/v1/chat/completions");
     assert.strictEqual(res.statusCode, 401);
@@ -184,7 +229,7 @@ suite("CredentialProxyService", () => {
   // ─ Rate limiting ─────────────────────────────────────────────────
 
   test("returns 429 when rate limit is exhausted", async () => {
-    proxy = CredentialProxyService.getInstance();
+    const proxy = CredentialProxyService.getInstance();
     // Set rate limit to 1 RPM for the test provider
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
     configStub.callsFake((section?: string) => {
@@ -221,38 +266,44 @@ suite("CredentialProxyService", () => {
   // ─ Audit log ─────────────────────────────────────────────────────
 
   test("records entries in audit log", async () => {
-    proxy = CredentialProxyService.getInstance();
+    const proxy = CredentialProxyService.getInstance();
     await proxy.start(mockSecretStorage() as any);
-    await proxyRequest(proxy.getPort(), "/unknown/v1/test");
-
-    const log = proxy.getAuditLog();
-    // The 404 for unknown provider does not call recordAudit (returns early)
-    // Try a real provider with no key
+    // 404 for unknown provider does not record audit — try a known provider
     await proxyRequest(proxy.getPort(), "/openai/v1/chat");
-    const log2 = proxy.getAuditLog();
-    assert.ok(log2.length > 0, "audit log should have entries");
+    const log = proxy.getAuditLog();
+    assert.ok(log.length > 0, "audit log should have entries");
 
-    const last = log2[log2.length - 1];
+    const last = log[log.length - 1];
     assert.strictEqual(last.provider, "openai");
     assert.strictEqual(last.statusCode, 401);
     assert.ok(last.latencyMs >= 0);
+  });
+
+  test("getAuditLog() returns a defensive copy", async () => {
+    const proxy = CredentialProxyService.getInstance();
+    await proxy.start(mockSecretStorage() as any);
+    await proxyRequest(proxy.getPort(), "/openai/v1/chat");
+
+    const log1 = proxy.getAuditLog();
+    const log2 = proxy.getAuditLog();
+    assert.notStrictEqual(log1, log2, "should return different array references");
+    assert.deepStrictEqual(log1, log2, "but same content");
   });
 });
 
 // ── Doctor check tests ─────────────────────────────────────────────
 
 suite("credentialProxyCheck (doctor)", () => {
-  teardown(() => {
-    sinon.restore();
-    // Clean up the proxy singleton
-    try {
-      CredentialProxyService.getInstance().dispose();
-    } catch {
-      // ignore if not initialized
-    }
+  setup(() => {
+    CredentialProxyService.resetForTesting();
   });
 
-  test('returns info finding when proxy is disabled', async () => {
+  teardown(() => {
+    sinon.restore();
+    CredentialProxyService.resetForTesting();
+  });
+
+  test("returns info finding when proxy is disabled", async () => {
     const configStub = sinon.stub(vscode.workspace, "getConfiguration");
     configStub.callsFake(() => ({
       get: (_key: string, defaultVal: any) => defaultVal,
@@ -279,13 +330,12 @@ suite("credentialProxyCheck (doctor)", () => {
     });
 
     // Proxy singleton exists but isn't started
-    const proxy = CredentialProxyService.getInstance();
+    CredentialProxyService.getInstance();
     const findings = await credentialProxyCheck.run(makeContext());
     assert.ok(findings.length >= 1);
     const critical = findings.find((f) => f.severity === "critical");
     assert.ok(critical, "expected a critical finding");
     assert.ok(critical!.message.includes("not running"));
-    proxy.dispose();
   });
 
   test("returns info finding when proxy enabled and running", async () => {
@@ -312,7 +362,6 @@ suite("credentialProxyCheck (doctor)", () => {
     );
     assert.ok(infoFinding, "expected an info finding about active proxy");
     assert.ok(infoFinding!.message.includes(`port ${proxy.getPort()}`));
-    proxy.dispose();
   });
 
   test("warns about API keys in environment variables", async () => {
@@ -348,7 +397,6 @@ suite("credentialProxyCheck (doctor)", () => {
       } else {
         process.env.OPENAI_API_KEY = origKey;
       }
-      proxy.dispose();
     }
   });
 });

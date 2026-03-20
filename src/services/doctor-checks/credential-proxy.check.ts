@@ -27,21 +27,7 @@ export const credentialProxyCheck: DoctorCheckModule = {
     }
 
     // Proxy is enabled — check if it's actually running
-    let proxy: CredentialProxyService;
-    try {
-      proxy = CredentialProxyService.getInstance();
-    } catch {
-      return [
-        {
-          check: "credential-proxy",
-          severity: "critical",
-          message:
-            "Credential proxy is enabled but the service is not initialized. Restart the extension.",
-          autoFixable: false,
-        },
-      ];
-    }
-
+    const proxy = CredentialProxyService.getInstance();
     const findings: DoctorFinding[] = [];
 
     if (proxy.isRunning()) {

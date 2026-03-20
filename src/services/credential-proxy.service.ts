@@ -1,6 +1,5 @@
 import * as http from "node:http";
 import * as https from "node:https";
-import * as url from "node:url";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import type { SecretStorageService } from "./secret-storage";
@@ -97,6 +96,9 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
   },
 };
 
+/** Set of provider names that have proxy routes. */
+export const PROXY_PROVIDERS = new Set(Object.keys(PROVIDER_ROUTES));
+
 /** Headers that must never be forwarded from the client. */
 const STRIPPED_HEADERS = new Set([
   "authorization",
@@ -105,6 +107,7 @@ const STRIPPED_HEADERS = new Set([
 ]);
 
 const MAX_AUDIT_ENTRIES = 1000;
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 
 // ─── Service ─────────────────────────────────────────────────────────
 
@@ -113,9 +116,18 @@ export class CredentialProxyService implements vscode.Disposable {
   private readonly logger: Logger;
   private server: http.Server | undefined;
   private port = 0;
+  private disposed = false;
   private secretStorage: SecretStorageService | undefined;
-  private readonly auditLog: ProxyAuditEntry[] = [];
   private readonly rateBuckets = new Map<string, TokenBucket>();
+  private configWatcher: vscode.Disposable | undefined;
+  private cachedRateLimits: Record<string, number> | undefined;
+
+  // Ring buffer for audit log — O(1) writes
+  private readonly auditBuffer: (ProxyAuditEntry | undefined)[] = new Array(
+    MAX_AUDIT_ENTRIES,
+  ).fill(undefined);
+  private auditHead = 0;
+  private auditCount = 0;
 
   private constructor() {
     this.logger = Logger.initialize("CredentialProxy", {
@@ -133,10 +145,29 @@ export class CredentialProxyService implements vscode.Disposable {
     return CredentialProxyService.instance;
   }
 
+  /** For tests that need a truly fresh instance. */
+  public static resetForTesting(): void {
+    CredentialProxyService.instance?.dispose();
+    CredentialProxyService.instance = undefined;
+  }
+
   /** Start the proxy server. Resolves once listening. */
   public async start(secretStorage: SecretStorageService): Promise<void> {
+    if (this.disposed) {
+      this.disposed = false;
+    }
     if (this.server) return; // already running
     this.secretStorage = secretStorage;
+
+    // Cache rate limit config and listen for changes
+    this.refreshConfigCache();
+    this.configWatcher = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("codebuddy.credentialProxy.rateLimits")) {
+        this.refreshConfigCache();
+        this.rateBuckets.clear();
+        this.logger.info("Rate limit config updated — buckets reset");
+      }
+    });
 
     return new Promise((resolve, reject) => {
       const srv = http.createServer((req, res) => this.handleRequest(req, res));
@@ -171,24 +202,50 @@ export class CredentialProxyService implements vscode.Disposable {
     return this.server !== undefined && this.server.listening;
   }
 
+  /** Check whether a provider name has a proxy route. */
+  public static hasRoute(provider: string): boolean {
+    return provider in PROVIDER_ROUTES;
+  }
+
   /** Build the proxy base URL for a given provider. */
   public getProxyUrl(provider: string): string {
     return `http://127.0.0.1:${this.port}/${provider}`;
   }
 
-  /** Get the audit log (read-only snapshot). */
+  /** Get the audit log (defensive frozen copy). */
   public getAuditLog(): readonly ProxyAuditEntry[] {
-    return this.auditLog;
+    const result: ProxyAuditEntry[] = [];
+    const start = this.auditCount < MAX_AUDIT_ENTRIES ? 0 : this.auditHead;
+    for (let i = 0; i < this.auditCount; i++) {
+      const entry = this.auditBuffer[(start + i) % MAX_AUDIT_ENTRIES];
+      if (entry) result.push({ ...entry });
+    }
+    return Object.freeze(result);
   }
 
   public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+
+    this.configWatcher?.dispose();
+    this.configWatcher = undefined;
+
     if (this.server) {
-      this.server.close();
+      this.server.close(() => {
+        this.logger.info("Credential proxy stopped — all connections drained");
+      });
       this.server = undefined;
       this.port = 0;
-      this.logger.info("Credential proxy stopped");
     }
-    CredentialProxyService.instance = undefined;
+    // Do NOT null instance — callers should check isRunning()
+  }
+
+  // ── Config cache ─────────────────────────────────────────────────
+
+  private refreshConfigCache(): void {
+    this.cachedRateLimits = vscode.workspace
+      .getConfiguration("codebuddy.credentialProxy")
+      .get<Record<string, number>>("rateLimits");
   }
 
   // ── Request handling ─────────────────────────────────────────────
@@ -199,6 +256,15 @@ export class CredentialProxyService implements vscode.Disposable {
   ): void {
     const startTime = Date.now();
     const reqUrl = req.url ?? "/";
+
+    // Handle incoming request errors to prevent unhandled exceptions
+    req.on("error", (err) => {
+      this.logger.warn(`Incoming request error: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "Client connection error" }));
+      }
+    });
 
     // Parse /<provider>/rest/of/path
     const slashIdx = reqUrl.indexOf("/", 1);
@@ -213,7 +279,7 @@ export class CredentialProxyService implements vscode.Disposable {
       return;
     }
 
-    // Rate limiting
+    // Rate limiting (uses cached config)
     if (!this.checkRateLimit(provider)) {
       res.writeHead(429, {
         "content-type": "application/json",
@@ -249,8 +315,20 @@ export class CredentialProxyService implements vscode.Disposable {
       return;
     }
 
-    // Build upstream URL
-    const targetUrl = new url.URL(remainingPath, route.target);
+    // Build upstream URL — guard against malformed paths
+    const targetUrl = this.buildTargetUrl(remainingPath, route.target);
+    if (!targetUrl) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid request path" }));
+      this.recordAudit(
+        provider,
+        req.method ?? "?",
+        remainingPath,
+        400,
+        startTime,
+      );
+      return;
+    }
 
     // Build headers — strip any client-sent auth, inject real credentials
     const headers: Record<string, string | string[]> = {};
@@ -320,27 +398,76 @@ export class CredentialProxyService implements vscode.Disposable {
       );
     });
 
-    // Pipe request body to upstream
-    req.pipe(proxyReq, { end: true });
+    // Pipe request body with size limit enforcement
+    this.pipeWithLimit(req, proxyReq, res, provider, remainingPath, startTime);
   }
 
-  // ── Rate limiting (token bucket) ─────────────────────────────────
+  // ── URL construction ─────────────────────────────────────────────
+
+  private buildTargetUrl(remainingPath: string, target: string): URL | null {
+    try {
+      const safePath = remainingPath
+        .replace(/\0/g, "") // strip null bytes
+        .split("#")[0]; // strip fragments
+      return new URL(safePath, target);
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Body piping with size limit ──────────────────────────────────
+
+  private pipeWithLimit(
+    req: http.IncomingMessage,
+    proxyReq: http.ClientRequest,
+    res: http.ServerResponse,
+    provider: string,
+    remainingPath: string,
+    startTime: number,
+  ): void {
+    let received = 0;
+    let aborted = false;
+
+    req.on("data", (chunk: Buffer) => {
+      received += chunk.length;
+      if (received > MAX_BODY_BYTES && !aborted) {
+        aborted = true;
+        req.destroy();
+        proxyReq.destroy();
+        if (!res.headersSent) {
+          res.writeHead(413, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "Request body too large" }));
+        }
+        this.recordAudit(
+          provider,
+          req.method ?? "?",
+          remainingPath,
+          413,
+          startTime,
+        );
+      }
+    });
+
+    // Pipe with end:false — we handle end via the aborted guard
+    req.pipe(proxyReq, { end: false });
+    req.on("end", () => {
+      if (!aborted) proxyReq.end();
+    });
+  }
+
+  // ── Rate limiting (token bucket, cached config) ──────────────────
 
   private checkRateLimit(provider: string): boolean {
-    const limits = vscode.workspace
-      .getConfiguration("codebuddy.credentialProxy")
-      .get<Record<string, number>>("rateLimits");
-
-    const maxRpm = limits?.[provider] ?? 60; // default: 60 requests/min
-    const maxTokens = maxRpm;
-    const refillRate = maxRpm / 60_000; // tokens per ms
+    const limits = this.cachedRateLimits;
+    const maxRpm = limits?.[provider] ?? 60;
+    const refillRate = maxRpm / 60_000;
 
     let bucket = this.rateBuckets.get(provider);
     if (!bucket) {
       bucket = {
-        tokens: maxTokens,
+        tokens: maxRpm,
         lastRefill: Date.now(),
-        maxTokens,
+        maxTokens: maxRpm,
         refillRate,
       };
       this.rateBuckets.set(provider, bucket);
@@ -355,16 +482,12 @@ export class CredentialProxyService implements vscode.Disposable {
     );
     bucket.lastRefill = now;
 
-    // Update limits in case config changed
-    bucket.maxTokens = maxTokens;
-    bucket.refillRate = refillRate;
-
     if (bucket.tokens < 1) return false;
     bucket.tokens -= 1;
     return true;
   }
 
-  // ── Audit log ────────────────────────────────────────────────────
+  // ── Audit log (ring buffer — O(1) writes) ────────────────────────
 
   private recordAudit(
     provider: string,
@@ -373,16 +496,16 @@ export class CredentialProxyService implements vscode.Disposable {
     statusCode: number,
     startTime: number,
   ): void {
-    if (this.auditLog.length >= MAX_AUDIT_ENTRIES) {
-      this.auditLog.shift();
-    }
-    this.auditLog.push({
-      timestamp: Date.now(),
+    const endTime = Date.now();
+    this.auditBuffer[this.auditHead] = {
+      timestamp: startTime,
       provider,
       method,
       path,
       statusCode,
-      latencyMs: Date.now() - startTime,
-    });
+      latencyMs: endTime - startTime,
+    };
+    this.auditHead = (this.auditHead + 1) % MAX_AUDIT_ENTRIES;
+    if (this.auditCount < MAX_AUDIT_ENTRIES) this.auditCount++;
   }
 }
