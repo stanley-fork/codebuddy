@@ -73,6 +73,7 @@ import { DoctorService } from "./services/doctor.service";
 import { CredentialProxyService } from "./services/credential-proxy.service";
 import { setProxyContext, clearProxyContext } from "./services/proxy-context";
 import { PermissionScopeService } from "./services/permission-scope.service";
+import { AccessControlService } from "./services/access-control.service";
 
 const logger = Logger.initialize("extension-main", {
   minLevel: LogLevel.DEBUG,
@@ -223,6 +224,11 @@ export async function activate(context: vscode.ExtensionContext) {
     const permissionScope = PermissionScopeService.getInstance();
     await permissionScope.initialize(workspacePath);
     context.subscriptions.push(permissionScope);
+
+    // Initialize Access Control Service (must be before chat providers)
+    const accessControl = AccessControlService.getInstance();
+    await accessControl.initialize(workspacePath);
+    context.subscriptions.push(accessControl);
 
     // Inject security policy into terminal and browser handler (DI — no circular imports)
     DeepTerminalService.getInstance().setSecurityPolicy(externalSecurityConfig);
@@ -623,6 +629,103 @@ export async function activate(context: vscode.ExtensionContext) {
           }
         },
       ),
+    );
+
+    // ── Access Control: status bar indicator + switch/audit commands ──
+    const accessStatusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      49,
+    );
+    const modeIcons: Record<string, string> = {
+      open: "$(globe)",
+      allow: "$(person-add)",
+      deny: "$(person-remove)",
+    };
+    const updateAccessStatusBar = () => {
+      const mode = accessControl.getMode();
+      const user = accessControl.getCurrentUser();
+      accessStatusBar.text = `${modeIcons[mode] ?? "$(globe)"} ${mode}`;
+      accessStatusBar.tooltip =
+        `CodeBuddy Access: ${mode}` +
+        (user ? `\nUser: ${user}` : "\nUser: unknown") +
+        "\nClick to change";
+      accessStatusBar.command = "codebuddy.switchAccessMode";
+      accessStatusBar.show();
+    };
+    updateAccessStatusBar();
+    context.subscriptions.push(
+      accessControl.onAccessChanged(updateAccessStatusBar),
+      accessStatusBar,
+    );
+
+    interface AccessModeQuickPickItem extends vscode.QuickPickItem {
+      mode: import("./services/access-control.service").AccessControlMode;
+    }
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "codebuddy.switchAccessMode",
+        async () => {
+          const current = accessControl.getMode();
+          const items: AccessModeQuickPickItem[] = [
+            {
+              label: "$(globe) open",
+              description:
+                "No restrictions — all users have full agent access.",
+              picked: current === "open",
+              mode: "open",
+            },
+            {
+              label: "$(person-add) allow",
+              description: "Only users in the allowlist can use the agent.",
+              picked: current === "allow",
+              mode: "allow",
+            },
+            {
+              label: "$(person-remove) deny",
+              description:
+                "Block users in the denylist; everyone else allowed.",
+              picked: current === "deny",
+              mode: "deny",
+            },
+          ];
+          const selected = await vscode.window.showQuickPick(items, {
+            placeHolder: `Current mode: ${current}`,
+            title: "Switch Access Control Mode",
+          });
+          if (selected) {
+            accessControl.setMode(selected.mode);
+          }
+        },
+      ),
+    );
+
+    const accessAuditChannel = vscode.window.createOutputChannel(
+      "CodeBuddy Access Audit",
+    );
+    context.subscriptions.push(
+      accessAuditChannel,
+      vscode.commands.registerCommand("codebuddy.accessControlAudit", () => {
+        accessAuditChannel.clear();
+        const entries = accessControl.getAuditLog();
+        accessAuditChannel.appendLine(
+          `=== Access Control Audit Log (${entries.length} entries) ===`,
+        );
+        accessAuditChannel.appendLine(
+          `Mode: ${accessControl.getMode()} | User: ${accessControl.getCurrentUser() ?? "unknown"}`,
+        );
+        accessAuditChannel.appendLine("");
+        for (const e of entries) {
+          const status = e.allowed ? "ALLOWED" : "DENIED";
+          accessAuditChannel.appendLine(
+            `[${new Date(e.timestamp).toISOString()}] ${status} user="${e.user}" action="${e.action}"`,
+          );
+        }
+        if (entries.length === 0) {
+          accessAuditChannel.appendLine("No audit entries recorded yet.");
+        }
+        accessAuditChannel.show();
+      }),
     );
 
     // Run Doctor in background (after all services ready — non-blocking)

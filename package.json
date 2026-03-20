@@ -169,6 +169,14 @@
         {
           "command": "codebuddy.switchPermissionProfile",
           "when": "workspaceFolderCount != 0"
+        },
+        {
+          "command": "codebuddy.switchAccessMode",
+          "when": "workspaceFolderCount != 0"
+        },
+        {
+          "command": "codebuddy.accessControlAudit",
+          "when": "workspaceFolderCount != 0"
         }
       ]
     },
@@ -301,6 +309,16 @@
       {
         "command": "codebuddy.switchPermissionProfile",
         "title": "Switch Permission Profile",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.switchAccessMode",
+        "title": "Switch Access Control Mode",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.accessControlAudit",
+        "title": "Access Control Audit Log",
         "category": "CodeBuddy"
       },
       {
@@ -666,6 +684,12 @@
             "enum": ["restricted", "standard", "trusted"],
             "default": "standard",
             "description": "Default permission profile: restricted (read-only, no terminal), standard (read/write, safe terminal), trusted (full access, auto-approve). Overridden by .codebuddy/permissions.json if present."
+          },
+          "codebuddy.accessControl.defaultMode": {
+            "type": "string",
+            "enum": ["open", "allow", "deny"],
+            "default": "open",
+            "description": "Default access control mode: open (no restrictions), allow (only listed users), deny (block listed users). Overridden by .codebuddy/access.json if present."
           },
           "codebuddy.credentialProxy.rateLimits": {
             "type": "object",
