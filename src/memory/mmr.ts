@@ -76,12 +76,17 @@ function computeMMRScore(
   return lambda * relevance - (1 - lambda) * maxSimilarity;
 }
 
+const MMR_MAX_CANDIDATES = 200;
+
 /**
  * Re-rank items using Maximal Marginal Relevance (MMR).
  *
  * 1. Start with the highest-scoring item.
  * 2. For each remaining slot, pick the item maximizing the MMR score.
  * 3. Repeat until all items are placed.
+ *
+ * Uses incremental max-similarity tracking to reduce redundant comparisons.
+ * Input is capped at MMR_MAX_CANDIDATES to keep O(n²) tractable.
  */
 function mmrRerank<T extends MMRItem>(
   items: T[],
@@ -103,44 +108,48 @@ function mmrRerank<T extends MMRItem>(
     return [...items].sort((a, b) => b.score - a.score);
   }
 
+  // Guard: cap candidates to keep O(n²) tractable
+  const candidates =
+    items.length > MMR_MAX_CANDIDATES
+      ? [...items]
+          .sort((a, b) => b.score - a.score)
+          .slice(0, MMR_MAX_CANDIDATES)
+      : items;
+
   // Pre-tokenize for efficiency
   const tokenCache = new Map<string, Set<string>>();
-  for (const item of items) {
+  for (const item of candidates) {
     tokenCache.set(item.id, tokenize(item.content));
   }
 
   // Normalize scores to [0, 1] for fair comparison with similarity
-  const maxScore = Math.max(...items.map((i) => i.score));
-  const minScore = Math.min(...items.map((i) => i.score));
+  // Use iterative reduce to avoid stack overflow with spread on large arrays
+  let maxScore = -Infinity;
+  let minScore = Infinity;
+  for (const item of candidates) {
+    if (item.score > maxScore) maxScore = item.score;
+    if (item.score < minScore) minScore = item.score;
+  }
   const scoreRange = maxScore - minScore;
   const normalizeScore = (score: number): number =>
     scoreRange === 0 ? 1 : (score - minScore) / scoreRange;
 
   const selected: T[] = [];
-  const remaining = new Set(items);
+  const remaining = new Set(candidates);
+
+  // Track max similarity to any selected item per candidate (incremental)
+  const maxSimToSelected = new Map<string, number>(
+    candidates.map((item) => [item.id, 0]),
+  );
 
   while (remaining.size > 0) {
     let bestItem: T | null = null;
     let bestMMRScore = -Infinity;
 
     for (const candidate of remaining) {
-      const normalizedRelevance = normalizeScore(candidate.score);
-
-      // max similarity to any already-selected item
-      let maxSim = 0;
-      const candidateTokens =
-        tokenCache.get(candidate.id) ?? tokenize(candidate.content);
-      for (const sel of selected) {
-        const selTokens = tokenCache.get(sel.id) ?? tokenize(sel.content);
-        const sim = jaccardSimilarity(candidateTokens, selTokens);
-        if (sim > maxSim) {
-          maxSim = sim;
-        }
-      }
-
       const mmrScore = computeMMRScore(
-        normalizedRelevance,
-        maxSim,
+        normalizeScore(candidate.score),
+        maxSimToSelected.get(candidate.id) ?? 0,
         clampedLambda,
       );
 
@@ -154,11 +163,24 @@ function mmrRerank<T extends MMRItem>(
       }
     }
 
-    if (bestItem) {
-      selected.push(bestItem);
-      remaining.delete(bestItem);
-    } else {
+    if (!bestItem) {
       break; // safety exit
+    }
+
+    selected.push(bestItem);
+    remaining.delete(bestItem);
+
+    // Incrementally update max similarities (avoids full re-scan)
+    const bestTokens =
+      tokenCache.get(bestItem.id) ?? tokenize(bestItem.content);
+    for (const candidate of remaining) {
+      const candidateTokens =
+        tokenCache.get(candidate.id) ?? tokenize(candidate.content);
+      const sim = jaccardSimilarity(candidateTokens, bestTokens);
+      const current = maxSimToSelected.get(candidate.id) ?? 0;
+      if (sim > current) {
+        maxSimToSelected.set(candidate.id, sim);
+      }
     }
   }
 

@@ -73,6 +73,7 @@ export class ContextRetriever {
     const hybridSearch = HybridSearchService.getInstance();
     let results: any[] = [];
     let searchMethod = "Hybrid";
+    const hybridConfig = this.getHybridSearchConfig();
 
     // ── Try hybrid search (vector + FTS5) ─────────────────────────────
     if (hybridSearch.isReady) {
@@ -80,7 +81,6 @@ export class ContextRetriever {
         this.logger.info(`Running hybrid search for: ${input}`);
         const embedding = await this.embeddingService.generateEmbedding(input);
 
-        const hybridConfig = this.getHybridSearchConfig();
         const hybridResults = await hybridSearch.search(
           embedding,
           input,
@@ -103,7 +103,6 @@ export class ContextRetriever {
 
         // Fall back to FTS5 keyword-only search
         try {
-          const hybridConfig = this.getHybridSearchConfig();
           const keywordResults = hybridSearch.keywordOnlySearch(
             input,
             hybridConfig,
@@ -122,8 +121,8 @@ export class ContextRetriever {
       }
     }
 
-    // ── Legacy fallback (no FTS5 available) ───────────────────────────
-    if (results.length === 0 && !hybridSearch.isReady) {
+    // ── Legacy fallback (no FTS5 available or no results) ─────────────
+    if (results.length === 0 || !hybridSearch.isReady) {
       try {
         this.logger.info("Falling back to legacy vector search");
         const embedding = await this.embeddingService.generateEmbedding(input);
