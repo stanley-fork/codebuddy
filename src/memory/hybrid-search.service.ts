@@ -130,22 +130,21 @@ const BM25_NAN_FALLBACK_SCORE = 0.001;
  * Returns a value in [0, 1) via the standard normalization.
  */
 export function computeFts4Score(matchinfoBlob: Uint8Array): number {
-  // matchinfo returns 32-bit integers packed as little-endian
-  const ints = new Int32Array(
-    matchinfoBlob.buffer,
-    matchinfoBlob.byteOffset,
-    matchinfoBlob.byteLength / 4,
-  );
-
-  if (ints.length < 2) {
+  if (matchinfoBlob.byteLength < 8) {
     return BM25_NAN_FALLBACK_SCORE;
   }
+
+  // Ensure 4-byte alignment via copy into fresh ArrayBuffer.
+  // matchinfo() returns a raw blob; creating Int32Array from a Uint8Array's
+  // buffer may violate alignment on some JS engines if byteOffset % 4 !== 0.
+  const aligned = new ArrayBuffer(matchinfoBlob.byteLength);
+  new Uint8Array(aligned).set(matchinfoBlob);
+  const ints = new Int32Array(aligned);
 
   const p = ints[0]; // number of phrases
   const c = ints[1]; // number of columns (always 1 for our table)
 
-  // We need at least p * c * 3 values after the header
-  if (ints.length < 2 + p * c * 3) {
+  if (p <= 0 || c <= 0 || ints.length < 2 + p * c * 3) {
     return BM25_NAN_FALLBACK_SCORE;
   }
 
@@ -154,20 +153,14 @@ export function computeFts4Score(matchinfoBlob: Uint8Array): number {
     for (let j = 0; j < c; j++) {
       const offset = 2 + (i * c + j) * 3;
       const hitsThisRow = ints[offset]; // term frequency in this doc
-      const _hitsAllRows = ints[offset + 1]; // total hits across all docs
       const docsWithHit = ints[offset + 2]; // document frequency
 
       if (hitsThisRow > 0 && docsWithHit > 0) {
-        // IDF component: log(1 + N/df) — we approximate N from the data
-        // Since we don't have total doc count from matchinfo, use a simple
-        // tf × inverse-df weighting: tf × (1 / df)
-        // This gives higher scores to rarer terms matched more often
-        rawScore += hitsThisRow * (1 / docsWithHit);
+        rawScore += hitsThisRow / docsWithHit;
       }
     }
   }
 
-  // Normalize to [0, 1) using the same pattern as bm25RankToScore
   return rawScore <= 0 ? BM25_NAN_FALLBACK_SCORE : rawScore / (1 + rawScore);
 }
 
@@ -177,19 +170,38 @@ export function computeFts4Score(matchinfoBlob: Uint8Array): number {
  * Merge vector and keyword results by ID, apply weighted score fusion,
  * temporal decay, and optional MMR diversity re-ranking.
  */
+/**
+ * Resolve a partial config into a complete HybridSearchConfig.
+ * Uses explicit property resolution (not spread) so every field is visible.
+ */
+export function resolveHybridConfig(
+  input: Partial<HybridSearchConfig>,
+): HybridSearchConfig {
+  return {
+    vectorWeight: input.vectorWeight ?? DEFAULT_HYBRID_CONFIG.vectorWeight,
+    textWeight: input.textWeight ?? DEFAULT_HYBRID_CONFIG.textWeight,
+    topK: input.topK ?? DEFAULT_HYBRID_CONFIG.topK,
+    nowMs: input.nowMs,
+    mmr: {
+      enabled: input.mmr?.enabled ?? DEFAULT_MMR_CONFIG.enabled,
+      lambda: input.mmr?.lambda ?? DEFAULT_MMR_CONFIG.lambda,
+    },
+    temporalDecay: {
+      enabled:
+        input.temporalDecay?.enabled ?? DEFAULT_TEMPORAL_DECAY_CONFIG.enabled,
+      halfLifeDays:
+        input.temporalDecay?.halfLifeDays ??
+        DEFAULT_TEMPORAL_DECAY_CONFIG.halfLifeDays,
+    },
+  };
+}
+
 export function mergeHybridResults(params: {
   vector: VectorHit[];
   keyword: KeywordHit[];
   config?: Partial<HybridSearchConfig>;
 }): HybridSearchResult[] {
-  const input = params.config ?? {};
-  const cfg: HybridSearchConfig = {
-    ...DEFAULT_HYBRID_CONFIG,
-    ...input,
-    // Deep-merge nested objects to preserve defaults for unspecified fields
-    mmr: { ...DEFAULT_MMR_CONFIG, ...input.mmr },
-    temporalDecay: { ...DEFAULT_TEMPORAL_DECAY_CONFIG, ...input.temporalDecay },
-  };
+  const cfg = resolveHybridConfig(params.config ?? {});
 
   // Normalize weights to sum to 1.0 for consistent scoring
   const weightSum = cfg.vectorWeight + cfg.textWeight;
@@ -300,7 +312,8 @@ export class HybridSearchService {
   private vectorSearchStmt: SqlJsStatement | null = null;
   private ftsSearchStmt: SqlJsStatement | null = null;
   private static readonly VECTOR_SCAN_LIMIT = 5000;
-  private static readonly YIELD_INTERVAL = 200;
+  /** Time budget (ms) per synchronous burst before yielding to the event loop. */
+  private static readonly YIELD_BUDGET_MS = 8;
 
   private constructor() {
     this.logger = Logger.initialize("HybridSearchService", {
@@ -383,7 +396,9 @@ export class HybridSearchService {
     this.db = null;
     this.ftsInitialized = false;
     this.initializedForDb = null;
-    this.initPromise = null;
+    // Do NOT null initPromise here — an in-flight promise still resolves
+    // and callers awaiting it would get a use-after-dispose scenario.
+    // Instead, the finally block in initializeFts clears it.
     this.logger.info("HybridSearchService disposed");
   }
 
@@ -488,12 +503,15 @@ export class HybridSearchService {
       this.logger.info(`Back-filling FTS4 index: ${deficit} chunks to index`);
 
       if (deficit < 100) {
-        // Incremental: insert only the missing rows
+        // Anti-join: find chunks whose rowid is NOT in chunks_fts.
+        // Handles rowid gaps from deleted rows (MAX(rowid) approach would miss them).
         this.db!.run(`
           INSERT INTO chunks_fts(rowid, text)
           SELECT c.rowid, c.text
           FROM chunks c
-          WHERE c.rowid > (SELECT COALESCE(MAX(rowid), 0) FROM chunks_fts)
+          WHERE NOT EXISTS (
+            SELECT 1 FROM chunks_fts f WHERE f.rowid = c.rowid
+          )
         `);
       } else {
         // Full rebuild for large deficits
@@ -569,14 +587,14 @@ export class HybridSearchService {
           textScore,
           chunkType: row.chunk_type as string,
           language: row.language as string,
-          indexedAt: row.indexed_at as string | undefined,
+          indexedAt: (row.indexed_at as string) ?? undefined,
         });
       }
       stmt.reset();
 
       // Sort by score descending and trim to k (FTS4 has no ORDER BY rank)
       results.sort((a, b) => b.textScore - a.textScore);
-      results.length = Math.min(results.length, k);
+      return results.slice(0, k);
     } catch (err: unknown) {
       this.ftsSearchStmt = null; // invalidate on error
       this.logger.warn(`FTS4 search failed: ${(err as Error).message}`);
@@ -615,19 +633,22 @@ export class HybridSearchService {
     k = 10,
     threshold = 0.0,
   ): Promise<VectorHit[]> {
-    if (!this.isReady) {
+    if (!this.isReady || queryVector.length === 0) {
       return [];
     }
-    if (queryVector.length === 0) {
+
+    // Pre-normalize query vector once (avoids per-row normA recomputation)
+    const qNorm = Math.sqrt(queryVector.reduce((s, v) => s + v * v, 0));
+    if (qNorm === 0) {
       return [];
     }
+    const qNormalized = queryVector.map((v) => v / qNorm);
 
     let stmt: SqlJsStatement;
     try {
       stmt = this.getVectorSearchStmt();
       stmt.bind([HybridSearchService.VECTOR_SCAN_LIMIT]);
     } catch (err) {
-      // Invalidate cached statement on bind failure
       this.vectorSearchStmt = null;
       this.logger.warn(
         `Vector search stmt preparation failed: ${(err as Error).message}`,
@@ -637,31 +658,30 @@ export class HybridSearchService {
 
     const topK: VectorHit[] = [];
     let worstTopKScore = -Infinity;
-    let rowsProcessed = 0;
+    let yieldDeadline = performance.now() + HybridSearchService.YIELD_BUDGET_MS;
 
     while (stmt.step()) {
       const row = stmt.getAsObject();
-      const vectorBlob = row.vector as Uint8Array;
-      if (!vectorBlob || vectorBlob.length === 0) {
+      const vectorBlob = row.vector as Uint8Array | null;
+      if (!vectorBlob?.length) {
         continue;
       }
 
-      const vector = new Float32Array(
-        vectorBlob.buffer,
-        vectorBlob.byteOffset,
-        vectorBlob.byteLength / 4,
-      );
+      // Aligned copy: prevents RangeError when byteOffset % 4 !== 0
+      const aligned = new ArrayBuffer(vectorBlob.byteLength);
+      new Uint8Array(aligned).set(vectorBlob);
+      const vector = new Float32Array(aligned);
 
       // Dimension guard: skip mismatched vectors
       if (vector.length !== queryVector.length) {
         continue;
       }
 
-      const score = cosineSimilarity(queryVector, vector);
+      // Optimized: query is pre-normalized, only compute dot + dbNorm
+      const score = dotProductNormalized(qNormalized, vector);
       if (score < threshold) {
         continue;
       }
-      // Early exit: if we already have k items and this score can't beat the worst, skip
       if (topK.length >= k && score <= worstTopKScore) {
         continue;
       }
@@ -675,23 +695,22 @@ export class HybridSearchService {
         vectorScore: score,
         chunkType: row.chunk_type as string,
         language: row.language as string,
-        indexedAt: row.indexed_at as string | undefined,
+        indexedAt: (row.indexed_at as string) ?? undefined,
       };
 
-      // Binary-search insert to maintain sorted order: O(log k) per row
       insertSortedVectorHit(topK, hit, k);
       worstTopKScore = topK[topK.length - 1]?.vectorScore ?? -Infinity;
 
-      // Yield to keep the extension host responsive
-      if (++rowsProcessed % HybridSearchService.YIELD_INTERVAL === 0) {
+      // Time-based yield: adaptive, prevents frame drops regardless of vector size
+      if (performance.now() > yieldDeadline) {
         await new Promise((resolve) => setImmediate(resolve));
+        yieldDeadline = performance.now() + HybridSearchService.YIELD_BUDGET_MS;
       }
     }
 
     try {
       stmt.reset();
     } catch {
-      // If reset fails, invalidate so next call gets a fresh statement
       this.vectorSearchStmt = null;
     }
 
@@ -778,18 +797,18 @@ function insertSortedVectorHit(
   }
 }
 
-function cosineSimilarity(a: number[], b: Float32Array): number {
-  if (a.length !== b.length) {
-    return 0; // Caller's threshold guard handles this; resilient to schema changes
-  }
+/**
+ * Dot product between a pre-normalized query vector and an unnormalized db vector.
+ * Since the query is already unit-length, we only need dot / ||db||.
+ * Saves ~25% of inner-loop work vs full cosine similarity.
+ */
+function dotProductNormalized(qNorm: number[], db: Float32Array): number {
   let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
+  let dbNormSq = 0;
+  for (let i = 0; i < qNorm.length; i++) {
+    dot += qNorm[i] * db[i];
+    dbNormSq += db[i] * db[i];
   }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
+  const dbNorm = Math.sqrt(dbNormSq);
+  return dbNorm === 0 ? 0 : dot / dbNorm;
 }

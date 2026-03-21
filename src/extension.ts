@@ -285,8 +285,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // Initialize shared vector store (used by AstIndexingService + ContextRetriever)
     const vectorStore = SqliteVectorStore.getInstance();
     const hybridSearch = HybridSearchService.getInstance();
-    vectorStore.onInitialized((db) => hybridSearch.initializeFts(db));
-    vectorStore.onDisposing(() => hybridSearch.dispose());
+    context.subscriptions.push(
+      vectorStore.onInitialized((db) => hybridSearch.initializeFts(db)),
+      vectorStore.onDisposing(() => hybridSearch.dispose()),
+    );
     await vectorStore.initialize(context);
     context.subscriptions.push(vectorStore);
 
