@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codebuddy.dev/schemas/access-v1.json",
+  "title": "CodeBuddy Access Control Config",
+  "description": "Controls who can use the CodeBuddy agent in this workspace.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for editor autocompletion."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["open", "allow", "deny"],
+      "default": "open",
+      "description": "Access control mode: open (no restrictions), allow (only listed users), deny (block listed users)."
+    },
+    "users": {
+      "type": "array",
+      "description": "User identifiers (emails or GitHub usernames) for the allowlist (mode=allow) or denylist (mode=deny).",
+      "maxItems": 200,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "User email or GitHub username."
+      }
+    },
+    "admins": {
+      "type": "array",
+      "description": "Users with admin privileges — always allowed and can perform sensitive operations without escalation.",
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Admin user email or GitHub username."
+      }
+    },
+    "logDenied": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether to log denied access attempts."
+    }
+  },
+  "additionalProperties": false
+}

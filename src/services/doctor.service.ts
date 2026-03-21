@@ -17,6 +17,7 @@ import { inputValidatorCheck } from "./doctor-checks/input-validator.check";
 import { apiKeyAuditCheck } from "./doctor-checks/api-key-audit.check";
 import { credentialProxyCheck } from "./doctor-checks/credential-proxy.check";
 import { permissionScopeCheck } from "./doctor-checks/permission-scope.check";
+import { accessControlCheck } from "./doctor-checks/access-control.check";
 
 // Re-export types for external consumers
 export type { DoctorFinding } from "./doctor-checks/types";
@@ -46,6 +47,7 @@ export class DoctorService implements vscode.Disposable {
     securityConfigCheck,
     credentialProxyCheck,
     permissionScopeCheck,
+    accessControlCheck,
   ];
 
   private secretStorage: SecretStorageService | undefined;

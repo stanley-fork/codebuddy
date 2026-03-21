@@ -71,6 +71,7 @@ import {
   DoctorHandler,
 } from "./handlers";
 import { HandlerContext, MessageHandlerRegistry } from "./handlers/types";
+import { AccessControlService } from "../services/access-control.service";
 
 export interface ImessageAndSystemInstruction {
   systemInstruction: string;
@@ -684,6 +685,38 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
               break;
             }
             case "user-input": {
+              // ── Access control gate (fail-closed, async identity refresh) ──
+              const acl = AccessControlService.getInstance();
+              if (acl.isServiceInitialized()) {
+                const allowed = await acl.checkAccessAsync("user-input");
+                if (!allowed) {
+                  await this.currentWebView?.webview.postMessage({
+                    type: "onStreamError",
+                    payload: {
+                      requestId: message.requestId,
+                      error:
+                        "Access denied. Your user account is not authorized to use CodeBuddy in this workspace. " +
+                        "Contact a workspace admin to update .codebuddy/access.json.",
+                    },
+                  });
+                  break;
+                }
+              } else {
+                // Service not yet initialized — deny and log rather than silently allow.
+                this.logger.warn(
+                  "AccessControlService not initialized — denying user-input for safety",
+                );
+                await this.currentWebView?.webview.postMessage({
+                  type: "onStreamError",
+                  payload: {
+                    requestId: message.requestId,
+                    error:
+                      "Extension is still initializing. Please retry in a moment.",
+                  },
+                });
+                break;
+              }
+
               this.UserMessageCounter += 1;
               const selectedGenerativeAiModel = getConfigValue(
                 "generativeAi.option",
