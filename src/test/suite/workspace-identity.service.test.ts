@@ -155,4 +155,51 @@ suite("WorkspaceIdentityService", () => {
       /No workspace root/,
     );
   });
+
+  // ── validatePathWithinWorkspace (non-throwing variant for LLM tools) ──
+
+  test("validatePathWithinWorkspace returns resolved path for safe relative path", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize("/tmp/workspace");
+    assert.strictEqual(
+      svc.validatePathWithinWorkspace("src/index.ts"),
+      "/tmp/workspace/src/index.ts",
+    );
+  });
+
+  test("validatePathWithinWorkspace returns resolved path for safe absolute path", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize("/tmp/workspace");
+    assert.strictEqual(
+      svc.validatePathWithinWorkspace("/tmp/workspace/src/index.ts"),
+      "/tmp/workspace/src/index.ts",
+    );
+  });
+
+  test("validatePathWithinWorkspace returns undefined for traversal", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize("/tmp/workspace");
+    assert.strictEqual(
+      svc.validatePathWithinWorkspace("../../etc/passwd"),
+      undefined,
+    );
+  });
+
+  test("validatePathWithinWorkspace returns undefined for out-of-workspace absolute path", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize("/tmp/workspace");
+    assert.strictEqual(
+      svc.validatePathWithinWorkspace("/etc/passwd"),
+      undefined,
+    );
+  });
+
+  test("validatePathWithinWorkspace returns undefined when no workspace", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize(undefined);
+    assert.strictEqual(
+      svc.validatePathWithinWorkspace("src/foo.ts"),
+      undefined,
+    );
+  });
 });
