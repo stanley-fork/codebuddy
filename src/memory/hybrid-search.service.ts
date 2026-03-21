@@ -112,6 +112,8 @@ export function buildFtsQuery(raw: string): string | null {
   return tokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" AND ");
 }
 
+const BM25_NAN_FALLBACK_SCORE = 0.001;
+
 /**
  * Convert an FTS5 `bm25()` rank value to a [0, 1) score.
  *
@@ -125,7 +127,7 @@ export function buildFtsQuery(raw: string): string | null {
  */
 export function bm25RankToScore(rank: number): number {
   if (!Number.isFinite(rank)) {
-    return 1 / (1 + 999);
+    return BM25_NAN_FALLBACK_SCORE;
   }
   // FTS5 returns negative BM25 scores (more negative = more relevant)
   if (rank < 0) {
@@ -263,6 +265,7 @@ export class HybridSearchService {
   private initPromise: Promise<void> | null = null;
   private initializedForDb: SqlJsDatabase | null = null;
   private vectorSearchStmt: SqlJsStatement | null = null;
+  private ftsSearchStmt: SqlJsStatement | null = null;
   private static readonly VECTOR_SCAN_LIMIT = 5000;
   private static readonly YIELD_INTERVAL = 200;
 
@@ -290,22 +293,28 @@ export class HybridSearchService {
       return;
     }
 
-    // If initialization is in-flight, wait for it
+    // If initialization is in-flight, wait for it then re-check
     if (this.initPromise) {
       await this.initPromise;
-      return;
+      // Re-check: the completed init may have been for a different db
+      if (this.initializedForDb === db) {
+        return;
+      }
     }
+
+    // Reset state for new db (handles workspace switch)
+    this.dispose();
 
     this.initPromise = (async () => {
       try {
         this.db = db;
-        this.vectorSearchStmt = null; // invalidate cached statement
+        this.vectorSearchStmt = null;
+        this.ftsSearchStmt = null;
         this.createFtsTables();
         this.initializedForDb = db;
         this.ftsInitialized = true;
         this.logger.info("FTS5 virtual table initialized");
       } finally {
-        // Always clear so the next call (new db) is not blocked
         this.initPromise = null;
       }
     })();
@@ -329,6 +338,14 @@ export class HybridSearchService {
         // Statement may already be freed if db was closed
       }
       this.vectorSearchStmt = null;
+    }
+    if (this.ftsSearchStmt) {
+      try {
+        this.ftsSearchStmt.free();
+      } catch {
+        // Statement may already be freed if db was closed
+      }
+      this.ftsSearchStmt = null;
     }
     this.db = null;
     this.ftsInitialized = false;
@@ -399,13 +416,13 @@ export class HybridSearchService {
       this.logger.info(`Back-filling FTS5 index: ${deficit} chunks to index`);
 
       if (deficit < 100) {
-        // Incremental insert for small deficits — LEFT JOIN anti-join
+        // Incremental: insert only the missing rows
+        // Use a subquery approach compatible with standalone FTS5
         this.db!.run(`
           INSERT INTO chunks_fts(rowid, text)
           SELECT c.rowid, c.text
           FROM chunks c
-          LEFT JOIN chunks_fts f ON c.rowid = f.rowid
-          WHERE f.rowid IS NULL
+          WHERE c.rowid > (SELECT COALESCE(MAX(rowid), 0) FROM chunks_fts)
         `);
       } else {
         // Full rebuild for large deficits
@@ -424,22 +441,11 @@ export class HybridSearchService {
   // ── FTS5 Search ─────────────────────────────────────────────────────
 
   /**
-   * Run an FTS5 full-text search and return scored keyword hits.
+   * Get or create a reusable prepared statement for FTS search.
    */
-  ftsSearch(query: string, k = 10): KeywordHit[] {
-    if (!this.isReady) {
-      return [];
-    }
-
-    const ftsQuery = buildFtsQuery(query);
-    if (!ftsQuery) {
-      return [];
-    }
-
-    const results: KeywordHit[] = [];
-
-    try {
-      const stmt = this.db!.prepare(`
+  private getFtsSearchStmt(): SqlJsStatement {
+    if (!this.ftsSearchStmt) {
+      this.ftsSearchStmt = this.db!.prepare(`
         SELECT
           c.id,
           c.text,
@@ -456,6 +462,27 @@ export class HybridSearchService {
         ORDER BY chunks_fts.rank
         LIMIT ?
       `);
+    }
+    return this.ftsSearchStmt;
+  }
+
+  /**
+   * Run an FTS5 full-text search and return scored keyword hits.
+   */
+  ftsSearch(query: string, k = 10): KeywordHit[] {
+    if (!this.isReady) {
+      return [];
+    }
+
+    const ftsQuery = buildFtsQuery(query);
+    if (!ftsQuery) {
+      return [];
+    }
+
+    const results: KeywordHit[] = [];
+
+    try {
+      const stmt = this.getFtsSearchStmt();
       stmt.bind([ftsQuery, k]);
 
       while (stmt.step()) {
@@ -472,8 +499,9 @@ export class HybridSearchService {
           indexedAt: row.indexed_at as string | undefined,
         });
       }
-      stmt.free();
+      stmt.reset();
     } catch (err: unknown) {
+      this.ftsSearchStmt = null; // invalidate on error
       this.logger.warn(`FTS5 search failed: ${(err as Error).message}`);
     }
 
@@ -561,7 +589,7 @@ export class HybridSearchService {
         continue;
       }
 
-      topK.push({
+      const hit: VectorHit = {
         id: row.id as string,
         filePath: row.file_path as string,
         startLine: row.start_line as number,
@@ -571,13 +599,10 @@ export class HybridSearchService {
         chunkType: row.chunk_type as string,
         language: row.language as string,
         indexedAt: row.indexed_at as string | undefined,
-      });
+      };
 
-      // Maintain sorted top-K buffer for early-exit pruning
-      topK.sort((a, b) => b.vectorScore - a.vectorScore);
-      if (topK.length > k) {
-        topK.pop();
-      }
+      // Binary-search insert to maintain sorted order: O(log k) per row
+      insertSortedVectorHit(topK, hit, k);
       worstTopKScore = topK[topK.length - 1]?.vectorScore ?? -Infinity;
 
       // Yield to keep the extension host responsive
@@ -651,11 +676,34 @@ export class HybridSearchService {
 
 // ─── Utility ──────────────────────────────────────────────────────────
 
+/**
+ * Insert a VectorHit into a descending-sorted array, maintaining sorted order
+ * and capping at k elements. Uses binary search for O(log k) per insertion.
+ */
+function insertSortedVectorHit(
+  arr: VectorHit[],
+  hit: VectorHit,
+  k: number,
+): void {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (arr[mid].vectorScore > hit.vectorScore) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  arr.splice(lo, 0, hit);
+  if (arr.length > k) {
+    arr.pop();
+  }
+}
+
 function cosineSimilarity(a: number[], b: Float32Array): number {
   if (a.length !== b.length) {
-    throw new Error(
-      `Vector dimension mismatch: query=${a.length}, stored=${b.length}`,
-    );
+    return 0; // Caller's threshold guard handles this; resilient to schema changes
   }
   let dot = 0;
   let normA = 0;

@@ -700,14 +700,14 @@
             "default": 0.7,
             "minimum": 0,
             "maximum": 1,
-            "description": "Weight for vector (semantic) scores in hybrid search. Higher values favour semantic similarity."
+            "description": "Weight for vector (semantic) scores in hybrid search. Higher values favour semantic similarity. Weights are automatically normalised so vectorWeight + textWeight = 1."
           },
           "codebuddy.hybridSearch.textWeight": {
             "type": "number",
             "default": 0.3,
             "minimum": 0,
             "maximum": 1,
-            "description": "Weight for BM25 (keyword) scores in hybrid search. Higher values favour exact keyword matches."
+            "description": "Weight for BM25 (keyword) scores in hybrid search. Higher values favour exact keyword matches. Weights are automatically normalised so vectorWeight + textWeight = 1."
           },
           "codebuddy.hybridSearch.topK": {
             "type": "integer",
