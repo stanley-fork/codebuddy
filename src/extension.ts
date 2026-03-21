@@ -30,6 +30,7 @@ import { Memory } from "./memory/base";
 import { Orchestrator } from "./orchestrator";
 import { AgentRunningGuardService } from "./services/agent-running-guard.service";
 import { CompletionStatusBarService } from "./services/completion-status-bar.service";
+import { ConcurrencyQueueService } from "./services/concurrency-queue.service";
 import { ContextRetriever } from "./services/context-retriever";
 import { InlineCompletionService } from "./services/inline-completion.service";
 import { OutputManager } from "./services/output-manager";
@@ -1116,6 +1117,77 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize Status Bar
     const completionStatusBar = new CompletionStatusBarService(context);
+
+    // Initialize Concurrency Queue status bar + commands
+    const concurrencyQueue = ConcurrencyQueueService.getInstance();
+    concurrencyQueue.initStatusBar(context);
+    context.subscriptions.push(concurrencyQueue);
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "codebuddy.concurrencyQueue.showStatus",
+        async () => {
+          const snap = concurrencyQueue.getSnapshot();
+          const waiting = concurrencyQueue.getWaitingIds();
+
+          if (waiting.length === 0) {
+            vscode.window.showInformationMessage(
+              `CodeBuddy: ${snap.running}/${snap.maxConcurrent} agent slots in use. No requests queued.`,
+            );
+            return;
+          }
+
+          const CANCEL_ALL_ID = "__cancel_all__";
+          const items: vscode.QuickPickItem[] = [
+            ...waiting.map((w) => ({
+              label: `$(clock) ${w.label}`,
+              description: w.id,
+              detail: "Select to cancel this request",
+            })),
+            {
+              label: "$(trash) Cancel All Queued",
+              description: CANCEL_ALL_ID,
+              detail: `Cancel all ${waiting.length} queued requests`,
+            },
+          ];
+
+          const picked = await vscode.window.showQuickPick(items, {
+            title: `CodeBuddy Agent Queue — ${snap.running}/${snap.maxConcurrent} slots, ${waiting.length} queued`,
+            placeHolder: "Select an item to cancel, or cancel all",
+          });
+
+          if (!picked) return;
+
+          if (picked.description === CANCEL_ALL_ID) {
+            const count = concurrencyQueue.cancelAllWaiting();
+            vscode.window.showInformationMessage(
+              `Cancelled ${count} queued requests.`,
+            );
+          } else if (picked.description) {
+            const cancelled = concurrencyQueue.cancel(picked.description);
+            if (cancelled) {
+              vscode.window.showInformationMessage(
+                `Cancelled: ${picked.label.replace(/^\$\([^)]+\)\s*/, "")}`,
+              );
+            }
+          }
+        },
+      ),
+    );
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "codebuddy.concurrencyQueue.cancelAll",
+        () => {
+          const count = concurrencyQueue.cancelAllWaiting();
+          vscode.window.showInformationMessage(
+            count > 0
+              ? `Cancelled ${count} queued requests.`
+              : "No queued requests to cancel.",
+          );
+        },
+      ),
+    );
 
     // Register Completion Commands
     context.subscriptions.push(

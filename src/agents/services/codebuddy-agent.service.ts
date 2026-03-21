@@ -51,6 +51,12 @@ import {
   ProviderFailoverService,
   classifyFailoverReason,
 } from "../../services/provider-failover.service";
+import {
+  ConcurrencyQueueService,
+  ConcurrencyQueueCancelledError,
+  ConcurrencyQueueFullError,
+  QueuePriority,
+} from "../../services/concurrency-queue.service";
 import { TOOL_NAMES } from "../constants/tool-names";
 import { SqlJsCheckpointSaver } from "../../services/sqljs-checkpoint-saver";
 import {
@@ -1081,549 +1087,469 @@ export class CodeBuddyAgentService {
       );
     }
 
-    const conversationId = threadId ?? `thread-${Date.now()}`;
-    const streamManager = new StreamManager({
-      maxBufferSize: 10,
-      flushInterval: 50,
-      enableBackPressure: true,
-    });
-    this.activeStreams.set(conversationId, streamManager);
+    const conversationId = threadId ?? `thread-${randomUUID()}`;
 
-    // Notify guard service that agent is starting (enables close confirmation)
-    const guardService = AgentRunningGuardService.getInstance();
-    await guardService.notifyAgentStarted();
-
-    // Stream-scoped mutable state — never shared across concurrent streams
-    const ctx: IStreamContext = {
-      conversationId,
-      pendingToolCalls: new Map(),
-      toolCallCounts: new Map(),
-      fileEditCounts: new Map(),
-      accumulatedContent: "",
-      eventCount: 0,
-      totalToolInvocations: 0,
-      startTime: Date.now(),
-      hasErrored: false,
-      forceStopReason: null,
-      agentState: "planning",
-      toolSpans: new Map(),
-    };
-
-    // Snapshot safety limits once per stream session (O(1) config reads)
-    const limits = readAgentSafetyLimits();
-
-    const tracer = trace.getTracer("codebuddy-agent-service");
-    const span = tracer.startSpan("streamAgent", {
-      attributes: {
-        thread_id: conversationId,
-        user_message: sanitizedMessage.substring(0, 500),
-      },
-    });
-    const parentCtx = trace.setSpan(context.active(), span);
-    const tracing: TraceBundle = { tracer, parentCtx };
-
-    // Cost tracking — resolve current provider/model for pricing lookup
-    const costTracker = CostTrackingService.getInstance();
-    const providerName = getGenerativeAiModel() ?? "unknown";
-    let currentModelName = "unknown";
+    // ── Concurrency gate ──────────────────────────────────────
+    // Acquire a slot before setting up the stream. If all slots are taken,
+    // the caller blocks until one frees up (or the queued item is cancelled).
+    const concurrencyQueue = ConcurrencyQueueService.getInstance();
+    let releaseSlot: (() => void) | null = null;
     try {
-      const cfg = getAPIKeyAndModel(providerName.toLowerCase());
-      currentModelName = cfg.model ?? providerName;
-    } catch {
-      // Non-critical — fallback pricing will be used
-    }
-
-    // Enrich root span with model metadata for the trace detail panel
-    span.setAttribute("gen_ai.system", providerName);
-    span.setAttribute("gen_ai.request.model", currentModelName);
-
-    try {
-      const agent = await this.getAgent();
-      const streamId = await streamManager.startStream(requestId);
-      this.logger.log(
-        LogLevel.INFO,
-        `Starting stream ${streamId} for thread ${conversationId}`,
+      const queueLabel =
+        sanitizedMessage.trim().substring(0, 80) || "(empty request)";
+      releaseSlot = await concurrencyQueue.acquire(
+        conversationId,
+        queueLabel,
+        QueuePriority.USER,
       );
-
-      // Emit planning event at start
-      yield {
-        type: StreamEventType.PLANNING,
-        content: "Analyzing your request...",
-        metadata: { threadId: conversationId, timestamp: Date.now() },
-      };
-
-      // Emit provider health for the webview indicator
-      const providerHealth = this.failoverService.getAllHealth();
-      if (providerHealth.length > 0) {
+    } catch (err) {
+      if (
+        err instanceof ConcurrencyQueueCancelledError ||
+        err instanceof ConcurrencyQueueFullError
+      ) {
         yield {
-          type: StreamEventType.METADATA,
-          content: "provider_health",
+          type: StreamEventType.ERROR,
+          content:
+            err instanceof ConcurrencyQueueFullError
+              ? "The agent queue is full. Please wait or cancel pending requests."
+              : "Your request was cancelled while waiting in the queue.",
           metadata: {
-            threadId: conversationId,
-            timestamp: Date.now(),
-            status: "provider_health",
-            activeProvider: providerName,
-            health: providerHealth,
+            reason:
+              err instanceof ConcurrencyQueueFullError
+                ? "queue_full"
+                : "queue_cancelled",
           },
         };
+        return;
+      }
+      throw err;
+    }
+
+    // ── Everything below is inside a guaranteed-release scope ──
+    try {
+      const streamManager = new StreamManager({
+        maxBufferSize: 10,
+        flushInterval: 50,
+        enableBackPressure: true,
+      });
+      this.activeStreams.set(conversationId, streamManager);
+
+      // Notify guard service that agent is starting (enables close confirmation)
+      const guardService = AgentRunningGuardService.getInstance();
+      await guardService.notifyAgentStarted();
+
+      // Stream-scoped mutable state — never shared across concurrent streams
+      const ctx: IStreamContext = {
+        conversationId,
+        pendingToolCalls: new Map(),
+        toolCallCounts: new Map(),
+        fileEditCounts: new Map(),
+        accumulatedContent: "",
+        eventCount: 0,
+        totalToolInvocations: 0,
+        startTime: Date.now(),
+        hasErrored: false,
+        forceStopReason: null,
+        agentState: "planning",
+        toolSpans: new Map(),
+      };
+
+      // Snapshot safety limits once per stream session (O(1) config reads)
+      const limits = readAgentSafetyLimits();
+
+      const tracer = trace.getTracer("codebuddy-agent-service");
+      const span = tracer.startSpan("streamAgent", {
+        attributes: {
+          thread_id: conversationId,
+          user_message: sanitizedMessage.substring(0, 500),
+        },
+      });
+      const parentCtx = trace.setSpan(context.active(), span);
+      const tracing: TraceBundle = { tracer, parentCtx };
+
+      // Cost tracking — resolve current provider/model for pricing lookup
+      const costTracker = CostTrackingService.getInstance();
+      const providerName = getGenerativeAiModel() ?? "unknown";
+      let currentModelName = "unknown";
+      try {
+        const cfg = getAPIKeyAndModel(providerName.toLowerCase());
+        currentModelName = cfg.model ?? providerName;
+      } catch {
+        // Non-critical — fallback pricing will be used
       }
 
-      // Create a checkpoint before the agent starts modifying files
-      try {
-        const checkpointSvc = CheckpointService.getInstance();
-        await checkpointSvc.createCheckpoint(
-          conversationId,
-          `Before: ${sanitizedMessage.slice(0, 60)}${sanitizedMessage.length > 60 ? "…" : ""}`,
-        );
-      } catch (cpError) {
-        this.logger.warn(
-          `Failed to create checkpoint: ${cpError instanceof Error ? cpError.message : cpError}`,
-        );
-      }
+      // Enrich root span with model metadata for the trace detail panel
+      span.setAttribute("gen_ai.system", providerName);
+      span.setAttribute("gen_ai.request.model", currentModelName);
 
-      // ── Context Window Compaction ────────────────────────────────
-      // Check existing thread messages and compact if nearing the context
-      // window limit. Uses a cache to skip redundant token counting.
       try {
-        const compactionService = ContextWindowCompactionService.getInstance();
-        if (compactionService && agent.getState) {
-          const stateConfig = {
-            configurable: { thread_id: conversationId },
+        const agent = await this.getAgent();
+        const streamId = await streamManager.startStream(requestId);
+        this.logger.log(
+          LogLevel.INFO,
+          `Starting stream ${streamId} for thread ${conversationId}`,
+        );
+
+        // Emit planning event at start
+        yield {
+          type: StreamEventType.PLANNING,
+          content: "Analyzing your request...",
+          metadata: { threadId: conversationId, timestamp: Date.now() },
+        };
+
+        // Emit provider health for the webview indicator
+        const providerHealth = this.failoverService.getAllHealth();
+        if (providerHealth.length > 0) {
+          yield {
+            type: StreamEventType.METADATA,
+            content: "provider_health",
+            metadata: {
+              threadId: conversationId,
+              timestamp: Date.now(),
+              status: "provider_health",
+              activeProvider: providerName,
+              health: providerHealth,
+            },
           };
-          const state = await agent.getState(stateConfig);
-          const existingMessages = (state?.values?.messages ??
-            []) as LangGraphMessage[];
+        }
 
-          if (
-            existingMessages.length > 0 &&
-            this.shouldCheckCompaction(conversationId, existingMessages.length)
-          ) {
-            const contextWindowTokens = resolveContextWindow(currentModelName);
-            const systemPromptTokens = 2000;
+        // Create a checkpoint before the agent starts modifying files
+        try {
+          const checkpointSvc = CheckpointService.getInstance();
+          await checkpointSvc.createCheckpoint(
+            conversationId,
+            `Before: ${sanitizedMessage.slice(0, 60)}${sanitizedMessage.length > 60 ? "…" : ""}`,
+          );
+        } catch (cpError) {
+          this.logger.warn(
+            `Failed to create checkpoint: ${cpError instanceof Error ? cpError.message : cpError}`,
+          );
+        }
 
-            const compactionResult = await compactionService.compact(
-              existingMessages.map(
-                (m): CompactionMessage => ({
-                  role: langGraphRoleToCompactionRole(m),
-                  content:
-                    typeof m.content === "string"
-                      ? m.content
-                      : JSON.stringify(m.content ?? ""),
-                  tool_call_id: m.tool_call_id,
-                  tool_calls: m.tool_calls,
-                }),
-              ),
-              {
-                maxContextTokens: contextWindowTokens,
-                systemPromptTokens,
-              },
-            );
+        // ── Context Window Compaction ────────────────────────────────
+        // Check existing thread messages and compact if nearing the context
+        // window limit. Uses a cache to skip redundant token counting.
+        try {
+          const compactionService =
+            ContextWindowCompactionService.getInstance();
+          if (compactionService && agent.getState) {
+            const stateConfig = {
+              configurable: { thread_id: conversationId },
+            };
+            const state = await agent.getState(stateConfig);
+            const existingMessages = (state?.values?.messages ??
+              []) as LangGraphMessage[];
 
-            // Update rate-limit cache (bounded)
-            this.setCompactionCache(conversationId, {
-              messageCount: existingMessages.length,
-              lastCompactionAt: Date.now(),
-            });
+            if (
+              existingMessages.length > 0 &&
+              this.shouldCheckCompaction(
+                conversationId,
+                existingMessages.length,
+              )
+            ) {
+              const contextWindowTokens =
+                resolveContextWindow(currentModelName);
+              const systemPromptTokens = 2000;
 
-            // Emit context window warning/critical events
-            if (compactionResult.warningLevel !== "none") {
-              yield {
-                type: StreamEventType.METADATA,
-                content: "context_window_status",
-                metadata: {
-                  threadId: conversationId,
-                  timestamp: Date.now(),
-                  status: "context_window_status",
-                  warningLevel: compactionResult.warningLevel,
-                  usageTokens: compactionResult.originalTokens,
-                  budgetTokens: contextWindowTokens,
-                  compacted: compactionResult.compacted,
-                  tier: compactionResult.tier,
+              const compactionResult = await compactionService.compact(
+                existingMessages.map(
+                  (m): CompactionMessage => ({
+                    role: langGraphRoleToCompactionRole(m),
+                    content:
+                      typeof m.content === "string"
+                        ? m.content
+                        : JSON.stringify(m.content ?? ""),
+                    tool_call_id: m.tool_call_id,
+                    tool_calls: m.tool_calls,
+                  }),
+                ),
+                {
+                  maxContextTokens: contextWindowTokens,
+                  systemPromptTokens,
                 },
-              };
-            }
-
-            // If compaction was performed, update the thread state
-            if (compactionResult.compacted && agent.updateState) {
-              this.logger.info(
-                `Compacted thread ${conversationId}: ` +
-                  `${compactionResult.originalCount} → ${compactionResult.finalCount} messages, ` +
-                  `${compactionResult.originalTokens} → ${compactionResult.finalTokens} tokens ` +
-                  `(tier ${compactionResult.tier})`,
               );
-              // Convert CompactionMessages back to LangGraph-compatible format
-              const langchainMessages = compactionResult.messages.map((m) => {
-                switch (m.role) {
-                  case "user":
-                    return new HumanMessage(m.content);
-                  case "assistant": {
-                    const aiMsg = new AIMessage(m.content);
-                    if (m.tool_calls?.length) {
-                      (aiMsg as unknown as Record<string, unknown>).tool_calls =
-                        m.tool_calls;
+
+              // Update rate-limit cache (bounded)
+              this.setCompactionCache(conversationId, {
+                messageCount: existingMessages.length,
+                lastCompactionAt: Date.now(),
+              });
+
+              // Emit context window warning/critical events
+              if (compactionResult.warningLevel !== "none") {
+                yield {
+                  type: StreamEventType.METADATA,
+                  content: "context_window_status",
+                  metadata: {
+                    threadId: conversationId,
+                    timestamp: Date.now(),
+                    status: "context_window_status",
+                    warningLevel: compactionResult.warningLevel,
+                    usageTokens: compactionResult.originalTokens,
+                    budgetTokens: contextWindowTokens,
+                    compacted: compactionResult.compacted,
+                    tier: compactionResult.tier,
+                  },
+                };
+              }
+
+              // If compaction was performed, update the thread state
+              if (compactionResult.compacted && agent.updateState) {
+                this.logger.info(
+                  `Compacted thread ${conversationId}: ` +
+                    `${compactionResult.originalCount} → ${compactionResult.finalCount} messages, ` +
+                    `${compactionResult.originalTokens} → ${compactionResult.finalTokens} tokens ` +
+                    `(tier ${compactionResult.tier})`,
+                );
+                // Convert CompactionMessages back to LangGraph-compatible format
+                const langchainMessages = compactionResult.messages.map((m) => {
+                  switch (m.role) {
+                    case "user":
+                      return new HumanMessage(m.content);
+                    case "assistant": {
+                      const aiMsg = new AIMessage(m.content);
+                      if (m.tool_calls?.length) {
+                        (
+                          aiMsg as unknown as Record<string, unknown>
+                        ).tool_calls = m.tool_calls;
+                      }
+                      return aiMsg;
                     }
-                    return aiMsg;
+                    case "tool":
+                      return new ToolMessage({
+                        content: m.content,
+                        tool_call_id: m.tool_call_id ?? "unknown",
+                      });
+                    case "system":
+                      return new SystemMessage(m.content);
+                    default:
+                      return new HumanMessage(m.content);
                   }
-                  case "tool":
-                    return new ToolMessage({
-                      content: m.content,
-                      tool_call_id: m.tool_call_id ?? "unknown",
-                    });
-                  case "system":
-                    return new SystemMessage(m.content);
-                  default:
-                    return new HumanMessage(m.content);
-                }
-              });
-              await agent.updateState(stateConfig, {
-                messages: langchainMessages,
-              });
+                });
+                await agent.updateState(stateConfig, {
+                  messages: langchainMessages,
+                });
+              }
             }
           }
+        } catch (compactionError) {
+          // Compaction is non-critical — log and proceed
+          this.logger.warn(
+            `Context window compaction failed: ${compactionError instanceof Error ? compactionError.message : compactionError}`,
+          );
         }
-      } catch (compactionError) {
-        // Compaction is non-critical — log and proceed
-        this.logger.warn(
-          `Context window compaction failed: ${compactionError instanceof Error ? compactionError.message : compactionError}`,
-        );
-      }
 
-      ctx.agentState = "running";
+        ctx.agentState = "running";
 
-      const config = {
-        configurable: { thread_id: conversationId },
-        recursionLimit: 100,
-      };
-      let streamIterator: AgentStreamIterator = (
-        await agent.stream(
-          { messages: [{ role: "user", content: sanitizedMessage }] },
-          config,
-        )
-      )[Symbol.asyncIterator]();
+        const config = {
+          configurable: { thread_id: conversationId },
+          recursionLimit: 100,
+        };
+        let streamIterator: AgentStreamIterator = (
+          await agent.stream(
+            { messages: [{ role: "user", content: sanitizedMessage }] },
+            config,
+          )
+        )[Symbol.asyncIterator]();
 
-      const recovery = this.errorRecovery;
-      let retryAttempt = 0;
+        const recovery = this.errorRecovery;
+        let retryAttempt = 0;
 
-      // Labeled loop: on transient errors we retry with a nudge message
-      // instead of surfacing the error to the user.
-      streamLoop: while (true) {
-        try {
-          while (true) {
-            const { value: event, done } = await streamIterator.next();
-            if (done) break;
-            // Stop immediately if we've already errored
-            if (ctx.hasErrored) break;
+        // Labeled loop: on transient errors we retry with a nudge message
+        // instead of surfacing the error to the user.
+        streamLoop: while (true) {
+          try {
+            while (true) {
+              const { value: event, done } = await streamIterator.next();
+              if (done) break;
+              // Stop immediately if we've already errored
+              if (ctx.hasErrored) break;
 
-            // DEBUG: Log raw events from agent (reduce verbosity in production)
-            this.logger.debug(
-              `[STREAM] Event #${ctx.eventCount + 1}: ${JSON.stringify(Object.keys(event || {}))}`,
-            );
+              // DEBUG: Log raw events from agent (reduce verbosity in production)
+              this.logger.debug(
+                `[STREAM] Event #${ctx.eventCount + 1}: ${JSON.stringify(Object.keys(event || {}))}`,
+              );
 
-            ctx.eventCount++;
+              ctx.eventCount++;
 
-            // Check safety limits
-            const elapsed = Date.now() - ctx.startTime;
-            const safetyResult = this.safetyGuard.checkLimits(
-              ctx.eventCount,
-              ctx.totalToolInvocations,
-              elapsed,
-              limits,
-            );
-
-            if (safetyResult.shouldStop) {
-              const limitLabel = this.safetyGuard.buildStopMessage(
-                safetyResult.reason!,
+              // Check safety limits
+              const elapsed = Date.now() - ctx.startTime;
+              const safetyResult = this.safetyGuard.checkLimits(
                 ctx.eventCount,
                 ctx.totalToolInvocations,
                 elapsed,
+                limits,
               );
 
-              // Ask the user whether to continue or stop
-              yield {
-                type: StreamEventType.METADATA,
-                content: "interrupt_waiting",
-                metadata: {
-                  threadId: conversationId,
-                  status: "interrupt_waiting",
-                  toolName: "Safety limit reached",
-                  description: `${limitLabel} Would you like me to continue?`,
-                },
-              };
-              yield {
-                type: StreamEventType.CHUNK,
-                content: `${limitLabel} Would you like me to continue?`,
-                metadata: { threadId: conversationId, timestamp: Date.now() },
-              };
+              if (safetyResult.shouldStop) {
+                const limitLabel = this.safetyGuard.buildStopMessage(
+                  safetyResult.reason!,
+                  ctx.eventCount,
+                  ctx.totalToolInvocations,
+                  elapsed,
+                );
 
-              const continueGranted =
-                await this.waitForActionConsent(conversationId);
-
-              if (continueGranted) {
-                // User chose to continue — extend the limits and keep going
+                // Ask the user whether to continue or stop
                 yield {
                   type: StreamEventType.METADATA,
-                  content: "interrupt_approved",
+                  content: "interrupt_waiting",
                   metadata: {
                     threadId: conversationId,
-                    status: "interrupt_approved",
+                    status: "interrupt_waiting",
                     toolName: "Safety limit reached",
+                    description: `${limitLabel} Would you like me to continue?`,
                   },
                 };
                 yield {
                   type: StreamEventType.CHUNK,
-                  content: "Continuing...",
+                  content: `${limitLabel} Would you like me to continue?`,
                   metadata: { threadId: conversationId, timestamp: Date.now() },
                 };
 
-                this.safetyGuard.extendLimits(ctx);
-                Object.assign(ctx, this.safetyGuard.buildLimitReset());
-                this.logger.debug(
-                  `[STREAM] Limits extended for thread ${conversationId}: counters reset`,
+                const continueGranted =
+                  await this.waitForActionConsent(conversationId);
+
+                if (continueGranted) {
+                  // User chose to continue — extend the limits and keep going
+                  yield {
+                    type: StreamEventType.METADATA,
+                    content: "interrupt_approved",
+                    metadata: {
+                      threadId: conversationId,
+                      status: "interrupt_approved",
+                      toolName: "Safety limit reached",
+                    },
+                  };
+                  yield {
+                    type: StreamEventType.CHUNK,
+                    content: "Continuing...",
+                    metadata: {
+                      threadId: conversationId,
+                      timestamp: Date.now(),
+                    },
+                  };
+
+                  this.safetyGuard.extendLimits(ctx);
+                  Object.assign(ctx, this.safetyGuard.buildLimitReset());
+                  this.logger.debug(
+                    `[STREAM] Limits extended for thread ${conversationId}: counters reset`,
+                  );
+                  continue;
+                }
+
+                // User denied — stop gracefully
+                ctx.forceStopReason = safetyResult.reason;
+                this.drainToolSpans(
+                  ctx,
+                  SpanStatusCode.ERROR,
+                  "stream_force_stopped",
                 );
+
+                yield {
+                  type: StreamEventType.METADATA,
+                  content: "interrupt_denied",
+                  metadata: {
+                    threadId: conversationId,
+                    status: "interrupt_denied",
+                    toolName: "Safety limit reached",
+                  },
+                };
+
+                // Mark pending tools as completed
+                for (const [toolName, activity] of ctx.pendingToolCalls) {
+                  activity.status = "completed";
+                  activity.endTime = Date.now();
+                  yield {
+                    type: StreamEventType.TOOL_END,
+                    content: JSON.stringify(activity),
+                    metadata: {
+                      toolName,
+                      duration: activity.endTime - activity.startTime,
+                    },
+                  };
+                }
+                ctx.pendingToolCalls.clear();
+
+                yield {
+                  type: StreamEventType.CHUNK,
+                  content: limitLabel,
+                  metadata: {
+                    threadId: conversationId,
+                    reason: ctx.forceStopReason,
+                  },
+                  accumulated: ctx.accumulatedContent
+                    ? `${ctx.accumulatedContent}\n\n${limitLabel}`
+                    : limitLabel,
+                };
+
+                break;
+              }
+
+              const entries = Object.entries(event as Record<string, unknown>);
+
+              const interruptEntry = entries.find(
+                ([nodeName]) => nodeName === "__interrupt__",
+              );
+
+              if (interruptEntry) {
+                const interruptGen = this.handleInterrupt(
+                  interruptEntry as [
+                    string,
+                    IInterruptValue | IInterruptValue[],
+                  ],
+                  ctx,
+                  agent,
+                  config,
+                );
+                let interruptNext = await interruptGen.next();
+                while (!interruptNext.done) {
+                  yield interruptNext.value;
+                  interruptNext = await interruptGen.next();
+                }
+                // The generator's return value carries the new iterator (if any)
+                const newIter = interruptNext.value;
+                if (newIter) streamIterator = newIter;
                 continue;
               }
 
-              // User denied — stop gracefully
-              ctx.forceStopReason = safetyResult.reason;
-              this.drainToolSpans(
+              yield* this.processNodeEntries(
+                entries as [string, IAgentNodeUpdate][],
                 ctx,
-                SpanStatusCode.ERROR,
-                "stream_force_stopped",
+                span,
+                streamManager,
+                costTracker,
+                conversationId,
+                providerName,
+                currentModelName,
+                limits,
+                onChunk,
+                tracing,
               );
-
-              yield {
-                type: StreamEventType.METADATA,
-                content: "interrupt_denied",
-                metadata: {
-                  threadId: conversationId,
-                  status: "interrupt_denied",
-                  toolName: "Safety limit reached",
-                },
-              };
-
-              // Mark pending tools as completed
-              for (const [toolName, activity] of ctx.pendingToolCalls) {
-                activity.status = "completed";
-                activity.endTime = Date.now();
-                yield {
-                  type: StreamEventType.TOOL_END,
-                  content: JSON.stringify(activity),
-                  metadata: {
-                    toolName,
-                    duration: activity.endTime - activity.startTime,
-                  },
-                };
-              }
-              ctx.pendingToolCalls.clear();
-
-              yield {
-                type: StreamEventType.CHUNK,
-                content: limitLabel,
-                metadata: {
-                  threadId: conversationId,
-                  reason: ctx.forceStopReason,
-                },
-                accumulated: ctx.accumulatedContent
-                  ? `${ctx.accumulatedContent}\n\n${limitLabel}`
-                  : limitLabel,
-              };
-
-              break;
             }
 
-            const entries = Object.entries(event as Record<string, unknown>);
-
-            const interruptEntry = entries.find(
-              ([nodeName]) => nodeName === "__interrupt__",
-            );
-
-            if (interruptEntry) {
-              const interruptGen = this.handleInterrupt(
-                interruptEntry as [string, IInterruptValue | IInterruptValue[]],
-                ctx,
-                agent,
-                config,
-              );
-              let interruptNext = await interruptGen.next();
-              while (!interruptNext.done) {
-                yield interruptNext.value;
-                interruptNext = await interruptGen.next();
-              }
-              // The generator's return value carries the new iterator (if any)
-              const newIter = interruptNext.value;
-              if (newIter) streamIterator = newIter;
-              continue;
-            }
-
-            yield* this.processNodeEntries(
-              entries as [string, IAgentNodeUpdate][],
-              ctx,
-              span,
-              streamManager,
-              costTracker,
-              conversationId,
-              providerName,
-              currentModelName,
-              limits,
-              onChunk,
-              tracing,
-            );
-          }
-
-          // Stream completed (normally or via safety guard) — exit retry loop
-          break streamLoop;
-        } catch (streamError) {
-          // ── Auto-recovery for transient errors ──
-          const err =
-            streamError instanceof Error
-              ? streamError
-              : new Error(String(streamError));
-          const decision = recovery.evaluate(err, retryAttempt, {
-            fromSafetyGuard: false,
-          });
-
-          if (decision.shouldRetry) {
-            retryAttempt++;
-            span.addEvent("error_recovery_attempt", {
-              attempt: retryAttempt,
-              "error.message": err.message.substring(0, 500),
+            // Stream completed (normally or via safety guard) — exit retry loop
+            break streamLoop;
+          } catch (streamError) {
+            // ── Auto-recovery for transient errors ──
+            const err =
+              streamError instanceof Error
+                ? streamError
+                : new Error(String(streamError));
+            const decision = recovery.evaluate(err, retryAttempt, {
+              fromSafetyGuard: false,
             });
 
-            // Drain any open tool spans from the failed stream
-            this.drainToolSpans(ctx, SpanStatusCode.ERROR, "retry_attempt");
+            if (decision.shouldRetry) {
+              retryAttempt++;
+              span.addEvent("error_recovery_attempt", {
+                attempt: retryAttempt,
+                "error.message": err.message.substring(0, 500),
+              });
 
-            // Mark pending tools as failed (they're stale from the old stream)
-            for (const [toolName, activity] of ctx.pendingToolCalls) {
-              activity.status = "failed";
-              activity.endTime = Date.now();
-              yield {
-                type: StreamEventType.TOOL_END,
-                content: JSON.stringify(activity),
-                metadata: { toolName, error: true },
-              };
-            }
-            ctx.pendingToolCalls.clear();
+              // Drain any open tool spans from the failed stream
+              this.drainToolSpans(ctx, SpanStatusCode.ERROR, "retry_attempt");
 
-            // Let the user know we're recovering (not a final error)
-            yield {
-              type: StreamEventType.WORKING,
-              content: `Recovering from a temporary error (attempt ${retryAttempt})...`,
-              metadata: {
-                threadId: conversationId,
-                timestamp: Date.now(),
-                retryAttempt,
-              },
-            };
-
-            // Exponential back-off
-            await new Promise((resolve) =>
-              setTimeout(resolve, decision.delayMs),
-            );
-
-            // Reset error state so the loop can continue
-            ctx.hasErrored = false;
-            ctx.agentState = "running";
-
-            // Re-invoke the agent with a nudge message.  Because LangGraph
-            // uses checkpoint-based memory keyed on `thread_id`, the agent
-            // sees the full conversation history and can continue where it
-            // left off.
-            this.logger.log(
-              LogLevel.INFO,
-              `[ErrorRecovery] Nudging agent for thread ${conversationId} (attempt ${retryAttempt})`,
-            );
-
-            // Close the old iterator to release HTTP connections / internal state
-            try {
-              await streamIterator.return?.();
-            } catch {
-              // Suppress — we're already in error recovery
-            }
-
-            // Use a static nudge message (human role) to avoid prompt injection
-            const safeNudge =
-              retryAttempt <= 1
-                ? "There was a temporary interruption. Please continue from where you left off and complete your response."
-                : "The previous attempt was interrupted again. Please provide your final answer based on the information gathered so far.";
-
-            streamIterator = (
-              await agent.stream(
-                {
-                  messages: [
-                    {
-                      role: "human",
-                      content: safeNudge,
-                    },
-                  ],
-                },
-                config,
-              )
-            )[Symbol.asyncIterator]();
-
-            continue streamLoop;
-          }
-
-          // Not retryable — drain remaining tool spans and rethrow
-          this.drainToolSpans(ctx, SpanStatusCode.ERROR, err.message);
-          throw err;
-        }
-      } // end streamLoop
-
-      // Record provider success for health tracking
-      this.failoverService.recordSuccess(providerName);
-
-      yield* this.emitCompletion(
-        ctx,
-        span,
-        streamManager,
-        costTracker,
-        conversationId,
-      );
-    } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
-
-      // ── Provider Failover ────────────────────────────────
-      // If the primary provider failed and failover is enabled,
-      // try the next provider in the chain before giving up.
-      const failoverEnabled = vscode.workspace
-        .getConfiguration("codebuddy.failover")
-        .get<boolean>("enabled", true);
-
-      if (failoverEnabled) {
-        const reason = this.failoverService.recordFailure(providerName, err);
-
-        if (this.failoverService.shouldFailover(reason)) {
-          // Try to resolve an alternative provider
-          try {
-            const resolved = this.failoverService.resolveProvider(providerName);
-
-            if (resolved.isFallback) {
-              this.logger.log(
-                LogLevel.INFO,
-                `[Failover] Switching from "${providerName}" to "${resolved.provider}" (reason: ${reason})`,
-              );
-
-              // Notify user about the provider switch
-              yield {
-                type: StreamEventType.WORKING,
-                content: `Switching to ${resolved.provider} due to ${reason.replace(/_/g, " ")} on ${providerName}...`,
-                metadata: {
-                  threadId: conversationId,
-                  timestamp: Date.now(),
-                  failover: true,
-                  fromProvider: providerName,
-                  toProvider: resolved.provider,
-                },
-              };
-
-              // Drain tool spans from the failed attempt
-              this.drainToolSpans(
-                ctx,
-                SpanStatusCode.ERROR,
-                "provider_failover",
-              );
-
-              // Mark pending tools as failed
+              // Mark pending tools as failed (they're stale from the old stream)
               for (const [toolName, activity] of ctx.pendingToolCalls) {
                 activity.status = "failed";
                 activity.endTime = Date.now();
@@ -1635,148 +1561,289 @@ export class CodeBuddyAgentService {
               }
               ctx.pendingToolCalls.clear();
 
-              // Remove only the failed provider's cached agent (preserve other providers)
-              for (const key of this.agentCache.keys()) {
-                if (key.startsWith(`agent:${providerName}:`)) {
-                  this.agentCache.delete(key);
-                }
-              }
+              // Let the user know we're recovering (not a final error)
+              yield {
+                type: StreamEventType.WORKING,
+                content: `Recovering from a temporary error (attempt ${retryAttempt})...`,
+                metadata: {
+                  threadId: conversationId,
+                  timestamp: Date.now(),
+                  retryAttempt,
+                },
+              };
 
-              // Create new agent with the failover provider
-              const failoverAgent = await this.getAgent();
+              // Exponential back-off
+              await new Promise((resolve) =>
+                setTimeout(resolve, decision.delayMs),
+              );
 
-              // Reset stream context for the new attempt
+              // Reset error state so the loop can continue
               ctx.hasErrored = false;
               ctx.agentState = "running";
 
-              // Update provider/model tracking for cost and tracing
-              const failoverProviderName = resolved.provider;
-              const failoverModelName = resolved.model ?? resolved.provider;
-              span.setAttribute("gen_ai.failover.from", providerName);
-              span.setAttribute("gen_ai.failover.to", failoverProviderName);
-              span.setAttribute("gen_ai.failover.reason", reason);
-              span.addEvent("provider_failover", {
-                from: providerName,
-                to: failoverProviderName,
-                reason,
-              });
+              // Re-invoke the agent with a nudge message.  Because LangGraph
+              // uses checkpoint-based memory keyed on `thread_id`, the agent
+              // sees the full conversation history and can continue where it
+              // left off.
+              this.logger.log(
+                LogLevel.INFO,
+                `[ErrorRecovery] Nudging agent for thread ${conversationId} (attempt ${retryAttempt})`,
+              );
 
-              // Stream from the failover agent using the same thread_id
-              // so the agent retains conversation context from checkpoints
-              const failoverConfig = {
-                configurable: { thread_id: conversationId },
-                recursionLimit: 100,
-              };
-              const failoverIterator: AgentStreamIterator = (
-                await failoverAgent.stream(
+              // Close the old iterator to release HTTP connections / internal state
+              try {
+                await streamIterator.return?.();
+              } catch {
+                // Suppress — we're already in error recovery
+              }
+
+              // Use a static nudge message (human role) to avoid prompt injection
+              const safeNudge =
+                retryAttempt <= 1
+                  ? "There was a temporary interruption. Please continue from where you left off and complete your response."
+                  : "The previous attempt was interrupted again. Please provide your final answer based on the information gathered so far.";
+
+              streamIterator = (
+                await agent.stream(
                   {
                     messages: [
                       {
-                        role: "user",
-                        content: sanitizedMessage,
+                        role: "human",
+                        content: safeNudge,
                       },
                     ],
                   },
-                  failoverConfig,
+                  config,
                 )
               )[Symbol.asyncIterator]();
 
-              // Process the failover stream (single pass — no nested failover)
-              try {
-                yield* this.drainAgentStream(
-                  failoverIterator,
-                  ctx,
-                  span,
-                  streamManager,
-                  costTracker,
-                  conversationId,
-                  failoverProviderName,
-                  failoverModelName,
-                  limits,
-                  onChunk,
-                  tracing,
-                );
-
-                // Failover stream succeeded
-                this.failoverService.recordSuccess(failoverProviderName);
-
-                yield* this.emitCompletion(
-                  ctx,
-                  span,
-                  streamManager,
-                  costTracker,
-                  conversationId,
-                );
-                return; // Success — exit the generator
-              } catch (failoverError) {
-                // Failover stream also failed — record and fall through to error
-                this.failoverService.recordFailure(
-                  failoverProviderName,
-                  failoverError,
-                );
-                this.logger.log(
-                  LogLevel.ERROR,
-                  `[Failover] Fallback provider "${failoverProviderName}" also failed`,
-                  failoverError,
-                );
-              }
+              continue streamLoop;
             }
-          } catch (resolveError) {
-            // No alternative provider available — fall through to error
-            this.logger.log(
-              LogLevel.WARN,
-              `[Failover] No alternative provider available: ${resolveError instanceof Error ? resolveError.message : resolveError}`,
-            );
+
+            // Not retryable — drain remaining tool spans and rethrow
+            this.drainToolSpans(ctx, SpanStatusCode.ERROR, err.message);
+            throw err;
+          }
+        } // end streamLoop
+
+        // Record provider success for health tracking
+        this.failoverService.recordSuccess(providerName);
+
+        yield* this.emitCompletion(
+          ctx,
+          span,
+          streamManager,
+          costTracker,
+          conversationId,
+        );
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+
+        // ── Provider Failover ────────────────────────────────
+        // If the primary provider failed and failover is enabled,
+        // try the next provider in the chain before giving up.
+        const failoverEnabled = vscode.workspace
+          .getConfiguration("codebuddy.failover")
+          .get<boolean>("enabled", true);
+
+        if (failoverEnabled) {
+          const reason = this.failoverService.recordFailure(providerName, err);
+
+          if (this.failoverService.shouldFailover(reason)) {
+            // Try to resolve an alternative provider
+            try {
+              const resolved =
+                this.failoverService.resolveProvider(providerName);
+
+              if (resolved.isFallback) {
+                this.logger.log(
+                  LogLevel.INFO,
+                  `[Failover] Switching from "${providerName}" to "${resolved.provider}" (reason: ${reason})`,
+                );
+
+                // Notify user about the provider switch
+                yield {
+                  type: StreamEventType.WORKING,
+                  content: `Switching to ${resolved.provider} due to ${reason.replace(/_/g, " ")} on ${providerName}...`,
+                  metadata: {
+                    threadId: conversationId,
+                    timestamp: Date.now(),
+                    failover: true,
+                    fromProvider: providerName,
+                    toProvider: resolved.provider,
+                  },
+                };
+
+                // Drain tool spans from the failed attempt
+                this.drainToolSpans(
+                  ctx,
+                  SpanStatusCode.ERROR,
+                  "provider_failover",
+                );
+
+                // Mark pending tools as failed
+                for (const [toolName, activity] of ctx.pendingToolCalls) {
+                  activity.status = "failed";
+                  activity.endTime = Date.now();
+                  yield {
+                    type: StreamEventType.TOOL_END,
+                    content: JSON.stringify(activity),
+                    metadata: { toolName, error: true },
+                  };
+                }
+                ctx.pendingToolCalls.clear();
+
+                // Remove only the failed provider's cached agent (preserve other providers)
+                for (const key of this.agentCache.keys()) {
+                  if (key.startsWith(`agent:${providerName}:`)) {
+                    this.agentCache.delete(key);
+                  }
+                }
+
+                // Create new agent with the failover provider
+                const failoverAgent = await this.getAgent();
+
+                // Reset stream context for the new attempt
+                ctx.hasErrored = false;
+                ctx.agentState = "running";
+
+                // Update provider/model tracking for cost and tracing
+                const failoverProviderName = resolved.provider;
+                const failoverModelName = resolved.model ?? resolved.provider;
+                span.setAttribute("gen_ai.failover.from", providerName);
+                span.setAttribute("gen_ai.failover.to", failoverProviderName);
+                span.setAttribute("gen_ai.failover.reason", reason);
+                span.addEvent("provider_failover", {
+                  from: providerName,
+                  to: failoverProviderName,
+                  reason,
+                });
+
+                // Stream from the failover agent using the same thread_id
+                // so the agent retains conversation context from checkpoints
+                const failoverConfig = {
+                  configurable: { thread_id: conversationId },
+                  recursionLimit: 100,
+                };
+                const failoverIterator: AgentStreamIterator = (
+                  await failoverAgent.stream(
+                    {
+                      messages: [
+                        {
+                          role: "user",
+                          content: sanitizedMessage,
+                        },
+                      ],
+                    },
+                    failoverConfig,
+                  )
+                )[Symbol.asyncIterator]();
+
+                // Process the failover stream (single pass — no nested failover)
+                try {
+                  yield* this.drainAgentStream(
+                    failoverIterator,
+                    ctx,
+                    span,
+                    streamManager,
+                    costTracker,
+                    conversationId,
+                    failoverProviderName,
+                    failoverModelName,
+                    limits,
+                    onChunk,
+                    tracing,
+                  );
+
+                  // Failover stream succeeded
+                  this.failoverService.recordSuccess(failoverProviderName);
+
+                  yield* this.emitCompletion(
+                    ctx,
+                    span,
+                    streamManager,
+                    costTracker,
+                    conversationId,
+                  );
+                  return; // Success — exit the generator
+                } catch (failoverError) {
+                  // Failover stream also failed — record and fall through to error
+                  this.failoverService.recordFailure(
+                    failoverProviderName,
+                    failoverError,
+                  );
+                  this.logger.log(
+                    LogLevel.ERROR,
+                    `[Failover] Fallback provider "${failoverProviderName}" also failed`,
+                    failoverError,
+                  );
+                }
+              }
+            } catch (resolveError) {
+              // No alternative provider available — fall through to error
+              this.logger.log(
+                LogLevel.WARN,
+                `[Failover] No alternative provider available: ${resolveError instanceof Error ? resolveError.message : resolveError}`,
+              );
+            }
           }
         }
-      }
 
-      // ── Original error path (no failover or failover exhausted) ──
-      ctx.agentState = "failed";
-      ctx.hasErrored = true;
-      span.recordException(err);
+        // ── Original error path (no failover or failover exhausted) ──
+        ctx.agentState = "failed";
+        ctx.hasErrored = true;
+        span.recordException(err);
 
-      // Drain any remaining tool spans
-      this.drainToolSpans(ctx, SpanStatusCode.ERROR, err.message);
+        // Drain any remaining tool spans
+        this.drainToolSpans(ctx, SpanStatusCode.ERROR, err.message);
 
-      // Mark pending tools as failed
-      for (const [toolName, activity] of ctx.pendingToolCalls) {
-        activity.status = "failed";
-        activity.endTime = Date.now();
+        // Mark pending tools as failed
+        for (const [toolName, activity] of ctx.pendingToolCalls) {
+          activity.status = "failed";
+          activity.endTime = Date.now();
+          yield {
+            type: StreamEventType.TOOL_END,
+            content: JSON.stringify(activity),
+            metadata: { toolName, error: true },
+          };
+        }
+
         yield {
-          type: StreamEventType.TOOL_END,
-          content: JSON.stringify(activity),
-          metadata: { toolName, error: true },
+          type: StreamEventType.ERROR,
+          content:
+            "An unexpected error occurred while processing your request.",
+          metadata: { threadId: conversationId },
         };
+        this.logger.log(
+          LogLevel.ERROR,
+          `Stream failed for thread ${conversationId}`,
+          err,
+        );
+
+        throw err;
+      } finally {
+        // Centralize span finalization so it always fires exactly once
+        if (ctx.hasErrored) {
+          span.setStatus({ code: SpanStatusCode.ERROR });
+        } else {
+          span.setStatus({ code: SpanStatusCode.OK });
+        }
+        span.setAttribute("agent.final_state", ctx.agentState);
+        span.setAttribute("agent.event_count", ctx.eventCount);
+        span.setAttribute("agent.tool_count", ctx.totalToolInvocations);
+        span.end();
+        this.activeStreams.delete(conversationId);
+        this.consentManager.clearThread(conversationId);
+        const guardService = AgentRunningGuardService.getInstance();
+        guardService.notifyAgentStopped();
       }
-
-      yield {
-        type: StreamEventType.ERROR,
-        content: "An unexpected error occurred while processing your request.",
-        metadata: { threadId: conversationId },
-      };
-      this.logger.log(
-        LogLevel.ERROR,
-        `Stream failed for thread ${conversationId}`,
-        err,
-      );
-
-      throw err;
     } finally {
-      // Centralize span finalization so it always fires exactly once
-      if (ctx.hasErrored) {
-        span.setStatus({ code: SpanStatusCode.ERROR });
-      } else {
-        span.setStatus({ code: SpanStatusCode.OK });
+      // Outer finally: unconditionally release the concurrency slot
+      // regardless of what threw inside the streaming body.
+      if (releaseSlot) {
+        releaseSlot();
+        releaseSlot = null;
       }
-      span.setAttribute("agent.final_state", ctx.agentState);
-      span.setAttribute("agent.event_count", ctx.eventCount);
-      span.setAttribute("agent.tool_count", ctx.totalToolInvocations);
-      span.end();
-      this.activeStreams.delete(conversationId);
-      this.consentManager.clearThread(conversationId);
-      const guardService = AgentRunningGuardService.getInstance();
-      guardService.notifyAgentStopped();
     }
   }
 
