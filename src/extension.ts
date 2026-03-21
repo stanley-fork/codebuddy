@@ -653,7 +653,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const updateAccessStatusBar = () => {
       const mode = accessControl.getMode();
       const user = accessControl.getCurrentUser();
-      accessStatusBar.text = `${modeIcons[mode] ?? "$(globe)"} ${mode}`;
+      accessStatusBar.text = `${modeIcons[mode] ?? "$(globe)"} ${mode.charAt(0).toUpperCase() + mode.slice(1)}`;
       accessStatusBar.tooltip =
         `CodeBuddy Access: ${mode}` +
         (user ? `\nUser: ${user}` : "\nUser: unknown") +
@@ -711,8 +711,8 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
       accessAuditChannel,
       vscode.commands.registerCommand("codebuddy.accessControlAudit", () => {
+        accessAuditChannel.clear();
         const entries = accessControl.getAuditLog();
-        accessAuditChannel.appendLine("");
         accessAuditChannel.appendLine(
           `=== Access Control Audit Log (${entries.length} entries) — ${new Date().toISOString()} ===`,
         );
@@ -721,13 +721,13 @@ export async function activate(context: vscode.ExtensionContext) {
         );
         accessAuditChannel.appendLine("");
         for (const e of entries) {
-          const status = e.allowed ? "ALLOWED" : "DENIED";
+          const status = e.allowed ? "✅ ALLOWED" : "🚫 DENIED";
           accessAuditChannel.appendLine(
-            `[${new Date(e.timestamp).toISOString()}] ${status} user="${e.user}" action="${e.action}"`,
+            `[${new Date(e.timestamp).toISOString()}] ${status}  user=${JSON.stringify(e.user)}  action=${JSON.stringify(e.action)}`,
           );
         }
         if (entries.length === 0) {
-          accessAuditChannel.appendLine("No audit entries recorded yet.");
+          accessAuditChannel.appendLine("(No audit entries recorded yet.)");
         }
         accessAuditChannel.show();
       }),
@@ -739,9 +739,7 @@ export async function activate(context: vscode.ExtensionContext) {
         if (e.affectsConfiguration("codebuddy.accessControl.defaultMode")) {
           const newMode = vscode.workspace
             .getConfiguration("codebuddy")
-            .get<
-              import("./services/access-control.service").AccessControlMode
-            >("accessControl.defaultMode", "open");
+            .get<AccessControlMode>("accessControl.defaultMode", "open");
           // "setting" source — setMode will ignore if file-based config is active
           if (newMode) {
             accessControl.setMode(newMode, "setting", false);

@@ -459,6 +459,12 @@
         }
       ]
     },
+    "jsonValidation": [
+      {
+        "fileMatch": ".codebuddy/access.json",
+        "url": "./schemas/access-v1.json"
+      }
+    ],
     "configuration": [
       {
         "title": "CodeBuddy",

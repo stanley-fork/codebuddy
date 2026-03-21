@@ -404,4 +404,53 @@ suite("AccessControlService", () => {
     assert.strictEqual(log[1].action, "action2");
     assert.strictEqual(log[2].action, "action3");
   });
+
+  // ── Config Source Priority ───────────────────────────────────────
+
+  test("setMode from 'setting' source is blocked when access.json is loaded", async () => {
+    const ws = setupTmpWorkspace({
+      mode: "allow",
+      users: ["alice@example.com"],
+    });
+    const svc = AccessControlService.getInstance();
+    await svc.initialize(ws);
+
+    // access.json sets "allow" — a setting change should not override it
+    svc.setMode("open", "setting", false);
+    assert.strictEqual(
+      svc.getMode(),
+      "allow",
+      "VS Code setting must not override file-based config",
+    );
+  });
+
+  test("setMode from 'command' source is blocked when access.json is loaded", async () => {
+    const ws = setupTmpWorkspace({ mode: "deny", users: ["eve@example.com"] });
+    const svc = AccessControlService.getInstance();
+    await svc.initialize(ws);
+
+    svc.setMode("open", "command", false);
+    assert.strictEqual(
+      svc.getMode(),
+      "deny",
+      "QuickPick command must not override file-based config",
+    );
+  });
+
+  test("checkAccess sanitizes action strings (strips control chars)", async () => {
+    const svc = AccessControlService.getInstance();
+    await svc.initialize();
+
+    svc.checkAccess("user-input\nINJECTED LOG LINE\x1b[31m");
+    const log = svc.getAuditLog();
+    assert.strictEqual(log.length, 1);
+    assert.ok(
+      !log[0].action.includes("\n"),
+      "Newlines must be stripped from action",
+    );
+    assert.ok(
+      !log[0].action.includes("\x1b"),
+      "ANSI escape codes must be stripped from action",
+    );
+  });
 });

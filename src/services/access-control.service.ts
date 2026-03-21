@@ -81,7 +81,14 @@ const DENY_LOG_MIN_INTERVAL_MS = 100;
 /** Matches a basic email address (intentionally simple — not RFC 5322). */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** Matches a valid GitHub username: 1–39 alphanumeric/hyphen chars, no leading/trailing hyphen. */
+/**
+ * Matches a valid GitHub username: 1–39 alphanumeric/hyphen chars,
+ * no leading/trailing hyphen.
+ * Breakdown: `[a-zA-Z\d]`      first char (1)
+ *            `[a-zA-Z\d-]{0,37}` middle chars (0–37)
+ *            `[a-zA-Z\d]`        last char (1)   → total max = 1 + 37 + 1 = 39
+ * A single-char username also matches (the middle + last group is optional).
+ */
 const GITHUB_USERNAME_RE = /^[a-zA-Z\d](?:[a-zA-Z\d-]{0,37}[a-zA-Z\d])?$/;
 
 /**
@@ -232,16 +239,23 @@ export class AccessControlService implements vscode.Disposable {
   private async resolveCurrentUser(): Promise<void> {
     // Try GitHub auth first (non-interactive — don't force login)
     try {
-      const session = await vscode.authentication.getSession(
-        "github",
-        ["user:email"],
-        { createIfNone: false },
-      );
+      // No additional OAuth scopes needed — we only use account.label (username),
+      // which is always available on any authenticated session.
+      const session = await vscode.authentication.getSession("github", [], {
+        createIfNone: false,
+        silent: true,
+      });
       if (session?.account?.label) {
-        this.currentUser = session.account.label.toLowerCase();
-        this.identityResolvedAt = Date.now();
-        logger.debug(`User identity from GitHub: ${this.currentUser}`);
-        return;
+        const identity = sanitizeIdentity(session.account.label);
+        if (identity) {
+          this.currentUser = identity.toLowerCase();
+          this.identityResolvedAt = Date.now();
+          logger.debug(`User identity from GitHub: ${this.currentUser}`);
+          return;
+        }
+        logger.warn(
+          `GitHub account label failed sanitization: "${session.account.label}"`,
+        );
       }
     } catch {
       // GitHub auth not available or user declined
@@ -333,16 +347,14 @@ export class AccessControlService implements vscode.Disposable {
    * If a load is already in-flight, the caller awaits the same promise.
    */
   private async loadConfig(workspacePath: string): Promise<void> {
-    if (this.loadInFlight) {
-      await this.loadInFlight;
-      return;
+    // If a load is already in progress, coalesce onto the same promise.
+    // Assignment is synchronous — no yield between the check and set.
+    if (!this.loadInFlight) {
+      this.loadInFlight = this._loadConfigInner(workspacePath).finally(() => {
+        this.loadInFlight = undefined;
+      });
     }
-    this.loadInFlight = this._loadConfigInner(workspacePath);
-    try {
-      await this.loadInFlight;
-    } finally {
-      this.loadInFlight = undefined;
-    }
+    return this.loadInFlight;
   }
 
   private async _loadConfigInner(workspacePath: string): Promise<void> {
@@ -467,13 +479,26 @@ export class AccessControlService implements vscode.Disposable {
     this.configWatcher.onDidDelete(() => {
       this.config = {};
       this.configLoaded = false;
-      const oldMode = this.mode;
-      this.mode = "open";
       this.applyConfig();
+
+      // Re-read the VS Code setting as the new effective mode
+      // (file was highest priority; with it gone, fall back to setting)
+      const settingMode = vscode.workspace
+        .getConfiguration("codebuddy")
+        .get<AccessControlMode>("accessControl.defaultMode", "open");
+      const effectiveMode = VALID_MODES.includes(settingMode)
+        ? settingMode
+        : "open";
+
+      const oldMode = this.mode;
+      this.mode = effectiveMode;
+
       if (oldMode !== this.mode) {
         this._onAccessChanged.fire(this.mode);
       }
-      logger.info("Access config deleted — reverting to open mode");
+      logger.info(
+        `Access config deleted — reverting to VS Code setting mode: ${this.mode}`,
+      );
     });
 
     // Re-resolve identity when GitHub auth sessions change
@@ -614,11 +639,21 @@ export class AccessControlService implements vscode.Disposable {
 
   // ── Audit Log ────────────────────────────────────────────────────
 
+  /**
+   * Strip control characters and cap length on action strings to prevent
+   * log injection (newlines, ANSI escapes, fake log entries).
+   */
+  private static sanitizeAction(action: string): string {
+    return action
+      .replace(/[\x00-\x1f\x7f]/g, "_") // Replace control chars (incl. newlines, ESC)
+      .slice(0, 128); // Cap length
+  }
+
   private recordAudit(action: string, allowed: boolean): void {
     this.auditLog.push({
       timestamp: Date.now(),
       user: this.currentUser ?? "unknown",
-      action,
+      action: AccessControlService.sanitizeAction(action),
       allowed,
     });
 
