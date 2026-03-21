@@ -1,8 +1,9 @@
 /**
  * Hybrid search service: BM25 full-text + vector similarity + temporal decay + MMR.
  *
- * Combines FTS5 keyword recall with vector semantic similarity via weighted
+ * Combines FTS4 keyword recall with vector semantic similarity via weighted
  * score fusion, then applies optional temporal decay and diversity re-ranking.
+ * Uses FTS4 (not FTS5) because sql.js's default WASM build only includes FTS3/FTS4.
  */
 
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
@@ -33,7 +34,7 @@ export interface HybridSearchResult {
 export interface HybridSearchConfig {
   /** Weight for vector (semantic) scores. Default: 0.7. */
   vectorWeight: number;
-  /** Weight for FTS5 (keyword) scores. Default: 0.3. */
+  /** Weight for FTS4 (keyword) scores. Default: 0.3. */
   textWeight: number;
   /** Maximum results to return. Default: 10. */
   topK: number;
@@ -66,7 +67,7 @@ export interface VectorHit {
   indexedAt?: string;
 }
 
-/** Intermediate FTS5 result from the keyword store. */
+/** Intermediate FTS4 result from the keyword store. */
 export interface KeywordHit {
   id: string;
   filePath: string;
@@ -79,13 +80,13 @@ export interface KeywordHit {
   indexedAt?: string;
 }
 
-// ─── FTS5 Helpers ─────────────────────────────────────────────────────
+// ─── FTS Helpers ──────────────────────────────────────────────────────
 
 const MAX_FTS_TOKENS = 32;
 const MAX_TOKEN_LENGTH = 128;
 
 /**
- * Build an FTS5 MATCH query from raw user input.
+ * Build an FTS4 MATCH query from raw user input.
  *
  * Tokenizes on Unicode word boundaries, strips quotes, wraps each token in
  * double quotes, and AND-joins them. Returns null if no valid tokens remain.
@@ -109,33 +110,65 @@ export function buildFtsQuery(raw: string): string | null {
   }
 
   // FTS5 safe: double-quote wrapping with internal quote removal
+  // (FTS4 also supports double-quoted phrase matching)
   return tokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" AND ");
 }
 
 const BM25_NAN_FALLBACK_SCORE = 0.001;
 
 /**
- * Convert an FTS5 `bm25()` rank value to a [0, 1) score.
+ * Compute a BM25-like relevance score from FTS4 matchinfo('pcx') data.
  *
- * FTS5 has two rank modes:
- * - BM25 mode (default): rank() returns negative float, more negative = better.
- *   e.g., rank = -4.2 → score ≈ 0.81
- * - Ordinal mode: rank() returns 0-based integer position, 0 = best.
- *   e.g., rank = 0 → score = 1.0, rank = 1 → score = 0.5
+ * The 'pcx' format returns:
+ *   p = number of matchable phrases in the query
+ *   c = number of columns in the FTS table
+ *   x = for each (phrase, column) pair: [hits_this_row, hits_all_rows, docs_with_hit]
  *
- * This function handles both by checking the sign.
+ * We compute a simplified BM25 score:
+ *   score = Σ over phrases: tf × log(N / df)
+ * where tf = hits in this row, N = total docs, df = docs containing this phrase.
+ * Returns a value in [0, 1) via the standard normalization.
  */
-export function bm25RankToScore(rank: number): number {
-  if (!Number.isFinite(rank)) {
+export function computeFts4Score(matchinfoBlob: Uint8Array): number {
+  // matchinfo returns 32-bit integers packed as little-endian
+  const ints = new Int32Array(
+    matchinfoBlob.buffer,
+    matchinfoBlob.byteOffset,
+    matchinfoBlob.byteLength / 4,
+  );
+
+  if (ints.length < 2) {
     return BM25_NAN_FALLBACK_SCORE;
   }
-  // FTS5 returns negative BM25 scores (more negative = more relevant)
-  if (rank < 0) {
-    const relevance = -rank;
-    return relevance / (1 + relevance);
+
+  const p = ints[0]; // number of phrases
+  const c = ints[1]; // number of columns (always 1 for our table)
+
+  // We need at least p * c * 3 values after the header
+  if (ints.length < 2 + p * c * 3) {
+    return BM25_NAN_FALLBACK_SCORE;
   }
-  // Positive rank = ordinal position (lower = better match)
-  return 1 / (1 + rank);
+
+  let rawScore = 0;
+  for (let i = 0; i < p; i++) {
+    for (let j = 0; j < c; j++) {
+      const offset = 2 + (i * c + j) * 3;
+      const hitsThisRow = ints[offset]; // term frequency in this doc
+      const _hitsAllRows = ints[offset + 1]; // total hits across all docs
+      const docsWithHit = ints[offset + 2]; // document frequency
+
+      if (hitsThisRow > 0 && docsWithHit > 0) {
+        // IDF component: log(1 + N/df) — we approximate N from the data
+        // Since we don't have total doc count from matchinfo, use a simple
+        // tf × inverse-df weighting: tf × (1 / df)
+        // This gives higher scores to rarer terms matched more often
+        rawScore += hitsThisRow * (1 / docsWithHit);
+      }
+    }
+  }
+
+  // Normalize to [0, 1) using the same pattern as bm25RankToScore
+  return rawScore <= 0 ? BM25_NAN_FALLBACK_SCORE : rawScore / (1 + rawScore);
 }
 
 // ─── Fusion ───────────────────────────────────────────────────────────
@@ -253,7 +286,7 @@ export function mergeHybridResults(params: {
 // ─── Service (singleton) ──────────────────────────────────────────────
 
 /**
- * HybridSearchService — singleton that orchestrates FTS5 + vector search
+ * HybridSearchService — singleton that orchestrates FTS4 + vector search
  * against the SqliteVectorStore database.
  */
 export class HybridSearchService {
@@ -283,7 +316,7 @@ export class HybridSearchService {
   }
 
   /**
-   * Attach to the sql.js database and ensure the FTS5 virtual table exists.
+   * Attach to the sql.js database and ensure the FTS4 virtual table exists.
    * Must be called after SqliteVectorStore.initialize().
    * Uses a promise-as-mutex pattern to prevent concurrent double-init.
    */
@@ -313,7 +346,7 @@ export class HybridSearchService {
         this.createFtsTables();
         this.initializedForDb = db;
         this.ftsInitialized = true;
-        this.logger.info("FTS5 virtual table initialized");
+        this.logger.info("FTS4 virtual table initialized");
       } finally {
         this.initPromise = null;
       }
@@ -354,20 +387,59 @@ export class HybridSearchService {
     this.logger.info("HybridSearchService disposed");
   }
 
-  // ── FTS5 Schema ─────────────────────────────────────────────────────
+  // ── FTS4 Schema ─────────────────────────────────────────────────────
+
+  /**
+   * Detect and migrate a leftover FTS5 virtual table to FTS4.
+   * Checks the CREATE statement in sqlite_master — FTS5 tables will
+   * contain 'fts5' in their SQL. Drops everything and lets createFtsTables
+   * recreate with FTS4.
+   */
+  private migrateFts5ToFts4(): void {
+    try {
+      const result = this.db!.exec(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks_fts'",
+      );
+      if (result.length === 0 || !result[0].values[0]?.[0]) {
+        return; // table doesn't exist yet — nothing to migrate
+      }
+      const createSql = (result[0].values[0][0] as string).toLowerCase();
+      if (createSql.includes("fts5")) {
+        this.logger.warn(
+          "Detected FTS5 table from prior version. Migrating to FTS4...",
+        );
+        // Drop old triggers first, then the FTS5 table
+        this.db!.run("DROP TRIGGER IF EXISTS chunks_ai");
+        this.db!.run("DROP TRIGGER IF EXISTS chunks_ad");
+        this.db!.run("DROP TRIGGER IF EXISTS chunks_au");
+        this.db!.run("DROP TABLE IF EXISTS chunks_fts");
+        this.logger.info(
+          "FTS5 → FTS4 migration complete. Table will be recreated.",
+        );
+      }
+    } catch (err: unknown) {
+      this.logger.warn(
+        `FTS5→FTS4 migration check failed: ${(err as Error).message}`,
+      );
+    }
+  }
 
   private createFtsTables(): void {
-    // Standalone FTS5 table (not external-content) — avoids the conflict
-    // between content='chunks' mode and manual trigger-based inserts.
-    // We store the chunk id alongside the text for join-back.
+    // Migrate from FTS5 → FTS4: if a prior version created the table with FTS5,
+    // drop it and recreate with FTS4. Detect by querying sqlite_master.
+    this.migrateFts5ToFts4();
+
+    // Standalone FTS4 table — sql.js ships with FTS3/FTS4 enabled but not FTS5.
+    // FTS4 supports unicode61 tokenizer, MATCH queries, and matchinfo().
     this.db!.run(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts4(
         text,
-        tokenize='unicode61'
+        tokenize=unicode61
       )
     `);
 
-    // Triggers to keep FTS5 in sync with the chunks table
+    // Triggers to keep FTS4 in sync with the chunks table.
+    // FTS4 uses standard DELETE (unlike FTS5's special delete syntax).
     this.db!.run(`
       CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
         INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
@@ -376,24 +448,24 @@ export class HybridSearchService {
 
     this.db!.run(`
       CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-        INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+        DELETE FROM chunks_fts WHERE rowid = old.rowid;
       END
     `);
 
     this.db!.run(`
       CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-        INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+        DELETE FROM chunks_fts WHERE rowid = old.rowid;
         INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
       END
     `);
 
     // Back-fill: populate FTS from any existing chunks that lack FTS entries.
-    // This is a one-time migration for databases created before FTS5 was added.
+    // This is a one-time migration for databases created before FTS was added.
     this.backfillFts();
   }
 
   /**
-   * One-time back-fill: insert existing chunks text into FTS5.
+   * One-time back-fill: insert existing chunks text into FTS4.
    * Idempotent — checks row count before proceeding.
    * Uses incremental insert for small deficits, full rebuild for large ones.
    */
@@ -413,11 +485,10 @@ export class HybridSearchService {
       }
 
       const deficit = chunksCount - ftsCount;
-      this.logger.info(`Back-filling FTS5 index: ${deficit} chunks to index`);
+      this.logger.info(`Back-filling FTS4 index: ${deficit} chunks to index`);
 
       if (deficit < 100) {
         // Incremental: insert only the missing rows
-        // Use a subquery approach compatible with standalone FTS5
         this.db!.run(`
           INSERT INTO chunks_fts(rowid, text)
           SELECT c.rowid, c.text
@@ -427,21 +498,22 @@ export class HybridSearchService {
       } else {
         // Full rebuild for large deficits
         this.logger.warn(
-          `Large FTS5 backfill (${deficit} chunks). This may take a moment.`,
+          `Large FTS4 backfill (${deficit} chunks). This may take a moment.`,
         );
         this.db!.run("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
       }
 
-      this.logger.info("FTS5 back-fill complete");
+      this.logger.info("FTS4 back-fill complete");
     } catch (err: unknown) {
-      this.logger.warn(`FTS5 back-fill failed: ${(err as Error).message}`);
+      this.logger.warn(`FTS4 back-fill failed: ${(err as Error).message}`);
     }
   }
 
-  // ── FTS5 Search ─────────────────────────────────────────────────────
+  // ── FTS4 Search ─────────────────────────────────────────────────────
 
   /**
    * Get or create a reusable prepared statement for FTS search.
+   * Uses matchinfo('pcx') for BM25-like scoring since FTS4 has no built-in rank.
    */
   private getFtsSearchStmt(): SqlJsStatement {
     if (!this.ftsSearchStmt) {
@@ -455,11 +527,10 @@ export class HybridSearchService {
           c.chunk_type,
           c.language,
           c.indexed_at,
-          chunks_fts.rank
+          matchinfo(chunks_fts, 'pcx') as mi
         FROM chunks_fts
         JOIN chunks c ON c.rowid = chunks_fts.rowid
         WHERE chunks_fts MATCH ?
-        ORDER BY chunks_fts.rank
         LIMIT ?
       `);
     }
@@ -467,7 +538,7 @@ export class HybridSearchService {
   }
 
   /**
-   * Run an FTS5 full-text search and return scored keyword hits.
+   * Run an FTS4 full-text search and return scored keyword hits.
    */
   ftsSearch(query: string, k = 10): KeywordHit[] {
     if (!this.isReady) {
@@ -483,26 +554,32 @@ export class HybridSearchService {
 
     try {
       const stmt = this.getFtsSearchStmt();
-      stmt.bind([ftsQuery, k]);
+      stmt.bind([ftsQuery, k * 2]); // over-fetch since we sort in JS
 
       while (stmt.step()) {
         const row = stmt.getAsObject();
+        const mi = row.mi as Uint8Array;
+        const textScore = mi ? computeFts4Score(mi) : BM25_NAN_FALLBACK_SCORE;
         results.push({
           id: row.id as string,
           filePath: row.file_path as string,
           startLine: row.start_line as number,
           endLine: row.end_line as number,
           snippet: row.text as string,
-          textScore: bm25RankToScore(row.rank as number),
+          textScore,
           chunkType: row.chunk_type as string,
           language: row.language as string,
           indexedAt: row.indexed_at as string | undefined,
         });
       }
       stmt.reset();
+
+      // Sort by score descending and trim to k (FTS4 has no ORDER BY rank)
+      results.sort((a, b) => b.textScore - a.textScore);
+      results.length = Math.min(results.length, k);
     } catch (err: unknown) {
       this.ftsSearchStmt = null; // invalidate on error
-      this.logger.warn(`FTS5 search failed: ${(err as Error).message}`);
+      this.logger.warn(`FTS4 search failed: ${(err as Error).message}`);
     }
 
     return results;
@@ -624,10 +701,10 @@ export class HybridSearchService {
   // ── Hybrid Search (public API) ─────────────────────────────────────
 
   /**
-   * Run hybrid search: vector + FTS5, merge, decay, MMR, top-K.
+   * Run hybrid search: vector + FTS4, merge, decay, MMR, top-K.
    *
    * @param queryVector — embedding of the user query (or undefined to skip vector)
-   * @param queryText   — raw user query for FTS5 matching
+   * @param queryText   — raw user query for FTS4 matching
    * @param config      — search configuration overrides
    */
   async search(
@@ -638,7 +715,7 @@ export class HybridSearchService {
     const cfg = { ...DEFAULT_HYBRID_CONFIG, ...config };
     const k = Math.max(cfg.topK, 20); // over-fetch before fusion
 
-    // Run vector + FTS5 in parallel
+    // Run vector + FTS4 in parallel
     const [vectorHits, keywordHits] = await Promise.all([
       queryVector ? this.vectorSearch(queryVector, k) : Promise.resolve([]),
       Promise.resolve(this.ftsSearch(queryText, k)),

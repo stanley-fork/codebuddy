@@ -742,13 +742,21 @@
           },
           "codebuddy.permissionScope.defaultProfile": {
             "type": "string",
-            "enum": ["restricted", "standard", "trusted"],
+            "enum": [
+              "restricted",
+              "standard",
+              "trusted"
+            ],
             "default": "standard",
             "description": "Default permission profile: restricted (read-only, no terminal), standard (read/write, safe terminal), trusted (full access, auto-approve). Overridden by .codebuddy/permissions.json if present."
           },
           "codebuddy.accessControl.defaultMode": {
             "type": "string",
-            "enum": ["open", "allow", "deny"],
+            "enum": [
+              "open",
+              "allow",
+              "deny"
+            ],
             "default": "open",
             "description": "Default access control mode: open (no restrictions), allow (only listed users), deny (block listed users). Overridden by .codebuddy/access.json if present."
           },
@@ -1304,7 +1312,7 @@
     "readable-stream": "^4.5.2",
     "rss-parser": "^3.13.0",
     "simple-git": "^3.25.0",
-    "sql.js": "^1.13.0",
+    "sql.js": "^1.14.1",
     "web-tree-sitter": "^0.25.10"
   },
   "overrides": {
