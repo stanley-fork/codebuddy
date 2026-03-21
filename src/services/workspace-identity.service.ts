@@ -123,6 +123,24 @@ export class WorkspaceIdentityService {
     return GLOBAL_CODEBUDDY_DIR;
   }
 
+  /**
+   * Resolve a relative path within the workspace root, guarding against
+   * path-traversal attacks (inspired by nanoclaw/src/group-folder.ts).
+   *
+   * Throws if the resolved path escapes the workspace root.
+   */
+  public resolveWorkspacePath(relativePath: string): string {
+    if (!this.workspaceRoot) {
+      throw new Error("No workspace root — cannot resolve path");
+    }
+    const resolved = path.resolve(this.workspaceRoot, relativePath);
+    const rel = path.relative(this.workspaceRoot, resolved);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      throw new Error(`Path escapes workspace root: ${relativePath}`);
+    }
+    return resolved;
+  }
+
   /** Reset singleton state for unit tests. */
   public static _resetForTesting(): void {
     WorkspaceIdentityService.instance = undefined;

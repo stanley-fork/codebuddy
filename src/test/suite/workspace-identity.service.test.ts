@@ -119,4 +119,40 @@ suite("WorkspaceIdentityService", () => {
     // New instance should not have the old hash
     assert.strictEqual(b.getWorkspaceHash(), undefined);
   });
+
+  // ── Path traversal guard (inspired by nanoclaw/src/group-folder.ts) ──
+
+  test("resolveWorkspacePath resolves safe relative paths", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize("/tmp/workspace");
+    const resolved = svc.resolveWorkspacePath("src/index.ts");
+    assert.strictEqual(resolved, "/tmp/workspace/src/index.ts");
+  });
+
+  test("resolveWorkspacePath blocks path traversal with ..", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize("/tmp/workspace");
+    assert.throws(
+      () => svc.resolveWorkspacePath("../../etc/passwd"),
+      /Path escapes workspace root/,
+    );
+  });
+
+  test("resolveWorkspacePath blocks absolute paths", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize("/tmp/workspace");
+    assert.throws(
+      () => svc.resolveWorkspacePath("/etc/passwd"),
+      /Path escapes workspace root/,
+    );
+  });
+
+  test("resolveWorkspacePath throws when no workspace is open", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize(undefined);
+    assert.throws(
+      () => svc.resolveWorkspacePath("src/foo.ts"),
+      /No workspace root/,
+    );
+  });
 });
