@@ -74,6 +74,7 @@
   "config.agentMaxEventCount": "Maximum number of stream events before the agent pauses to ask to continue (default: 2000)",
   "config.agentMaxToolInvocations": "Maximum total tool calls before the agent pauses to ask to continue (default: 400)",
   "config.agentMaxDurationMinutes": "Maximum wall-clock minutes before the agent pauses to ask to continue (default: 10)",
+  "config.agentMaxConcurrentStreams": "Maximum number of concurrent agent streams. Additional requests are queued (default: 3, range: 1–10)",
   "config.completionEnabled": "Enable inline code completions (ghost text)",
   "config.completionProvider": "Provider for inline completions (can be different from chat provider)",
   "config.completionModel": "Model to use for completions (e.g., qwen2.5-coder, deepseek-coder)",

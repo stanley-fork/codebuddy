@@ -51,6 +51,11 @@ import {
   ProviderFailoverService,
   classifyFailoverReason,
 } from "../../services/provider-failover.service";
+import {
+  ConcurrencyQueueService,
+  ConcurrencyQueueCancelledError,
+  QueuePriority,
+} from "../../services/concurrency-queue.service";
 import { TOOL_NAMES } from "../constants/tool-names";
 import { SqlJsCheckpointSaver } from "../../services/sqljs-checkpoint-saver";
 import {
@@ -1082,6 +1087,30 @@ export class CodeBuddyAgentService {
     }
 
     const conversationId = threadId ?? `thread-${Date.now()}`;
+
+    // ── Concurrency gate ──────────────────────────────────────
+    // Acquire a slot before setting up the stream. If all slots are taken,
+    // the caller blocks until one frees up (or the queued item is cancelled).
+    const concurrencyQueue = ConcurrencyQueueService.getInstance();
+    let releaseSlot: (() => void) | null = null;
+    try {
+      releaseSlot = await concurrencyQueue.acquire(
+        conversationId,
+        sanitizedMessage.substring(0, 80),
+        QueuePriority.USER,
+      );
+    } catch (err) {
+      if (err instanceof ConcurrencyQueueCancelledError) {
+        yield {
+          type: StreamEventType.ERROR,
+          content: "Your request was cancelled while waiting in the queue.",
+          metadata: { reason: "queue_cancelled" },
+        };
+        return;
+      }
+      throw err;
+    }
+
     const streamManager = new StreamManager({
       maxBufferSize: 10,
       flushInterval: 50,
@@ -1777,6 +1806,9 @@ export class CodeBuddyAgentService {
       this.consentManager.clearThread(conversationId);
       const guardService = AgentRunningGuardService.getInstance();
       guardService.notifyAgentStopped();
+
+      // Release concurrency slot so the next queued operation can proceed
+      if (releaseSlot) releaseSlot();
     }
   }
 
