@@ -888,6 +888,43 @@ export class SqliteDatabaseService {
   }
 
   /**
+   * Execute multiple DML statements inside an **atomic transaction**.
+   *
+   * sql.js uses an in-memory database; its `db.run()` API executes a single
+   * statement with parameter binding and honours the current transaction state,
+   * whereas the `prepare → run → free` path used by `executeSqlCommand` may
+   * auto-commit between calls.  We use `db.run()` here so that
+   * `BEGIN` / `COMMIT` / `ROLLBACK` are respected.
+   *
+   * `saveToDisk()` is called only once, after a successful `COMMIT`.
+   */
+  runTransaction<T>(fn: (run: (sql: string, params?: any[]) => void) => T): T {
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    const run = (sql: string, params: any[] = []): void => {
+      this.db.run(sql, params);
+    };
+
+    run("BEGIN TRANSACTION");
+    try {
+      const result = fn(run);
+      run("COMMIT");
+      this.saveToDisk();
+      return result;
+    } catch (error) {
+      try {
+        run("ROLLBACK");
+      } catch {
+        // ROLLBACK may fail if the transaction was already rolled back by
+        // the engine (e.g. constraint violation in some modes). Safe to ignore.
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Execute SQL query and get all results
    */
   executeSqlAll(query: string, params: any[] = []): any[] {
