@@ -813,6 +813,15 @@ export abstract class CodeCommandHandler implements ICodeCommandHandler {
 
       span.addEvent("prompt_created");
 
+      // Isolate command from conversational chat history.
+      // Commands are independent one-shot tasks — they must NOT
+      // include previous command prompts/responses in the LLM context,
+      // otherwise the model repeats the prior command's output.
+      const savedChatHistory = Memory.has("chatHistory")
+        ? Memory.get("chatHistory")
+        : [];
+      Memory.set("chatHistory", []);
+
       const requestId = generateUUID();
       await provider.currentWebView?.webview.postMessage({
         type: "onStreamStart",
@@ -847,6 +856,10 @@ export abstract class CodeCommandHandler implements ICodeCommandHandler {
           NotificationSource.Commands,
         );
         return;
+      } finally {
+        // Restore the conversational chat history so normal Ask mode
+        // continues with its original context after the command finishes.
+        Memory.set("chatHistory", savedChatHistory);
       }
 
       const formattedResponse = this.formatResponse(fullResponse);
