@@ -120,7 +120,7 @@ export class SqliteVectorStore implements vscode.Disposable {
       this.createTables();
 
       // Initialize FTS5 hybrid search (creates virtual table + back-fills)
-      HybridSearchService.getInstance().initializeFts(this.db);
+      await HybridSearchService.getInstance().initializeFts(this.db);
 
       this.saveToDisk();
 

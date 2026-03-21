@@ -15,6 +15,23 @@ import {
 } from "./temporal-decay";
 import { applyMMR, DEFAULT_MMR_CONFIG, type MMRConfig } from "./mmr";
 
+// ─── sql.js Structural Types ──────────────────────────────────────────
+
+interface SqlJsStatement {
+  bind(params: (string | number | null | Uint8Array)[]): void;
+  step(): boolean;
+  getAsObject(): Record<string, unknown>;
+  free(): void;
+  reset(): void;
+}
+
+interface SqlJsDatabase {
+  run(sql: string, params?: (string | number | null)[]): void;
+  exec(sql: string): Array<{ columns: string[]; values: unknown[][] }>;
+  prepare(sql: string): SqlJsStatement;
+  close(): void;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────
 
 export interface HybridSearchResult {
@@ -80,21 +97,34 @@ export interface KeywordHit {
 
 // ─── FTS5 Helpers ─────────────────────────────────────────────────────
 
+const MAX_FTS_TOKENS = 32;
+const MAX_TOKEN_LENGTH = 128;
+
 /**
  * Build an FTS5 MATCH query from raw user input.
  *
  * Tokenizes on Unicode word boundaries, strips quotes, wraps each token in
  * double quotes, and AND-joins them. Returns null if no valid tokens remain.
+ * Input is bounded to prevent degenerate SQL generation.
  */
 export function buildFtsQuery(raw: string): string | null {
-  const tokens =
-    raw
-      .match(/[\p{L}\p{N}_]+/gu)
-      ?.map((t) => t.trim())
-      .filter(Boolean) ?? [];
+  if (!raw || typeof raw !== "string") {
+    return null;
+  }
+
+  // Truncate input before regex to avoid ReDoS on huge strings
+  const truncated = raw.slice(0, 4096);
+
+  const tokens = (truncated.match(/[\p{L}\p{N}_]+/gu) ?? [])
+    .map((t) => t.slice(0, MAX_TOKEN_LENGTH))
+    .filter(Boolean)
+    .slice(0, MAX_FTS_TOKENS);
+
   if (tokens.length === 0) {
     return null;
   }
+
+  // FTS5 safe: double-quote wrapping with internal quote removal
   return tokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" AND ");
 }
 
@@ -113,7 +143,7 @@ export function bm25RankToScore(rank: number): number {
     const relevance = -rank;
     return relevance / (1 + relevance);
   }
-  // Positive rank = ordinal position (rank 0 is best)
+  // Positive rank = ordinal position (lower = better match)
   return 1 / (1 + rank);
 }
 
@@ -129,6 +159,12 @@ export function mergeHybridResults(params: {
   config?: Partial<HybridSearchConfig>;
 }): HybridSearchResult[] {
   const cfg = { ...DEFAULT_HYBRID_CONFIG, ...params.config };
+
+  // Normalize weights to sum to 1.0 for consistent scoring
+  const weightSum = cfg.vectorWeight + cfg.textWeight;
+  const normalizedVectorWeight =
+    weightSum > 0 ? cfg.vectorWeight / weightSum : 0.5;
+  const normalizedTextWeight = weightSum > 0 ? cfg.textWeight / weightSum : 0.5;
 
   // ── 1. Union by ID ──────────────────────────────────────────────────
   const byId = new Map<
@@ -194,7 +230,8 @@ export function mergeHybridResults(params: {
     endLine: entry.endLine,
     snippet: entry.snippet,
     score:
-      cfg.vectorWeight * entry.vectorScore + cfg.textWeight * entry.textScore,
+      normalizedVectorWeight * entry.vectorScore +
+      normalizedTextWeight * entry.textScore,
     chunkType: entry.chunkType,
     language: entry.language,
     indexedAt: entry.indexedAt,
@@ -230,8 +267,13 @@ export class HybridSearchService {
   private static instance: HybridSearchService;
   private readonly logger: Logger;
   /** Reference to the sql.js db from SqliteVectorStore */
-  private db: any = null;
+  private db: SqlJsDatabase | null = null;
   private ftsInitialized = false;
+  private initPromise: Promise<void> | null = null;
+  private initializedForDb: SqlJsDatabase | null = null;
+  private vectorSearchStmt: SqlJsStatement | null = null;
+  private static readonly VECTOR_SCAN_LIMIT = 5000;
+  private static readonly YIELD_INTERVAL = 200;
 
   private constructor() {
     this.logger = Logger.initialize("HybridSearchService", {
@@ -249,15 +291,35 @@ export class HybridSearchService {
   /**
    * Attach to the sql.js database and ensure the FTS5 virtual table exists.
    * Must be called after SqliteVectorStore.initialize().
+   * Uses a promise-as-mutex pattern to prevent concurrent double-init.
    */
-  initializeFts(db: any): void {
-    if (this.ftsInitialized && this.db === db) {
+  async initializeFts(db: SqlJsDatabase): Promise<void> {
+    // Already initialized for this exact db instance
+    if (this.initializedForDb === db) {
       return;
     }
-    this.db = db;
-    this.createFtsTables();
-    this.ftsInitialized = true;
-    this.logger.info("FTS5 virtual table initialized");
+
+    // If initialization is in-flight, wait for it
+    if (this.initPromise) {
+      await this.initPromise;
+      return;
+    }
+
+    this.initPromise = (async () => {
+      try {
+        this.db = db;
+        this.vectorSearchStmt = null; // invalidate cached statement
+        this.createFtsTables();
+        this.initializedForDb = db;
+        this.ftsInitialized = true;
+        this.logger.info("FTS5 virtual table initialized");
+      } catch (err) {
+        this.initPromise = null; // allow retry on failure
+        throw err;
+      }
+    })();
+
+    await this.initPromise;
   }
 
   get isReady(): boolean {
@@ -271,7 +333,7 @@ export class HybridSearchService {
     // content=chunks tells FTS5 to read from the chunks table (external content).
     // We use a dedicated FTS table for insert-only (no content=) for simplicity
     // since sql.js FTS5 support with external content can be tricky.
-    this.db.run(`
+    this.db!.run(`
       CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
         text,
         content='chunks',
@@ -280,19 +342,19 @@ export class HybridSearchService {
     `);
 
     // Triggers to keep FTS5 in sync with the chunks table
-    this.db.run(`
+    this.db!.run(`
       CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
         INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
       END
     `);
 
-    this.db.run(`
+    this.db!.run(`
       CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
         INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
       END
     `);
 
-    this.db.run(`
+    this.db!.run(`
       CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
         INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
         INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
@@ -310,18 +372,18 @@ export class HybridSearchService {
    */
   private backfillFts(): void {
     try {
-      const ftsCountResult = this.db.exec("SELECT COUNT(*) FROM chunks_fts");
-      const ftsCount = ftsCountResult?.[0]?.values?.[0]?.[0] ?? 0;
+      const ftsCountResult = this.db!.exec("SELECT COUNT(*) FROM chunks_fts");
+      const ftsCount = Number(ftsCountResult?.[0]?.values?.[0]?.[0] ?? 0);
 
-      const chunksCountResult = this.db.exec("SELECT COUNT(*) FROM chunks");
-      const chunksCount = chunksCountResult?.[0]?.values?.[0]?.[0] ?? 0;
+      const chunksCountResult = this.db!.exec("SELECT COUNT(*) FROM chunks");
+      const chunksCount = Number(chunksCountResult?.[0]?.values?.[0]?.[0] ?? 0);
 
       if (ftsCount < chunksCount) {
         this.logger.info(
           `Back-filling FTS5 index: ${chunksCount - ftsCount} chunks to index`,
         );
         // Rebuild from scratch for safety
-        this.db.run("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+        this.db!.run("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
         this.logger.info("FTS5 back-fill complete");
       }
     } catch (err: any) {
@@ -347,7 +409,7 @@ export class HybridSearchService {
     const results: KeywordHit[] = [];
 
     try {
-      const stmt = this.db.prepare(`
+      const stmt = this.db!.prepare(`
         SELECT
           c.id,
           c.text,
@@ -391,9 +453,27 @@ export class HybridSearchService {
   // ── Vector Search → VectorHit adapter ──────────────────────────────
 
   /**
+   * Get or create a reusable prepared statement for vector search.
+   */
+  private getVectorSearchStmt(): SqlJsStatement {
+    if (!this.vectorSearchStmt) {
+      this.vectorSearchStmt = this.db!.prepare(`
+        SELECT id, text, vector, file_path, start_line, end_line,
+               chunk_type, language, indexed_at
+        FROM chunks
+        WHERE vector IS NOT NULL
+        LIMIT ?
+      `);
+    }
+    return this.vectorSearchStmt;
+  }
+
+  /**
    * Run a vector cosine-similarity search and return VectorHit items.
-   * Delegates to the raw sql.js query for efficiency (avoids materializing
-   * VectorDocument objects we would immediately throw away).
+   *
+   * Uses a bounded scan with a reusable prepared statement and a top-K
+   * buffer to avoid materializing all results. Periodically yields to
+   * the event loop to keep the extension host responsive.
    */
   async vectorSearch(
     queryVector: number[],
@@ -403,47 +483,71 @@ export class HybridSearchService {
     if (!this.isReady) {
       return [];
     }
+    if (queryVector.length === 0) {
+      return [];
+    }
 
-    const results: VectorHit[] = [];
-    const stmt = this.db.prepare(
-      "SELECT id, text, vector, file_path, start_line, end_line, chunk_type, language, indexed_at FROM chunks WHERE vector IS NOT NULL",
-    );
+    const stmt = this.getVectorSearchStmt();
+    stmt.bind([HybridSearchService.VECTOR_SCAN_LIMIT]);
 
-    let count = 0;
+    const topK: VectorHit[] = [];
+    let worstTopKScore = -Infinity;
+    let rowsProcessed = 0;
+
     while (stmt.step()) {
       const row = stmt.getAsObject();
       const vectorBlob = row.vector as Uint8Array;
       if (!vectorBlob || vectorBlob.length === 0) {
         continue;
       }
+
       const vector = new Float32Array(
         vectorBlob.buffer,
         vectorBlob.byteOffset,
         vectorBlob.byteLength / 4,
       );
-      const score = cosineSimilarity(queryVector, vector);
-      if (score >= threshold) {
-        results.push({
-          id: row.id as string,
-          filePath: row.file_path as string,
-          startLine: row.start_line as number,
-          endLine: row.end_line as number,
-          snippet: row.text as string,
-          vectorScore: score,
-          chunkType: row.chunk_type as string,
-          language: row.language as string,
-          indexedAt: row.indexed_at as string | undefined,
-        });
+
+      // Dimension guard: skip mismatched vectors
+      if (vector.length !== queryVector.length) {
+        continue;
       }
-      count++;
-      if (count % 500 === 0) {
+
+      const score = cosineSimilarity(queryVector, vector);
+      if (score < threshold) {
+        continue;
+      }
+      // Early exit: if we already have k items and this score can't beat the worst, skip
+      if (topK.length >= k && score <= worstTopKScore) {
+        continue;
+      }
+
+      const hit: VectorHit = {
+        id: row.id as string,
+        filePath: row.file_path as string,
+        startLine: row.start_line as number,
+        endLine: row.end_line as number,
+        snippet: row.text as string,
+        vectorScore: score,
+        chunkType: row.chunk_type as string,
+        language: row.language as string,
+        indexedAt: row.indexed_at as string | undefined,
+      };
+
+      topK.push(hit);
+      topK.sort((a, b) => b.vectorScore - a.vectorScore);
+      if (topK.length > k) {
+        topK.pop();
+      }
+      worstTopKScore = topK[topK.length - 1]?.vectorScore ?? -Infinity;
+
+      // Yield to keep the extension host responsive
+      if (++rowsProcessed % HybridSearchService.YIELD_INTERVAL === 0) {
         await new Promise((resolve) => setImmediate(resolve));
       }
     }
-    stmt.free();
+    stmt.reset(); // reuse the prepared statement
 
-    results.sort((a, b) => b.vectorScore - a.vectorScore);
-    return results.slice(0, k);
+    return topK;
   }
 
   // ── Hybrid Search (public API) ─────────────────────────────────────
