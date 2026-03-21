@@ -695,15 +695,68 @@
             "default": false,
             "description": "Route LLM API calls through a local proxy that injects credentials from OS keychain. API keys never reach SDK clients."
           },
+          "codebuddy.hybridSearch.vectorWeight": {
+            "type": "number",
+            "default": 0.7,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Weight for vector (semantic) scores in hybrid search. Higher values favour semantic similarity. Weights are automatically normalised so vectorWeight + textWeight = 1."
+          },
+          "codebuddy.hybridSearch.textWeight": {
+            "type": "number",
+            "default": 0.3,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Weight for BM25 (keyword) scores in hybrid search. Higher values favour exact keyword matches. Weights are automatically normalised so vectorWeight + textWeight = 1."
+          },
+          "codebuddy.hybridSearch.topK": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Maximum number of results returned by hybrid search."
+          },
+          "codebuddy.hybridSearch.mmr.enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable Maximal Marginal Relevance (MMR) re-ranking for result diversity."
+          },
+          "codebuddy.hybridSearch.mmr.lambda": {
+            "type": "number",
+            "default": 0.7,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "MMR lambda: 0 = max diversity, 1 = max relevance."
+          },
+          "codebuddy.hybridSearch.temporalDecay.enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable temporal decay so recently indexed content ranks higher."
+          },
+          "codebuddy.hybridSearch.temporalDecay.halfLifeDays": {
+            "type": "integer",
+            "default": 30,
+            "minimum": 1,
+            "maximum": 365,
+            "description": "Number of days after which a result's score is halved."
+          },
           "codebuddy.permissionScope.defaultProfile": {
             "type": "string",
-            "enum": ["restricted", "standard", "trusted"],
+            "enum": [
+              "restricted",
+              "standard",
+              "trusted"
+            ],
             "default": "standard",
             "description": "Default permission profile: restricted (read-only, no terminal), standard (read/write, safe terminal), trusted (full access, auto-approve). Overridden by .codebuddy/permissions.json if present."
           },
           "codebuddy.accessControl.defaultMode": {
             "type": "string",
-            "enum": ["open", "allow", "deny"],
+            "enum": [
+              "open",
+              "allow",
+              "deny"
+            ],
             "default": "open",
             "description": "Default access control mode: open (no restrictions), allow (only listed users), deny (block listed users). Overridden by .codebuddy/access.json if present."
           },
@@ -1259,7 +1312,7 @@
     "readable-stream": "^4.5.2",
     "rss-parser": "^3.13.0",
     "simple-git": "^3.25.0",
-    "sql.js": "^1.13.0",
+    "sql.js": "^1.14.1",
     "web-tree-sitter": "^0.25.10"
   },
   "overrides": {
