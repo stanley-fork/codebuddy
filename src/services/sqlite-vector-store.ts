@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as crypto from "crypto";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
+import { HybridSearchService } from "../memory/hybrid-search.service";
 
 export interface VectorDocument {
   id: string;
@@ -117,6 +118,10 @@ export class SqliteVectorStore implements vscode.Disposable {
 
       this.db = new this.SQL.Database(data);
       this.createTables();
+
+      // Initialize FTS5 hybrid search (creates virtual table + back-fills)
+      HybridSearchService.getInstance().initializeFts(this.db);
+
       this.saveToDisk();
 
       this.initialized = true;
@@ -503,6 +508,14 @@ export class SqliteVectorStore implements vscode.Disposable {
 
   get isReady(): boolean {
     return this.initialized;
+  }
+
+  /**
+   * Expose the underlying sql.js database for the HybridSearchService.
+   * Returns null if the store is not initialized.
+   */
+  getDatabase(): any {
+    return this.initialized ? this.db : null;
   }
 
   dispose(): void {
