@@ -104,6 +104,11 @@ export class WorkspaceIdentityService {
 
     if (this.workspaceRoot) {
       const resolved = path.resolve(this.workspaceRoot);
+      /**
+       * Take the first 12 hex characters (48 bits) of the SHA-256 hash.
+       * Birthday-collision probability at N=1,000 workspaces ≈ 0.18%.
+       * Increase to 16 chars (64 bits) if enterprise-scale deployment is needed.
+       */
       this.workspaceHash = crypto
         .createHash("sha256")
         .update(resolved)
@@ -206,22 +211,34 @@ export class WorkspaceIdentityService {
     if (!this.workspaceRoot) return undefined;
     const lexicalResolved = path.resolve(this.workspaceRoot, filePath);
 
+    let realResolved: string;
+    let realRoot: string;
     try {
-      const realResolved = tryRealpath(lexicalResolved);
-      const realRoot = tryRealpath(this.workspaceRoot);
-      const rel = path.relative(realRoot, realResolved);
-      if (rel.startsWith("..") || path.isAbsolute(rel)) {
-        this.logger.warn(`Blocked path traversal attempt: ${filePath}`);
-        return undefined;
-      }
-      return realResolved;
+      realResolved = tryRealpath(lexicalResolved);
+      realRoot = tryRealpath(this.workspaceRoot);
     } catch (err: any) {
-      // EACCES, ELOOP (circular symlink), etc. — treat as invalid
-      this.logger.warn(
-        `Path validation error for "${filePath}": ${err.message}`,
-      );
+      if (err.code === "EACCES") {
+        this.logger.warn(
+          `Permission denied resolving path "${filePath}" — treating as invalid`,
+        );
+      } else if (err.code === "ELOOP") {
+        this.logger.warn(
+          `Circular symlink detected for "${filePath}" — blocking`,
+        );
+      } else {
+        this.logger.warn(
+          `Unexpected path error for "${filePath}": ${err.message}`,
+        );
+      }
       return undefined;
     }
+
+    const rel = path.relative(realRoot, realResolved);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      this.logger.warn(`Blocked path traversal attempt: ${filePath}`);
+      return undefined;
+    }
+    return realResolved;
   }
 
   /**
@@ -234,6 +251,9 @@ export class WorkspaceIdentityService {
       process.env.NODE_ENV === "production"
     ) {
       throw new Error("_resetForTesting() must not be called in production");
+    }
+    if (WorkspaceIdentityService.instance) {
+      WorkspaceIdentityService.instance._logger = undefined;
     }
     WorkspaceIdentityService.instance = undefined;
   }

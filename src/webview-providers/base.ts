@@ -340,6 +340,8 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
         this.logger.info(
           "Workspace folders changed, publishing updated workspace",
         );
+        // Reset session state so stale IDs from the old workspace aren't reused
+        this.currentSessionId = null;
         await this.publishActiveWorkspace();
         await this.publishWorkSpace();
       }),

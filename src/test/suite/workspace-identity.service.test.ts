@@ -239,4 +239,43 @@ suite("WorkspaceIdentityService", () => {
       undefined,
     );
   });
+
+  // ── Reinitialize isolation ──
+
+  test("reinitialize changes agentId and old sessions are isolated", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    svc.initialize(tmpWs("workspace-a"));
+    const idA = svc.getAgentId();
+
+    svc.reinitialize(tmpWs("workspace-b"));
+    const idB = svc.getAgentId();
+
+    assert.notStrictEqual(idA, idB);
+    assert.match(idA, /^agentId-[a-f0-9]{12}$/);
+    assert.match(idB, /^agentId-[a-f0-9]{12}$/);
+    assert.ok(svc.getWorkspaceRoot()?.endsWith("workspace-b"));
+  });
+
+  test("validatePathWithinWorkspace uses new root after reinitialize", () => {
+    const svc = WorkspaceIdentityService.getInstance();
+    const wsA = tmpWs("workspace-a");
+    const wsB = tmpWs("workspace-b");
+    svc.initialize(wsA);
+    // Path inside wsA is valid before reinitialize
+    assert.strictEqual(
+      svc.validatePathWithinWorkspace(path.join(wsA, "src", "file.ts")),
+      path.join(wsA, "src", "file.ts"),
+    );
+    svc.reinitialize(wsB);
+    // After reinitialize, wsA path should be out-of-workspace
+    assert.strictEqual(
+      svc.validatePathWithinWorkspace(path.join(wsA, "src", "file.ts")),
+      undefined,
+    );
+    // But wsB path should be valid
+    assert.strictEqual(
+      svc.validatePathWithinWorkspace(path.join(wsB, "src", "file.ts")),
+      path.join(wsB, "src", "file.ts"),
+    );
+  });
 });
