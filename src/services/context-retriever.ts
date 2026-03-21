@@ -160,7 +160,10 @@ export class ContextRetriever {
           ContextRetriever.SEARCH_RESULT_COUNT,
         );
         results = kwResults.map((r: any) => ({
-          document: { filePath: r.document?.filePath ?? r.filePath, text: r.document?.text ?? r.text },
+          document: {
+            filePath: r.document?.filePath ?? r.filePath,
+            text: r.document?.text ?? r.text,
+          },
           score: r.score ?? 0,
         }));
       }
@@ -180,10 +183,19 @@ export class ContextRetriever {
 
       // If it was a general query, append common files to existing results
       // If it was a fallback, we just use common files (and any keyword matches if we had them)
-      results = [...results, ...commonFilesResults.map((r: any) => ({
-        document: { filePath: r.document?.filePath ?? "", text: r.document?.text ?? "" },
-        score: r.score ?? 0,
-      } as SearchResult))];
+      results = [
+        ...results,
+        ...commonFilesResults.map(
+          (r: any) =>
+            ({
+              document: {
+                filePath: r.document?.filePath ?? "",
+                text: r.document?.text ?? "",
+              },
+              score: r.score ?? 0,
+            }) as SearchResult,
+        ),
+      ];
 
       if (results.length === 0 && searchMethod.includes("Fallback")) {
         searchMethod = "Keyword (Fallback) + Common Files";
