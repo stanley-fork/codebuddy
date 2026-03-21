@@ -1,4 +1,5 @@
 import * as crypto from "crypto";
+import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
@@ -37,6 +38,8 @@ export class WorkspaceIdentityService {
   private workspaceHash: string | undefined;
   /** Resolved workspace root path (first workspace folder). */
   private workspaceRoot: string | undefined;
+  /** Whether initialize() has been called. */
+  private initialized = false;
 
   private constructor() {}
 
@@ -50,8 +53,30 @@ export class WorkspaceIdentityService {
   /**
    * Initialize with the current workspace root.
    * Call once during extension activation (after workspace folders are available).
+   * Subsequent calls are ignored — use `reinitialize()` for intentional changes.
    */
   public initialize(workspacePath?: string): void {
+    if (this.initialized) {
+      logger.warn(
+        "WorkspaceIdentityService.initialize() called more than once — ignored. " +
+          "Use reinitialize() to intentionally change the workspace.",
+      );
+      return;
+    }
+    this._doInitialize(workspacePath);
+    this.initialized = true;
+  }
+
+  /**
+   * Explicitly reinitialize after a workspace folder change.
+   * Callers are responsible for resetting any cached agent IDs.
+   */
+  public reinitialize(workspacePath?: string): void {
+    this.initialized = false;
+    this.initialize(workspacePath);
+  }
+
+  private _doInitialize(workspacePath?: string): void {
     this.workspaceRoot =
       workspacePath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
@@ -126,6 +151,7 @@ export class WorkspaceIdentityService {
   /**
    * Resolve a relative path within the workspace root, guarding against
    * path-traversal attacks (inspired by nanoclaw/src/group-folder.ts).
+   * Resolves symlinks to prevent escape via indirection.
    *
    * Throws if the resolved path escapes the workspace root.
    */
@@ -133,16 +159,30 @@ export class WorkspaceIdentityService {
     if (!this.workspaceRoot) {
       throw new Error("No workspace root — cannot resolve path");
     }
-    const resolved = path.resolve(this.workspaceRoot, relativePath);
-    const rel = path.relative(this.workspaceRoot, resolved);
+    const lexicalResolved = path.resolve(this.workspaceRoot, relativePath);
+
+    // Resolve symlinks to get the real path (only if it exists)
+    let realResolved: string;
+    let realRoot: string;
+    try {
+      realResolved = fs.realpathSync(lexicalResolved);
+      realRoot = fs.realpathSync(this.workspaceRoot);
+    } catch {
+      // Path does not yet exist — fall back to lexical check
+      realResolved = lexicalResolved;
+      realRoot = this.workspaceRoot;
+    }
+
+    const rel = path.relative(realRoot, realResolved);
     if (rel.startsWith("..") || path.isAbsolute(rel)) {
       throw new Error(`Path escapes workspace root: ${relativePath}`);
     }
-    return resolved;
+    return realResolved;
   }
 
   /**
    * Validate that a file path (absolute or relative) is within the workspace.
+   * Resolves symlinks to prevent escape via indirection.
    *
    * Returns the resolved absolute path if valid, or `undefined` if:
    * - the path escapes the workspace root, or
@@ -152,17 +192,36 @@ export class WorkspaceIdentityService {
    */
   public validatePathWithinWorkspace(filePath: string): string | undefined {
     if (!this.workspaceRoot) return undefined;
-    const resolved = path.resolve(this.workspaceRoot, filePath);
-    const rel = path.relative(this.workspaceRoot, resolved);
+    const lexicalResolved = path.resolve(this.workspaceRoot, filePath);
+
+    let realResolved: string;
+    let realRoot: string;
+    try {
+      realResolved = fs.realpathSync(lexicalResolved);
+      realRoot = fs.realpathSync(this.workspaceRoot);
+    } catch {
+      realResolved = lexicalResolved;
+      realRoot = this.workspaceRoot;
+    }
+
+    const rel = path.relative(realRoot, realResolved);
     if (rel.startsWith("..") || path.isAbsolute(rel)) {
       logger.warn(`Blocked path traversal attempt: ${filePath}`);
       return undefined;
     }
-    return resolved;
+    return realResolved;
   }
 
   /** Reset singleton state for unit tests. */
   public static _resetForTesting(): void {
     WorkspaceIdentityService.instance = undefined;
   }
+}
+
+/**
+ * Module-level convenience — single source of truth for the workspace agent ID.
+ * Import this instead of duplicating `WorkspaceIdentityService.getInstance().getAgentId()`.
+ */
+export function getWorkspaceAgentId(): string {
+  return WorkspaceIdentityService.getInstance().getAgentId();
 }

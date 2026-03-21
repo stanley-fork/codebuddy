@@ -462,29 +462,25 @@ export class ChatHistoryRepository {
 
   /**
    * Clear all workspace context for a specific agent (history, sessions, summaries).
+   * Throws on failure so callers can show accurate feedback.
    */
   public async clearAllForAgent(agentId: string): Promise<void> {
-    try {
-      await this.dbService.ensureInitialized();
-      this.dbService.executeSqlCommand(
-        "DELETE FROM chat_history WHERE agent_id = ?",
-        [agentId],
-      );
-      this.dbService.executeSqlCommand(
-        "DELETE FROM chat_sessions WHERE agent_id = ?",
-        [agentId],
-      );
-      this.dbService.executeSqlCommand(
-        "DELETE FROM chat_summaries WHERE agent_id = ?",
-        [agentId],
-      );
-      this.logger.info(`Cleared all workspace context for agent ${agentId}`);
-    } catch (error: any) {
-      this.logger.warn(
-        `Failed to clear workspace context for agent ${agentId}:`,
-        error,
-      );
-    }
+    await this.dbService.ensureInitialized();
+    // executeSqlCommand is synchronous — run sequentially so a failure
+    // in one table doesn't leave the others silently skipped.
+    this.dbService.executeSqlCommand(
+      "DELETE FROM chat_history WHERE agent_id = ?",
+      [agentId],
+    );
+    this.dbService.executeSqlCommand(
+      "DELETE FROM chat_sessions WHERE agent_id = ?",
+      [agentId],
+    );
+    this.dbService.executeSqlCommand(
+      "DELETE FROM chat_summaries WHERE agent_id = ?",
+      [agentId],
+    );
+    this.logger.info(`Cleared all workspace context for agent ${agentId}`);
   }
 
   /**

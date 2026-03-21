@@ -72,7 +72,7 @@ import {
 } from "./handlers";
 import { HandlerContext, MessageHandlerRegistry } from "./handlers/types";
 import { AccessControlService } from "../services/access-control.service";
-import { WorkspaceIdentityService } from "../services/workspace-identity.service";
+import { getWorkspaceAgentId } from "../services/workspace-identity.service";
 
 export interface ImessageAndSystemInstruction {
   systemInstruction: string;
@@ -87,15 +87,13 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
   public static webView: vscode.WebviewView | undefined;
   public currentWebView: vscode.WebviewView | undefined;
 
-  private static readonly AGENT_ID = "agentId" as const;
-
   /**
    * Workspace-scoped agent ID.
-   * Uses WorkspaceIdentityService for isolation; falls back to legacy
-   * constant when the service is not yet initialized.
+   * Falls back to `"agentId"` (global) when no workspace is open.
+   * @see WorkspaceIdentityService
    */
   protected static getAgentId(): string {
-    return WorkspaceIdentityService.getInstance().getAgentId();
+    return getWorkspaceAgentId();
   }
 
   /** Injected by WebViewProviderManager after construction. */
@@ -1648,12 +1646,12 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
           : userMessage;
 
       this.currentSessionId = await this.agentService.createSession(
-        BaseWebViewProvider.AGENT_ID,
+        BaseWebViewProvider.getAgentId(),
         title,
       );
 
       const sessions = await this.agentService.getSessions(
-        BaseWebViewProvider.AGENT_ID,
+        BaseWebViewProvider.getAgentId(),
       );
       await this.currentWebView?.webview.postMessage({
         type: "session-created",
@@ -1662,13 +1660,13 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
       });
     }
 
-    await this.agentService.addChatMessage(BaseWebViewProvider.AGENT_ID, {
+    await this.agentService.addChatMessage(BaseWebViewProvider.getAgentId(), {
       content: userMessage,
       type: "user",
       sessionId: this.currentSessionId,
     });
 
-    await this.agentService.addChatMessage(BaseWebViewProvider.AGENT_ID, {
+    await this.agentService.addChatMessage(BaseWebViewProvider.getAgentId(), {
       content: modelResponse,
       type: "model",
       sessionId: this.currentSessionId,

@@ -769,10 +769,28 @@ export async function activate(context: vscode.ExtensionContext) {
           if (confirm !== "Clear") return;
 
           const agentId = identity.getAgentId();
-          await ChatHistoryRepository.getInstance().clearAllForAgent(agentId);
-          vscode.window.showInformationMessage(
-            `Workspace context cleared for "${wsName}".`,
-          );
+          try {
+            await vscode.window.withProgress(
+              {
+                location: vscode.ProgressLocation.Notification,
+                title: `Clearing workspace context for "${wsName}"…`,
+                cancellable: false,
+              },
+              async () => {
+                await ChatHistoryRepository.getInstance().clearAllForAgent(
+                  agentId,
+                );
+              },
+            );
+            vscode.window.showInformationMessage(
+              `Workspace context cleared for "${wsName}".`,
+            );
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(
+              `Failed to clear workspace context for "${wsName}": ${msg}`,
+            );
+          }
         },
       ),
     );
