@@ -22,6 +22,7 @@ import { LocalWebViewProvider } from "./local";
 import type { IProviderFactory } from "./provider-factory.interface";
 import { toProviderKey } from "./provider-name";
 import { Terminal } from "../utils/terminal";
+import { getWorkspaceAgentId } from "../services/workspace-identity.service";
 
 export class WebViewProviderManager
   implements vscode.Disposable, IProviderFactory
@@ -45,7 +46,8 @@ export class WebViewProviderManager
   protected readonly orchestrator: Orchestrator;
   protected readonly chatHistoryManager: ChatHistoryManager;
 
-  static readonly AgentId = "agentId"; // TODO This is hardcoded for now,in upcoming versions, requests will be tagged to respective agents.
+  /** @deprecated Use `getWorkspaceAgentId()` from workspace-identity.service instead. */
+  static readonly AgentId = "agentId";
   private readonly logger: Logger;
   private readonly notificationService: NotificationService;
 
@@ -256,15 +258,11 @@ export class WebViewProviderManager
   }
 
   private async getChatHistory() {
-    return await this.chatHistoryManager.getHistory(
-      WebViewProviderManager.AgentId,
-    );
+    return await this.chatHistoryManager.getHistory(getWorkspaceAgentId());
   }
 
   private async clearHistory() {
-    return await this.chatHistoryManager.clearHistory(
-      WebViewProviderManager.AgentId,
-    );
+    return await this.chatHistoryManager.clearHistory(getWorkspaceAgentId());
   }
 
   private async handleClearHistory({ type, message }: IEventPayload) {
@@ -452,8 +450,8 @@ export class WebViewProviderManager
   async handleHistoryUpdate({ type, message }: IEventPayload) {
     if (message.command === "messages-updated" && message.messages?.length) {
       await this.chatHistoryManager.setHistory(
-        WebViewProviderManager.AgentId,
-        message.message,
+        getWorkspaceAgentId(),
+        message.messages,
       );
     }
   }

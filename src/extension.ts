@@ -77,6 +77,9 @@ import {
   AccessControlService,
   type AccessControlMode,
 } from "./services/access-control.service";
+import { WorkspaceIdentityService } from "./services/workspace-identity.service";
+import { ChatHistoryRepository } from "./infrastructure/repository/db-chat-history";
+import { ChatHistoryCache } from "./memory/chat-history-cache";
 
 /** QuickPick item augmented with the target access mode. */
 interface AccessModeQuickPickItem extends vscode.QuickPickItem {
@@ -225,6 +228,18 @@ export async function activate(context: vscode.ExtensionContext) {
     // Initialize External Security Config (must be before terminal for deny-pattern enforcement)
     const externalSecurityConfig = ExternalSecurityConfigService.getInstance();
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    // Initialize Workspace Identity Service (must be before any service that uses agent IDs)
+    WorkspaceIdentityService.getInstance().initialize(workspacePath);
+
+    // Migrate legacy "agentId" → workspace-scoped ID on first activation
+    const scopedAgentId = WorkspaceIdentityService.getInstance().getAgentId();
+    if (scopedAgentId !== "agentId") {
+      ChatHistoryRepository.getInstance()
+        .migrateFromGlobalAgentId(scopedAgentId)
+        .catch((err) => logger.error("Legacy agent-id migration failed:", err));
+    }
+
     await externalSecurityConfig.initialize(workspacePath);
     context.subscriptions.push(externalSecurityConfig);
 
@@ -744,6 +759,88 @@ export async function activate(context: vscode.ExtensionContext) {
           if (newMode) {
             accessControl.setMode(newMode, "setting", false);
           }
+        }
+      }),
+    );
+
+    // Clear workspace context command
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "codebuddy.clearWorkspaceContext",
+        async () => {
+          const identity = WorkspaceIdentityService.getInstance();
+          const wsName = identity.getWorkspaceName();
+          const confirm = await vscode.window.showWarningMessage(
+            `Clear all chat history and sessions for "${wsName}"? This cannot be undone.`,
+            { modal: true },
+            "Clear",
+          );
+          if (confirm !== "Clear") return;
+
+          const agentId = identity.getAgentId();
+          try {
+            await vscode.window.withProgress(
+              {
+                location: vscode.ProgressLocation.Notification,
+                title: `Clearing workspace context for "${wsName}"…`,
+                cancellable: false,
+              },
+              async () => {
+                await ChatHistoryRepository.getInstance().clearAllForAgent(
+                  agentId,
+                );
+                // Invalidate in-memory cache so stale history isn't written back
+                ChatHistoryCache.clear();
+                ChatHistoryCache.deactivate();
+              },
+            );
+            vscode.window.showInformationMessage(
+              `Workspace context cleared for "${wsName}".`,
+            );
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(
+              `Failed to clear workspace context for "${wsName}": ${msg}`,
+            );
+          }
+        },
+      ),
+    );
+
+    // Workspace identity status bar
+    const workspaceIdentity = WorkspaceIdentityService.getInstance();
+    const wsStatusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      45,
+    );
+    const updateWsStatusBar = () => {
+      const identity = WorkspaceIdentityService.getInstance();
+      if (identity.getWorkspaceHash()) {
+        wsStatusBar.text = `$(folder) ${identity.getWorkspaceName()}`;
+        wsStatusBar.tooltip = `CodeBuddy Workspace: ${identity.getWorkspaceName()}\nID: ${identity.getAgentId()}\nClick to clear workspace context`;
+        wsStatusBar.command = "codebuddy.clearWorkspaceContext";
+        wsStatusBar.show();
+      } else {
+        wsStatusBar.hide();
+      }
+    };
+    updateWsStatusBar();
+    context.subscriptions.push(wsStatusBar);
+
+    // Re-initialize workspace identity when workspace folders change
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        const newPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const identity = WorkspaceIdentityService.getInstance();
+        if (newPath !== identity.getWorkspaceRoot()) {
+          identity.reinitialize(newPath);
+          updateWsStatusBar();
+          // Clear stale in-memory cache for the previous workspace
+          ChatHistoryCache.clear();
+          ChatHistoryCache.deactivate();
+          logger.info(
+            `Workspace identity reinitialised → ${identity.getWorkspaceName()}`,
+          );
         }
       }),
     );

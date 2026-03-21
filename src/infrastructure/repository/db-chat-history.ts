@@ -461,6 +461,106 @@ export class ChatHistoryRepository {
   }
 
   /**
+   * Clear all workspace context for a specific agent (history, sessions, summaries).
+   * Wrapped in a transaction for atomicity. Throws on failure so callers can
+   * show accurate feedback.
+   */
+  public async clearAllForAgent(agentId: string): Promise<void> {
+    // Guard: validate agentId format to prevent accidental full-table wipes
+    if (agentId !== "agentId" && !/^agentId-[a-f0-9]{12}$/.test(agentId)) {
+      throw new Error(
+        `clearAllForAgent: invalid agentId format "${agentId}". ` +
+          `Expected "agentId" or "agentId-<12hex>".`,
+      );
+    }
+
+    await this.dbService.ensureInitialized();
+
+    // Raw SQL transaction control — SqliteDatabaseService has no native
+    // transaction() wrapper, but better-sqlite3 executes these synchronously.
+    this.dbService.executeSqlCommand("BEGIN TRANSACTION", []);
+    try {
+      const h = this.dbService.executeSqlCommand(
+        "DELETE FROM chat_history WHERE agent_id = ?",
+        [agentId],
+      );
+      const s = this.dbService.executeSqlCommand(
+        "DELETE FROM chat_sessions WHERE agent_id = ?",
+        [agentId],
+      );
+      const sm = this.dbService.executeSqlCommand(
+        "DELETE FROM chat_summaries WHERE agent_id = ?",
+        [agentId],
+      );
+      this.dbService.executeSqlCommand("COMMIT", []);
+      this.logger.info(
+        `Cleared workspace context for ${agentId}: ` +
+          `${h.changes} history, ${s.changes} sessions, ${sm.changes} summaries`,
+      );
+    } catch (error) {
+      this.dbService.executeSqlCommand("ROLLBACK", []);
+      this.logger.error(
+        `Failed to clear workspace context — rolled back`,
+        error,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * One-time migration: re-tag records from the legacy global `"agentId"`
+   * to the new workspace-scoped ID. Called during first activation.
+   * No-op if no legacy data exists or scoped data already exists.
+   */
+  public async migrateFromGlobalAgentId(newAgentId: string): Promise<boolean> {
+    const LEGACY_ID = "agentId";
+    if (newAgentId === LEGACY_ID) return false;
+
+    await this.dbService.ensureInitialized();
+
+    const legacyRows = this.dbService.executeSqlAll(
+      "SELECT COUNT(*) as count FROM chat_history WHERE agent_id = ?",
+      [LEGACY_ID],
+    );
+    const newRows = this.dbService.executeSqlAll(
+      "SELECT COUNT(*) as count FROM chat_history WHERE agent_id = ?",
+      [newAgentId],
+    );
+
+    if (legacyRows[0]?.count > 0 && newRows[0]?.count === 0) {
+      this.logger.info(
+        `Migrating ${legacyRows[0].count} legacy records from "${LEGACY_ID}" to "${newAgentId}"`,
+      );
+      this.dbService.executeSqlCommand("BEGIN TRANSACTION", []);
+      try {
+        this.dbService.executeSqlCommand(
+          "UPDATE chat_history SET agent_id = ? WHERE agent_id = ?",
+          [newAgentId, LEGACY_ID],
+        );
+        this.dbService.executeSqlCommand(
+          "UPDATE chat_sessions SET agent_id = ? WHERE agent_id = ?",
+          [newAgentId, LEGACY_ID],
+        );
+        this.dbService.executeSqlCommand(
+          "UPDATE chat_summaries SET agent_id = ? WHERE agent_id = ?",
+          [newAgentId, LEGACY_ID],
+        );
+        this.dbService.executeSqlCommand("COMMIT", []);
+        this.logger.info("Legacy agent-id migration completed");
+        return true;
+      } catch (error) {
+        this.dbService.executeSqlCommand("ROLLBACK", []);
+        this.logger.error(
+          "Legacy agent-id migration failed — rolled back",
+          error,
+        );
+        throw error;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Clear all chat history
    */
   public async clearAll(): Promise<void> {

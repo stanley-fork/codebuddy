@@ -72,6 +72,7 @@ import {
 } from "./handlers";
 import { HandlerContext, MessageHandlerRegistry } from "./handlers/types";
 import { AccessControlService } from "../services/access-control.service";
+import { getWorkspaceAgentId } from "../services/workspace-identity.service";
 
 export interface ImessageAndSystemInstruction {
   systemInstruction: string;
@@ -86,7 +87,14 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
   public static webView: vscode.WebviewView | undefined;
   public currentWebView: vscode.WebviewView | undefined;
 
-  private static readonly AGENT_ID = "agentId" as const;
+  /**
+   * Workspace-scoped agent ID.
+   * Falls back to `"agentId"` (global) when no workspace is open.
+   * @see WorkspaceIdentityService
+   */
+  protected static getAgentId(): string {
+    return getWorkspaceAgentId();
+  }
 
   /** Injected by WebViewProviderManager after construction. */
   private providerFactory?: IProviderFactory;
@@ -332,6 +340,8 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
         this.logger.info(
           "Workspace folders changed, publishing updated workspace",
         );
+        // Reset session state so stale IDs from the old workspace aren't reused
+        this.currentSessionId = null;
         await this.publishActiveWorkspace();
         await this.publishWorkSpace();
       }),
@@ -870,8 +880,9 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
 
               // Check if we should prune history for performance
               if (this.UserMessageCounter % 10 === 0) {
-                const stats =
-                  await this.chatHistoryManager.getPruningStats("agentId");
+                const stats = await this.chatHistoryManager.getPruningStats(
+                  BaseWebViewProvider.getAgentId(),
+                );
                 if (
                   stats.totalMessages > 100 ||
                   stats.estimatedTokens > 16000
@@ -880,7 +891,7 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                     `High chat history usage detected: ${stats.totalMessages} messages, ${stats.estimatedTokens} tokens`,
                   );
                   // Optionally trigger manual pruning here
-                  // await this.pruneHistoryManually("agentId", { maxMessages: 50, maxTokens: 8000 });
+                  // await this.pruneHistoryManually(BaseWebViewProvider.getAgentId(), { maxMessages: 50, maxTokens: 8000 });
                 }
               }
 
@@ -902,12 +913,13 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                       ? message.message.substring(0, 47) + "..."
                       : message.message;
                   this.currentSessionId = await this.agentService.createSession(
-                    "agentId",
+                    BaseWebViewProvider.getAgentId(),
                     title,
                   );
                   // Notify webview about the new session
-                  const sessions =
-                    await this.agentService.getSessions("agentId");
+                  const sessions = await this.agentService.getSessions(
+                    BaseWebViewProvider.getAgentId(),
+                  );
                   await this.currentWebView?.webview.postMessage({
                     type: "session-created",
                     sessionId: this.currentSessionId,
@@ -916,12 +928,15 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
                 }
 
                 // Save user message to history
-                await this.agentService.addChatMessage("agentId", {
-                  content: message.message,
-                  type: "user",
-                  sessionId: this.currentSessionId,
-                  metadata: { threadId: message.metaData?.threadId },
-                });
+                await this.agentService.addChatMessage(
+                  BaseWebViewProvider.getAgentId(),
+                  {
+                    content: message.message,
+                    type: "user",
+                    sessionId: this.currentSessionId,
+                    metadata: { threadId: message.metaData?.threadId },
+                  },
+                );
 
                 let context: string | undefined;
                 if (message.metaData?.context?.length > 0) {
@@ -947,12 +962,15 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
 
                   // Save agent response to history
                   if (fullResponse) {
-                    await this.agentService.addChatMessage("agentId", {
-                      content: fullResponse,
-                      type: "model",
-                      sessionId: this.currentSessionId,
-                      metadata: { threadId: message.metaData?.threadId },
-                    });
+                    await this.agentService.addChatMessage(
+                      BaseWebViewProvider.getAgentId(),
+                      {
+                        content: fullResponse,
+                        type: "model",
+                        sessionId: this.currentSessionId,
+                        metadata: { threadId: message.metaData?.threadId },
+                      },
+                    );
                   }
                 } catch (agentError: unknown) {
                   let errorMessage = "An unknown error occurred in Agent mode";
@@ -1128,8 +1146,9 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
             case "webview-ready":
               await this.publishWorkSpace();
               // Initialize current session
-              this.currentSessionId =
-                await this.agentService.getCurrentSession("agentId");
+              this.currentSessionId = await this.agentService.getCurrentSession(
+                BaseWebViewProvider.getAgentId(),
+              );
               if (this.currentSessionId) {
                 // Sync history for the current session
                 await this.sessionHandler.synchronizeSessionHistory(
@@ -1629,12 +1648,12 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
           : userMessage;
 
       this.currentSessionId = await this.agentService.createSession(
-        BaseWebViewProvider.AGENT_ID,
+        BaseWebViewProvider.getAgentId(),
         title,
       );
 
       const sessions = await this.agentService.getSessions(
-        BaseWebViewProvider.AGENT_ID,
+        BaseWebViewProvider.getAgentId(),
       );
       await this.currentWebView?.webview.postMessage({
         type: "session-created",
@@ -1643,13 +1662,13 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
       });
     }
 
-    await this.agentService.addChatMessage(BaseWebViewProvider.AGENT_ID, {
+    await this.agentService.addChatMessage(BaseWebViewProvider.getAgentId(), {
       content: userMessage,
       type: "user",
       sessionId: this.currentSessionId,
     });
 
-    await this.agentService.addChatMessage(BaseWebViewProvider.AGENT_ID, {
+    await this.agentService.addChatMessage(BaseWebViewProvider.getAgentId(), {
       content: modelResponse,
       type: "model",
       sessionId: this.currentSessionId,
