@@ -797,17 +797,38 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Workspace identity status bar
     const workspaceIdentity = WorkspaceIdentityService.getInstance();
-    if (workspaceIdentity.getWorkspaceHash()) {
-      const wsStatusBar = vscode.window.createStatusBarItem(
-        vscode.StatusBarAlignment.Right,
-        45,
-      );
-      wsStatusBar.text = `$(folder) ${workspaceIdentity.getWorkspaceName()}`;
-      wsStatusBar.tooltip = `CodeBuddy Workspace: ${workspaceIdentity.getWorkspaceName()}\nID: ${workspaceIdentity.getAgentId()}\nClick to clear workspace context`;
-      wsStatusBar.command = "codebuddy.clearWorkspaceContext";
-      wsStatusBar.show();
-      context.subscriptions.push(wsStatusBar);
-    }
+    const wsStatusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      45,
+    );
+    const updateWsStatusBar = () => {
+      const identity = WorkspaceIdentityService.getInstance();
+      if (identity.getWorkspaceHash()) {
+        wsStatusBar.text = `$(folder) ${identity.getWorkspaceName()}`;
+        wsStatusBar.tooltip = `CodeBuddy Workspace: ${identity.getWorkspaceName()}\nID: ${identity.getAgentId()}\nClick to clear workspace context`;
+        wsStatusBar.command = "codebuddy.clearWorkspaceContext";
+        wsStatusBar.show();
+      } else {
+        wsStatusBar.hide();
+      }
+    };
+    updateWsStatusBar();
+    context.subscriptions.push(wsStatusBar);
+
+    // Re-initialize workspace identity when workspace folders change
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        const newPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const identity = WorkspaceIdentityService.getInstance();
+        if (newPath !== identity.getWorkspaceRoot()) {
+          identity.reinitialize(newPath);
+          updateWsStatusBar();
+          logger.info(
+            `Workspace identity reinitialised → ${identity.getWorkspaceName()}`,
+          );
+        }
+      }),
+    );
 
     // Run Doctor in background (after all services ready — non-blocking)
     setImmediate(() => {

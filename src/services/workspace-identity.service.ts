@@ -15,12 +15,17 @@ const GLOBAL_RULES_FILE = path.join(GLOBAL_CODEBUDDY_DIR, "rules.md");
 
 // ─── Service ─────────────────────────────────────────────────────────
 
-const logger = Logger.initialize("WorkspaceIdentityService", {
-  minLevel: LogLevel.DEBUG,
-  enableConsole: true,
-  enableFile: true,
-  enableTelemetry: false,
-});
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/** Resolve symlinks, falling back to `p` only when the path does not exist yet. */
+function tryRealpath(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch (err: any) {
+    if (err.code === "ENOENT") return p; // Not yet created — lexical is fine
+    throw err; // EACCES, ELOOP, etc. — must not silently bypass
+  }
+}
 
 /**
  * Service to generate stable, workspace-scoped identifiers.
@@ -30,6 +35,9 @@ const logger = Logger.initialize("WorkspaceIdentityService", {
  *
  * The hash is deterministic: the same workspace folder always produces
  * the same prefix regardless of platform or session.
+ *
+ * @remarks Currently always uses `workspaceFolders[0]`. Multi-root
+ * workspace support is a future enhancement.
  */
 export class WorkspaceIdentityService {
   private static instance: WorkspaceIdentityService | undefined;
@@ -40,8 +48,22 @@ export class WorkspaceIdentityService {
   private workspaceRoot: string | undefined;
   /** Whether initialize() has been called. */
   private initialized = false;
+  /** Lazy-initialized logger (avoids module-level init before VS Code context). */
+  private _logger?: Logger;
 
   private constructor() {}
+
+  private get logger(): Logger {
+    if (!this._logger) {
+      this._logger = Logger.initialize("WorkspaceIdentityService", {
+        minLevel: LogLevel.DEBUG,
+        enableConsole: true,
+        enableFile: true,
+        enableTelemetry: false,
+      });
+    }
+    return this._logger;
+  }
 
   public static getInstance(): WorkspaceIdentityService {
     if (!WorkspaceIdentityService.instance) {
@@ -57,7 +79,7 @@ export class WorkspaceIdentityService {
    */
   public initialize(workspacePath?: string): void {
     if (this.initialized) {
-      logger.warn(
+      this.logger.warn(
         "WorkspaceIdentityService.initialize() called more than once — ignored. " +
           "Use reinitialize() to intentionally change the workspace.",
       );
@@ -87,12 +109,12 @@ export class WorkspaceIdentityService {
         .update(resolved)
         .digest("hex")
         .slice(0, 12);
-      logger.info(
+      this.logger.info(
         `Workspace identity: ${path.basename(resolved)} → ${this.workspaceHash}`,
       );
     } else {
       this.workspaceHash = undefined;
-      logger.warn("No workspace root — agent IDs will be global");
+      this.logger.warn("No workspace root — agent IDs will be global");
     }
   }
 
@@ -160,18 +182,8 @@ export class WorkspaceIdentityService {
       throw new Error("No workspace root — cannot resolve path");
     }
     const lexicalResolved = path.resolve(this.workspaceRoot, relativePath);
-
-    // Resolve symlinks to get the real path (only if it exists)
-    let realResolved: string;
-    let realRoot: string;
-    try {
-      realResolved = fs.realpathSync(lexicalResolved);
-      realRoot = fs.realpathSync(this.workspaceRoot);
-    } catch {
-      // Path does not yet exist — fall back to lexical check
-      realResolved = lexicalResolved;
-      realRoot = this.workspaceRoot;
-    }
+    const realResolved = tryRealpath(lexicalResolved);
+    const realRoot = tryRealpath(this.workspaceRoot);
 
     const rel = path.relative(realRoot, realResolved);
     if (rel.startsWith("..") || path.isAbsolute(rel)) {
@@ -194,26 +206,35 @@ export class WorkspaceIdentityService {
     if (!this.workspaceRoot) return undefined;
     const lexicalResolved = path.resolve(this.workspaceRoot, filePath);
 
-    let realResolved: string;
-    let realRoot: string;
     try {
-      realResolved = fs.realpathSync(lexicalResolved);
-      realRoot = fs.realpathSync(this.workspaceRoot);
-    } catch {
-      realResolved = lexicalResolved;
-      realRoot = this.workspaceRoot;
-    }
-
-    const rel = path.relative(realRoot, realResolved);
-    if (rel.startsWith("..") || path.isAbsolute(rel)) {
-      logger.warn(`Blocked path traversal attempt: ${filePath}`);
+      const realResolved = tryRealpath(lexicalResolved);
+      const realRoot = tryRealpath(this.workspaceRoot);
+      const rel = path.relative(realRoot, realResolved);
+      if (rel.startsWith("..") || path.isAbsolute(rel)) {
+        this.logger.warn(`Blocked path traversal attempt: ${filePath}`);
+        return undefined;
+      }
+      return realResolved;
+    } catch (err: any) {
+      // EACCES, ELOOP (circular symlink), etc. — treat as invalid
+      this.logger.warn(
+        `Path validation error for "${filePath}": ${err.message}`,
+      );
       return undefined;
     }
-    return realResolved;
   }
 
-  /** Reset singleton state for unit tests. */
+  /**
+   * @internal Only available in test/development environments.
+   * Reset singleton state for unit tests.
+   */
   public static _resetForTesting(): void {
+    if (
+      typeof process !== "undefined" &&
+      process.env.NODE_ENV === "production"
+    ) {
+      throw new Error("_resetForTesting() must not be called in production");
+    }
     WorkspaceIdentityService.instance = undefined;
   }
 }
