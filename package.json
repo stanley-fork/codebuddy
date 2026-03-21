@@ -328,7 +328,8 @@
       {
         "command": "codebuddy.clearWorkspaceContext",
         "title": "Clear Workspace Context",
-        "category": "CodeBuddy"
+        "category": "CodeBuddy",
+        "icon": "$(trash)"
       },
       {
         "command": "CodeBuddy.rules.open",

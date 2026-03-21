@@ -79,6 +79,7 @@ import {
 } from "./services/access-control.service";
 import { WorkspaceIdentityService } from "./services/workspace-identity.service";
 import { ChatHistoryRepository } from "./infrastructure/repository/db-chat-history";
+import { ChatHistoryCache } from "./memory/chat-history-cache";
 
 /** QuickPick item augmented with the target access mode. */
 interface AccessModeQuickPickItem extends vscode.QuickPickItem {
@@ -230,6 +231,14 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize Workspace Identity Service (must be before any service that uses agent IDs)
     WorkspaceIdentityService.getInstance().initialize(workspacePath);
+
+    // Migrate legacy "agentId" → workspace-scoped ID on first activation
+    const scopedAgentId = WorkspaceIdentityService.getInstance().getAgentId();
+    if (scopedAgentId !== "agentId") {
+      ChatHistoryRepository.getInstance()
+        .migrateFromGlobalAgentId(scopedAgentId)
+        .catch((err) => logger.error("Legacy agent-id migration failed:", err));
+    }
 
     await externalSecurityConfig.initialize(workspacePath);
     context.subscriptions.push(externalSecurityConfig);
@@ -780,6 +789,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 await ChatHistoryRepository.getInstance().clearAllForAgent(
                   agentId,
                 );
+                // Invalidate in-memory cache so stale history isn't written back
+                ChatHistoryCache.clear();
+                ChatHistoryCache.deactivate();
               },
             );
             vscode.window.showInformationMessage(
@@ -823,6 +835,9 @@ export async function activate(context: vscode.ExtensionContext) {
         if (newPath !== identity.getWorkspaceRoot()) {
           identity.reinitialize(newPath);
           updateWsStatusBar();
+          // Clear stale in-memory cache for the previous workspace
+          ChatHistoryCache.clear();
+          ChatHistoryCache.deactivate();
           logger.info(
             `Workspace identity reinitialised → ${identity.getWorkspaceName()}`,
           );

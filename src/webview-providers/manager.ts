@@ -451,7 +451,7 @@ export class WebViewProviderManager
     if (message.command === "messages-updated" && message.messages?.length) {
       await this.chatHistoryManager.setHistory(
         getWorkspaceAgentId(),
-        message.message,
+        message.messages,
       );
     }
   }
