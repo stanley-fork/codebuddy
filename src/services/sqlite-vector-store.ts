@@ -123,7 +123,7 @@ export class SqliteVectorStore implements vscode.Disposable {
       this.db = new this.SQL.Database(data);
       this.createTables();
 
-      // Initialize FTS5 hybrid search via callback (avoids circular dependency)
+      // Initialize FTS4 hybrid search via callback (avoids circular dependency)
       for (const cb of this.onDbInitializedCallbacks) {
         await cb(this.db);
       }

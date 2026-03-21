@@ -105,7 +105,7 @@ export class ContextRetriever implements vscode.Disposable {
     let searchMethod = "Hybrid";
     const hybridConfig = this.hybridSearchConfig;
 
-    // ── Try hybrid search (vector + FTS5) ─────────────────────────────
+    // ── Try hybrid search (vector + FTS4) ─────────────────────────────
     if (hybridSearch.isReady) {
       try {
         this.logger.info(`Running hybrid search for: ${input}`);
@@ -125,7 +125,7 @@ export class ContextRetriever implements vscode.Disposable {
           error,
         );
 
-        // Fall back to FTS5 keyword-only search
+        // Fall back to FTS4 keyword-only search
         try {
           const keywordResults = hybridSearch.keywordOnlySearch(
             input,
@@ -134,7 +134,7 @@ export class ContextRetriever implements vscode.Disposable {
           results = keywordResults.map(toSearchResult);
           searchMethod = "BM25 Keyword";
         } catch (ftsError: unknown) {
-          this.logger.warn("FTS5 search also failed", ftsError);
+          this.logger.warn("FTS4 search also failed", ftsError);
         }
       }
     }

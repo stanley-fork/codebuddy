@@ -20,7 +20,7 @@ import {
 } from "../../memory/mmr";
 import {
   buildFtsQuery,
-  bm25RankToScore,
+  computeFts4Score,
   mergeHybridResults,
   type VectorHit,
   type KeywordHit,
@@ -202,9 +202,9 @@ suite("MMR Re-ranking", () => {
   });
 });
 
-// ─── FTS5 Helpers ────────────────────────────────────────────────────
+// ─── FTS Helpers ──────────────────────────────────────────────────────
 
-suite("FTS5 Helpers", () => {
+suite("FTS Helpers", () => {
   test("buildFtsQuery tokenizes and AND-joins", () => {
     assert.strictEqual(
       buildFtsQuery("hello world"),
@@ -250,25 +250,39 @@ suite("FTS5 Helpers", () => {
     assert.strictEqual(buildFtsQuery(undefined), null);
   });
 
-  test("bm25RankToScore is 1 for rank 0", () => {
-    assert.ok(Math.abs(bm25RankToScore(0) - 1) < 1e-10);
+  test("computeFts4Score returns positive score for matching row", () => {
+    // Simulate matchinfo('pcx') for 1 phrase, 1 column:
+    // p=1, c=1, hits_this_row=2, hits_all_rows=5, docs_with_hit=3
+    const ints = new Int32Array([1, 1, 2, 5, 3]);
+    const blob = new Uint8Array(ints.buffer);
+    const score = computeFts4Score(blob);
+    // tf * (1/df) = 2 * (1/3) = 0.667; normalized: 0.667/(1+0.667) ≈ 0.4
+    assert.ok(score > 0.3 && score < 0.5);
   });
 
-  test("bm25RankToScore is 0.5 for rank 1", () => {
-    assert.ok(Math.abs(bm25RankToScore(1) - 0.5) < 1e-10);
+  test("computeFts4Score returns higher score for more hits", () => {
+    // 3 hits in this row
+    const moreHits = new Int32Array([1, 1, 3, 5, 3]);
+    // 1 hit in this row
+    const fewerHits = new Int32Array([1, 1, 1, 5, 3]);
+    const scoreMore = computeFts4Score(new Uint8Array(moreHits.buffer));
+    const scoreFewer = computeFts4Score(new Uint8Array(fewerHits.buffer));
+    assert.ok(scoreMore > scoreFewer);
   });
 
-  test("bm25RankToScore handles negative ranks (FTS5 BM25)", () => {
-    const strongest = bm25RankToScore(-4.2);
-    const middle = bm25RankToScore(-2.1);
-    const weakest = bm25RankToScore(-0.5);
-    assert.ok(strongest > middle);
-    assert.ok(middle > weakest);
-    assert.ok(weakest > 0);
+  test("computeFts4Score returns higher score for rarer terms", () => {
+    // Rare term: only 1 doc has it
+    const rare = new Int32Array([1, 1, 1, 1, 1]);
+    // Common term: 100 docs have it
+    const common = new Int32Array([1, 1, 1, 100, 100]);
+    const scoreRare = computeFts4Score(new Uint8Array(rare.buffer));
+    const scoreCommon = computeFts4Score(new Uint8Array(common.buffer));
+    assert.ok(scoreRare > scoreCommon);
   });
 
-  test("bm25RankToScore handles non-finite input", () => {
-    const score = bm25RankToScore(NaN);
+  test("computeFts4Score handles empty matchinfo gracefully", () => {
+    const empty = new Uint8Array(0);
+    const score = computeFts4Score(empty);
     assert.ok(score > 0 && score < 1);
   });
 });
