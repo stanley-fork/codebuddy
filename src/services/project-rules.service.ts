@@ -425,7 +425,7 @@ export class ProjectRulesService implements vscode.Disposable {
 
   private async mergeSettingsRules(): Promise<void> {
     // Get global rules from ~/.codebuddy/rules.md (lowest priority)
-    const globalRulesContent = this.loadGlobalRules();
+    const globalRulesContent = await this.loadGlobalRules();
 
     // Get custom system prompt from settings
     const customSystemPrompt = vscode.workspace
@@ -443,23 +443,27 @@ export class ProjectRulesService implements vscode.Disposable {
       .filter((r) => r.enabled)
       .map((r) => r.content);
 
-    // Merge all sources — priority: workspace file > global file > settings
+    // Priority (highest → lowest): workspace file > settings snippets > global file.
+    // Later entries in the array take precedence when topics conflict.
     const allRules: string[] = [];
 
+    // 1. Global rules (lowest priority — can be overridden by everything below)
     if (globalRulesContent) {
       allRules.push("## Global Rules\n" + globalRulesContent);
     }
 
-    if (this.cachedRules?.content) {
-      allRules.push(this.cachedRules.content);
-    }
-
+    // 2. Settings-level snippets
     if (enabledRules.length > 0) {
       allRules.push("## Settings-Based Rules\n" + enabledRules.join("\n\n"));
     }
 
     if (customSystemPrompt) {
       allRules.push("## Additional Instructions\n" + customSystemPrompt);
+    }
+
+    // 3. Workspace-level rules file (highest priority — overrides all)
+    if (this.cachedRules?.content) {
+      allRules.push(this.cachedRules.content);
     }
 
     if (allRules.length > 0) {
@@ -486,20 +490,22 @@ export class ProjectRulesService implements vscode.Disposable {
   /**
    * Load global rules from ~/.codebuddy/rules.md (shared across all workspaces).
    */
-  private loadGlobalRules(): string | undefined {
+  private async loadGlobalRules(): Promise<string | undefined> {
     try {
       const globalPath = WorkspaceIdentityService.getGlobalRulesPath();
-      if (fs.existsSync(globalPath)) {
-        const content = fs.readFileSync(globalPath, "utf-8").trim();
-        if (content) {
-          this.logger.info(
-            `Loaded global rules from ${globalPath} (${this.estimateTokens(content)} tokens)`,
-          );
-          return content;
-        }
+      await fs.promises.access(globalPath);
+      const content = (await fs.promises.readFile(globalPath, "utf-8")).trim();
+      if (content) {
+        this.logger.info(
+          `Loaded global rules from ${globalPath} (${this.estimateTokens(content)} tokens)`,
+        );
+        return content;
       }
     } catch (error: any) {
-      this.logger.warn(`Failed to load global rules: ${error.message}`);
+      // ENOENT is expected when no global rules file exists
+      if (error.code !== "ENOENT") {
+        this.logger.warn(`Failed to load global rules: ${error.message}`);
+      }
     }
     return undefined;
   }

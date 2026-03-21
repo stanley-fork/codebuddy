@@ -117,18 +117,20 @@ export class FileTool {
 
   public async execute(fileConfigs: IFileToolConfig[]) {
     const identity = WorkspaceIdentityService.getInstance();
-    for (const cfg of fileConfigs) {
-      if (
-        cfg.file_path &&
-        identity.validatePathWithinWorkspace(cfg.file_path) === undefined &&
-        identity.getWorkspaceRoot()
-      ) {
-        return [
-          {
-            content: `Error: Access denied — "${path.basename(cfg.file_path)}" is outside the workspace.`,
-            function: cfg.function_name,
-          },
-        ];
+    if (identity.getWorkspaceRoot()) {
+      const violations = fileConfigs.filter(
+        (cfg) =>
+          cfg.file_path &&
+          identity.validatePathWithinWorkspace(cfg.file_path) === undefined,
+      );
+      if (violations.length > 0) {
+        const names = violations
+          .map((cfg) => `"${path.basename(cfg.file_path!)}"`)
+          .join(", ");
+        return violations.map((cfg) => ({
+          content: `Error: Access denied — ${names} ${violations.length === 1 ? "is" : "are"} outside the workspace.`,
+          function: cfg.function_name,
+        }));
       }
     }
     return await this.contextRetriever?.readFiles(fileConfigs);

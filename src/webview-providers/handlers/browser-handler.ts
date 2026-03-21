@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { WebviewMessageHandler, HandlerContext } from "./types";
 import { AgentService } from "../../services/agent-state";
-import { WorkspaceIdentityService } from "../../services/workspace-identity.service";
+import { getWorkspaceAgentId } from "../../services/workspace-identity.service";
 import type { MCPToolResult } from "../../MCP/types";
 import type { ISecurityPolicy } from "../../services/security-policy.interface";
 
@@ -190,7 +190,7 @@ export class BrowserHandler implements WebviewMessageHandler {
   ) {}
 
   private getAgentId(): string {
-    return WorkspaceIdentityService.getInstance().getAgentId();
+    return getWorkspaceAgentId();
   }
 
   private async handleBrowserOpen(

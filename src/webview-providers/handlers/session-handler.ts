@@ -2,7 +2,7 @@ import { WebviewMessageHandler, HandlerContext } from "./types";
 import { AgentService } from "../../services/agent-state";
 import { ChatHistoryManager } from "../../services/chat-history-manager";
 import { ChatHistoryCache } from "../../memory/chat-history-cache";
-import { WorkspaceIdentityService } from "../../services/workspace-identity.service";
+import { getWorkspaceAgentId } from "../../services/workspace-identity.service";
 import {
   DbChatMessage,
   LlmChatMessage,
@@ -41,7 +41,7 @@ export class SessionHandler implements WebviewMessageHandler {
 
   /** Workspace-scoped agent ID — never hardcode "agentId". */
   private get agentId(): string {
-    return WorkspaceIdentityService.getInstance().getAgentId();
+    return getWorkspaceAgentId();
   }
 
   private formatHistoryForLlm(history: DbChatMessage[]): LlmChatMessage[] {
