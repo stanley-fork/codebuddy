@@ -476,35 +476,12 @@ export class ChatHistoryRepository {
 
     await this.dbService.ensureInitialized();
 
-    // Raw SQL transaction control — SqliteDatabaseService has no native
-    // transaction() wrapper, but better-sqlite3 executes these synchronously.
-    this.dbService.executeSqlCommand("BEGIN TRANSACTION", []);
-    try {
-      const h = this.dbService.executeSqlCommand(
-        "DELETE FROM chat_history WHERE agent_id = ?",
-        [agentId],
-      );
-      const s = this.dbService.executeSqlCommand(
-        "DELETE FROM chat_sessions WHERE agent_id = ?",
-        [agentId],
-      );
-      const sm = this.dbService.executeSqlCommand(
-        "DELETE FROM chat_summaries WHERE agent_id = ?",
-        [agentId],
-      );
-      this.dbService.executeSqlCommand("COMMIT", []);
-      this.logger.info(
-        `Cleared workspace context for ${agentId}: ` +
-          `${h.changes} history, ${s.changes} sessions, ${sm.changes} summaries`,
-      );
-    } catch (error) {
-      this.dbService.executeSqlCommand("ROLLBACK", []);
-      this.logger.error(
-        `Failed to clear workspace context — rolled back`,
-        error,
-      );
-      throw error;
-    }
+    this.dbService.runTransaction((run) => {
+      run("DELETE FROM chat_history WHERE agent_id = ?", [agentId]);
+      run("DELETE FROM chat_sessions WHERE agent_id = ?", [agentId]);
+      run("DELETE FROM chat_summaries WHERE agent_id = ?", [agentId]);
+    });
+    this.logger.info(`Cleared workspace context for ${agentId}`);
   }
 
   /**
@@ -531,31 +508,22 @@ export class ChatHistoryRepository {
       this.logger.info(
         `Migrating ${legacyRows[0].count} legacy records from "${LEGACY_ID}" to "${newAgentId}"`,
       );
-      this.dbService.executeSqlCommand("BEGIN TRANSACTION", []);
-      try {
-        this.dbService.executeSqlCommand(
-          "UPDATE chat_history SET agent_id = ? WHERE agent_id = ?",
-          [newAgentId, LEGACY_ID],
-        );
-        this.dbService.executeSqlCommand(
-          "UPDATE chat_sessions SET agent_id = ? WHERE agent_id = ?",
-          [newAgentId, LEGACY_ID],
-        );
-        this.dbService.executeSqlCommand(
-          "UPDATE chat_summaries SET agent_id = ? WHERE agent_id = ?",
-          [newAgentId, LEGACY_ID],
-        );
-        this.dbService.executeSqlCommand("COMMIT", []);
-        this.logger.info("Legacy agent-id migration completed");
-        return true;
-      } catch (error) {
-        this.dbService.executeSqlCommand("ROLLBACK", []);
-        this.logger.error(
-          "Legacy agent-id migration failed — rolled back",
-          error,
-        );
-        throw error;
-      }
+      this.dbService.runTransaction((run) => {
+        run("UPDATE chat_history SET agent_id = ? WHERE agent_id = ?", [
+          newAgentId,
+          LEGACY_ID,
+        ]);
+        run("UPDATE chat_sessions SET agent_id = ? WHERE agent_id = ?", [
+          newAgentId,
+          LEGACY_ID,
+        ]);
+        run("UPDATE chat_summaries SET agent_id = ? WHERE agent_id = ?", [
+          newAgentId,
+          LEGACY_ID,
+        ]);
+      });
+      this.logger.info("Legacy agent-id migration completed");
+      return true;
     }
     return false;
   }
