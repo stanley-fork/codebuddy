@@ -644,9 +644,8 @@ export class AccessControlService implements vscode.Disposable {
    * log injection (newlines, ANSI escapes, fake log entries).
    */
   private static sanitizeAction(action: string): string {
-    return action
-      .replace(/[\x00-\x1f\x7f]/g, "_") // Replace control chars (incl. newlines, ESC)
-      .slice(0, 128); // Cap length
+    // eslint-disable-next-line no-control-regex -- Intentional: strip control chars to prevent log injection
+    return action.replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 128);
   }
 
   private recordAudit(action: string, allowed: boolean): void {
