@@ -186,6 +186,16 @@
     },
     "commands": [
       {
+        "command": "codebuddy.concurrencyQueue.showStatus",
+        "title": "%commands.concurrencyQueueShowStatus%",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.concurrencyQueue.cancelAll",
+        "title": "%commands.concurrencyQueueCancelAll%",
+        "category": "CodeBuddy"
+      },
+      {
         "command": "codebuddy.indexWorkspace",
         "title": "%commands.indexWorkspace%",
         "category": "CodeBuddy"
@@ -860,6 +870,13 @@
             "minimum": 1,
             "maximum": 60,
             "description": "%config.agentMaxDurationMinutes%"
+          },
+          "codebuddy.agent.maxConcurrentStreams": {
+            "type": "number",
+            "default": 3,
+            "minimum": 1,
+            "maximum": 10,
+            "description": "%config.agentMaxConcurrentStreams%"
           },
           "codebuddy.completion.enabled": {
             "type": "boolean",
