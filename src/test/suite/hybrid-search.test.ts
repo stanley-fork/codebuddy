@@ -235,6 +235,21 @@ suite("FTS5 Helpers", () => {
     assert.strictEqual(buildFtsQuery("金银价格"), '"金银价格"');
   });
 
+  test("buildFtsQuery caps at 32 tokens", () => {
+    const manyWords = Array.from({ length: 50 }, (_, i) => `word${i}`).join(" ");
+    const query = buildFtsQuery(manyWords);
+    assert.ok(query !== null);
+    const tokenCount = (query!.match(/ AND /g) ?? []).length + 1;
+    assert.strictEqual(tokenCount, 32);
+  });
+
+  test("buildFtsQuery handles null-ish input gracefully", () => {
+    // @ts-expect-error — testing runtime guard
+    assert.strictEqual(buildFtsQuery(null), null);
+    // @ts-expect-error — testing runtime guard
+    assert.strictEqual(buildFtsQuery(undefined), null);
+  });
+
   test("bm25RankToScore is 1 for rank 0", () => {
     assert.ok(Math.abs(bm25RankToScore(0) - 1) < 1e-10);
   });
@@ -389,5 +404,30 @@ suite("Hybrid Merge", () => {
       keyword: [],
     });
     assert.strictEqual(merged.length, 0);
+  });
+
+  test("mergeHybridResults normalizes weights that sum > 1", () => {
+    const merged = mergeHybridResults({
+      vector: [makeVector("a", 1.0, "a.ts")],
+      keyword: [],
+      config: { vectorWeight: 2.0, textWeight: 1.0 },
+    });
+    // After normalization: vectorWeight = 2/3 ≈ 0.667
+    assert.ok(merged[0].score < 1.0);
+    assert.ok(Math.abs(merged[0].score - 2 / 3) < 0.01);
+  });
+
+  test("mergeHybridResults deep-merges nested mmr config", () => {
+    // Passing only mmr.enabled should preserve default lambda
+    const merged = mergeHybridResults({
+      vector: [
+        makeVector("a", 0.9, "a.ts"),
+        makeVector("b", 0.85, "b.ts"),
+      ],
+      keyword: [],
+      config: { mmr: { enabled: true } },
+    });
+    // Should not throw — lambda should be 0.7 from defaults
+    assert.strictEqual(merged.length, 2);
   });
 });

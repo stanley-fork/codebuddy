@@ -6,8 +6,6 @@
  *
  * Decay follows: score × e^(−λ × ageInDays), where λ = ln(2) / halfLifeDays.
  * At exactly `halfLifeDays`, a result's score is halved.
- *
- * @see OpenClaw reference: openclaw/src/memory/temporal-decay.ts
  */
 
 export interface TemporalDecayConfig {
