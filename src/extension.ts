@@ -1129,28 +1129,45 @@ export async function activate(context: vscode.ExtensionContext) {
         async () => {
           const snap = concurrencyQueue.getSnapshot();
           const waiting = concurrencyQueue.getWaitingIds();
-          const lines = [
-            `Agent Queue: ${snap.running}/${snap.maxConcurrent} slots in use`,
-          ];
-          if (waiting.length > 0) {
-            lines.push("", "Queued:");
-            for (const w of waiting) {
-              lines.push(`  • ${w.label}`);
-            }
-          }
-          if (waiting.length > 0) {
-            const action = await vscode.window.showInformationMessage(
-              lines.join("\n"),
-              "Cancel All Queued",
+
+          if (waiting.length === 0) {
+            vscode.window.showInformationMessage(
+              `CodeBuddy: ${snap.running}/${snap.maxConcurrent} agent slots in use. No requests queued.`,
             );
-            if (action === "Cancel All Queued") {
-              const count = concurrencyQueue.cancelAllWaiting();
+            return;
+          }
+
+          const items: vscode.QuickPickItem[] = [
+            ...waiting.map((w) => ({
+              label: `$(clock) ${w.label}`,
+              description: w.id,
+              detail: "Select to cancel this request",
+            })),
+            {
+              label: "$(trash) Cancel All Queued",
+              description: "",
+            },
+          ];
+
+          const picked = await vscode.window.showQuickPick(items, {
+            title: `CodeBuddy Agent Queue — ${snap.running}/${snap.maxConcurrent} slots, ${waiting.length} queued`,
+            placeHolder: "Select an item to cancel, or cancel all",
+          });
+
+          if (!picked) return;
+
+          if (picked.label.includes("Cancel All")) {
+            const count = concurrencyQueue.cancelAllWaiting();
+            vscode.window.showInformationMessage(
+              `Cancelled ${count} queued requests.`,
+            );
+          } else if (picked.description) {
+            const cancelled = concurrencyQueue.cancel(picked.description);
+            if (cancelled) {
               vscode.window.showInformationMessage(
-                `Cancelled ${count} queued requests.`,
+                `Cancelled: ${picked.label}`,
               );
             }
-          } else {
-            vscode.window.showInformationMessage(lines[0]);
           }
         },
       ),

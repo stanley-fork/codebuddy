@@ -39,6 +39,9 @@ const STARVATION_BOOST_MS = 60_000;
 /** How often we check for starvation (ms). */
 const STARVATION_CHECK_INTERVAL_MS = 15_000;
 
+/** Hard cap on waiting queue depth to prevent unbounded memory growth. */
+const MAX_QUEUE_DEPTH = 50;
+
 /**
  * ConcurrencyQueueService
  *
@@ -49,12 +52,7 @@ const STARVATION_CHECK_INTERVAL_MS = 15_000;
 export class ConcurrencyQueueService implements vscode.Disposable {
   private static instance: ConcurrencyQueueService | null = null;
 
-  private readonly logger = Logger.initialize("ConcurrencyQueueService", {
-    minLevel: LogLevel.DEBUG,
-    enableConsole: true,
-    enableFile: true,
-    enableTelemetry: true,
-  });
+  private readonly logger: Logger;
 
   /** Items actively consuming a concurrency slot. */
   private readonly running = new Map<string, QueueItem>();
@@ -79,6 +77,13 @@ export class ConcurrencyQueueService implements vscode.Disposable {
   private disposed = false;
 
   private constructor() {
+    this.logger = Logger.initialize("ConcurrencyQueueService", {
+      minLevel: LogLevel.DEBUG,
+      enableConsole: true,
+      enableFile: true,
+      enableTelemetry: true,
+    });
+
     this._maxConcurrent = this.readMaxConcurrent();
 
     // React to setting changes
@@ -127,15 +132,26 @@ export class ConcurrencyQueueService implements vscode.Disposable {
    * Acquire a concurrency slot. Resolves immediately if a slot is available,
    * otherwise the caller awaits until a slot opens (or the item is cancelled).
    *
+   * @param options.signal - AbortSignal for cooperative cancellation.
+   * @param options.timeoutMs - Hard deadline (ms) for waiting in the queue.
    * @returns A release function that MUST be called when the operation finishes.
    */
   async acquire(
     id: string,
     label: string,
     priority: QueuePriority = QueuePriority.USER,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<() => void> {
     if (this.disposed) {
       throw new Error("ConcurrencyQueueService is disposed");
+    }
+
+    // Prevent duplicate IDs — callers must use unique identifiers
+    if (this.running.has(id) || this.waiting.some((w) => w.id === id)) {
+      throw new Error(
+        `ConcurrencyQueue: duplicate id "${id}". ` +
+          `Use a unique id per acquire call.`,
+      );
     }
 
     // Fast path: slot available
@@ -157,10 +173,31 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       return this.createReleaser(id);
     }
 
+    // Back-pressure: reject if queue is full
+    if (this.waiting.length >= MAX_QUEUE_DEPTH) {
+      throw new ConcurrencyQueueFullError(
+        `Queue is full (${MAX_QUEUE_DEPTH} items waiting). ` +
+          `Try again later or cancel pending requests.`,
+      );
+    }
+
     // Slow path: queue and wait
     this.logger.info(
       `Queueing "${label}" (priority=${QueuePriority[priority]}, waiting=${this.waiting.length})`,
     );
+
+    // Build a unified abort signal from caller signal + timeout
+    const signals: AbortSignal[] = [];
+    if (options?.signal) signals.push(options.signal);
+    if (options?.timeoutMs != null) {
+      signals.push(AbortSignal.timeout(options.timeoutMs));
+    }
+    const signal =
+      signals.length > 1
+        ? AbortSignal.any(signals)
+        : signals.length === 1
+          ? signals[0]
+          : undefined;
 
     return new Promise<() => void>((resolve, reject) => {
       const item: QueueItem = {
@@ -175,6 +212,20 @@ export class ConcurrencyQueueService implements vscode.Disposable {
 
       this.insertSorted(item);
       this.fireChange();
+
+      // Wire up abort/timeout if provided
+      if (signal) {
+        const onAbort = () => {
+          if (this.cancel(id)) return; // cancel() already rejects
+          // If cancel() returns false, the item was already drained (running)
+          // — nothing to do, the slot was granted.
+        };
+        if (signal.aborted) {
+          onAbort();
+        } else {
+          signal.addEventListener("abort", onAbort, { once: true });
+        }
+      }
     });
   }
 
@@ -232,7 +283,7 @@ export class ConcurrencyQueueService implements vscode.Disposable {
   initStatusBar(context: vscode.ExtensionContext): void {
     this.statusBarItem = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Left,
-      -100, // low priority = far right on left side
+      -100, // low absolute priority — placed after higher-priority left-aligned items
     );
     this.statusBarItem.command = "codebuddy.concurrencyQueue.showStatus";
     context.subscriptions.push(this.statusBarItem);
@@ -315,8 +366,12 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       }
     }
     if (reordered) {
-      // Re-sort after boosts
-      this.waiting.sort((a, b) => b.priority - a.priority);
+      // Stable sort: priority descending, then FIFO by enqueuedAt
+      this.waiting.sort((a, b) =>
+        b.priority !== a.priority
+          ? b.priority - a.priority
+          : a.enqueuedAt - b.enqueuedAt,
+      );
     }
   }
 
@@ -383,5 +438,15 @@ export class ConcurrencyQueueCancelledError extends Error {
     super(`Queued operation "${itemId}" was cancelled`);
     this.name = "ConcurrencyQueueCancelledError";
     this.itemId = itemId;
+  }
+}
+
+/**
+ * Error thrown when the queue is full and cannot accept more items.
+ */
+export class ConcurrencyQueueFullError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConcurrencyQueueFullError";
   }
 }

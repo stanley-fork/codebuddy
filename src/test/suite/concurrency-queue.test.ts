@@ -6,17 +6,21 @@
  * - Queuing when at capacity
  * - FIFO ordering within same priority
  * - Priority-aware ordering (higher priority dequeued first)
+ * - Duplicate ID rejection
+ * - Queue depth cap (back-pressure)
  * - Cancellation of waiting items
  * - Release / drain behaviour
- * - Starvation prevention via priority boost
+ * - Starvation prevention via priority boost (stable sort)
  * - Snapshot accuracy
+ * - AbortSignal support
  */
 
 import * as assert from "assert";
 
 /**
- * Minimal in-memory replica of ConcurrencyQueueService logic.
- * We test the queue logic directly without depending on vscode APIs.
+ * Minimal in-memory replica of ConcurrencyQueueService logic,
+ * kept in sync with the production implementation for unit testing
+ * without requiring vscode API mocks.
  */
 
 enum QueuePriority {
@@ -50,16 +54,29 @@ class ConcurrencyQueueCancelledError extends Error {
   }
 }
 
+class ConcurrencyQueueFullError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConcurrencyQueueFullError";
+  }
+}
+
+const DEFAULT_MAX_QUEUE_DEPTH = 50;
+
 /**
  * Stripped-down queue (no vscode imports, no status bar, no timers).
+ * Mirrors production logic for: duplicate-ID guard, queue depth cap,
+ * AbortSignal, stable sort, idempotent release.
  */
 class TestConcurrencyQueue {
   private readonly running = new Map<string, QueueItem>();
   private readonly waiting: QueueItem[] = [];
   private _maxConcurrent: number;
+  private _maxQueueDepth: number;
 
-  constructor(maxConcurrent: number = 3) {
+  constructor(maxConcurrent: number = 3, maxQueueDepth: number = DEFAULT_MAX_QUEUE_DEPTH) {
     this._maxConcurrent = maxConcurrent;
+    this._maxQueueDepth = maxQueueDepth;
   }
 
   get maxConcurrent(): number {
@@ -75,7 +92,16 @@ class TestConcurrencyQueue {
     id: string,
     label: string,
     priority: QueuePriority = QueuePriority.USER,
+    options?: { signal?: AbortSignal },
   ): Promise<() => void> {
+    // Duplicate ID guard
+    if (this.running.has(id) || this.waiting.some((w) => w.id === id)) {
+      throw new Error(
+        `ConcurrencyQueue: duplicate id "${id}". Use a unique id per acquire call.`,
+      );
+    }
+
+    // Fast path
     if (this.running.size < this._maxConcurrent) {
       const item: QueueItem = {
         id,
@@ -90,6 +116,14 @@ class TestConcurrencyQueue {
       return this.createReleaser(id);
     }
 
+    // Queue depth cap
+    if (this.waiting.length >= this._maxQueueDepth) {
+      throw new ConcurrencyQueueFullError(
+        `Queue is full (${this._maxQueueDepth} items waiting).`,
+      );
+    }
+
+    // Slow path
     return new Promise<() => void>((resolve, reject) => {
       const item: QueueItem = {
         id,
@@ -101,6 +135,18 @@ class TestConcurrencyQueue {
         reject,
       };
       this.insertSorted(item);
+
+      // Wire up AbortSignal
+      if (options?.signal) {
+        const onAbort = () => {
+          this.cancel(id);
+        };
+        if (options.signal.aborted) {
+          onAbort();
+        } else {
+          options.signal.addEventListener("abort", onAbort, { once: true });
+        }
+      }
     });
   }
 
@@ -149,7 +195,12 @@ class TestConcurrencyQueue {
       }
     }
     if (reordered) {
-      this.waiting.sort((a, b) => b.priority - a.priority);
+      // Stable sort: priority descending, then FIFO by enqueuedAt
+      this.waiting.sort((a, b) =>
+        b.priority !== a.priority
+          ? b.priority - a.priority
+          : a.enqueuedAt - b.enqueuedAt,
+      );
     }
   }
 
@@ -187,6 +238,15 @@ class TestConcurrencyQueue {
   }
 }
 
+// ── Helpers ─────────────────────────────────────────────────
+
+/** Sentinel-based check that a promise has NOT resolved yet. */
+async function isPending(p: Promise<unknown>): Promise<boolean> {
+  const SENTINEL = Symbol("pending");
+  const result = await Promise.race([p, Promise.resolve(SENTINEL)]);
+  return result === SENTINEL;
+}
+
 // ── Tests ───────────────────────────────────────────────────
 
 suite("ConcurrencyQueueService", () => {
@@ -214,15 +274,8 @@ suite("ConcurrencyQueueService", () => {
     const r3 = await q.acquire("c", "task-c");
 
     // Fourth should not resolve immediately
-    let fourthResolved = false;
-    const fourthPromise = q.acquire("d", "task-d").then((r) => {
-      fourthResolved = true;
-      return r;
-    });
-
-    // Give microtasks a chance to settle
-    await new Promise((r) => setTimeout(r, 10));
-    assert.strictEqual(fourthResolved, false, "fourth should be queued");
+    const fourthPromise = q.acquire("d", "task-d");
+    assert.ok(await isPending(fourthPromise), "fourth should be queued");
     assert.deepStrictEqual(q.getSnapshot(), {
       running: 3,
       waiting: 1,
@@ -232,7 +285,6 @@ suite("ConcurrencyQueueService", () => {
     // Release one slot — fourth should now resolve
     r1();
     const r4 = await fourthPromise;
-    assert.strictEqual(fourthResolved, true);
     assert.deepStrictEqual(q.getSnapshot(), {
       running: 3,
       waiting: 0,
@@ -308,6 +360,47 @@ suite("ConcurrencyQueueService", () => {
     rBg();
   });
 
+  test("duplicate ID throws for running item", async () => {
+    const q = new TestConcurrencyQueue(3);
+    const r1 = await q.acquire("a", "task-a");
+
+    await assert.rejects(
+      () => q.acquire("a", "duplicate"),
+      /duplicate id "a"/,
+    );
+
+    r1();
+  });
+
+  test("duplicate ID throws for waiting item", async () => {
+    const q = new TestConcurrencyQueue(1);
+    const r1 = await q.acquire("a", "running");
+    q.acquire("b", "queued").catch(() => {}); // queued
+
+    await assert.rejects(
+      () => q.acquire("b", "duplicate-queued"),
+      /duplicate id "b"/,
+    );
+
+    q.cancelAllWaiting();
+    r1();
+  });
+
+  test("queue depth cap rejects when full", async () => {
+    const q = new TestConcurrencyQueue(1, 2); // max 2 waiting
+    const r1 = await q.acquire("a", "running");
+    q.acquire("b", "q1").catch(() => {});
+    q.acquire("c", "q2").catch(() => {});
+
+    await assert.rejects(
+      () => q.acquire("d", "q3"),
+      (err: Error) => err instanceof ConcurrencyQueueFullError,
+    );
+
+    q.cancelAllWaiting();
+    r1();
+  });
+
   test("cancel removes waiting item and rejects with CancelledError", async () => {
     const q = new TestConcurrencyQueue(1);
     const r1 = await q.acquire("a", "running");
@@ -377,7 +470,7 @@ suite("ConcurrencyQueueService", () => {
     });
   });
 
-  test("starvation boost promotes BACKGROUND to SCHEDULED", async () => {
+  test("starvation boost promotes BACKGROUND to SCHEDULED (stable sort preserves FIFO)", async () => {
     const q = new TestConcurrencyQueue(1);
     const r1 = await q.acquire("a", "running");
 
@@ -395,10 +488,11 @@ suite("ConcurrencyQueueService", () => {
     q.boostStarvedItems(0);
 
     // After boost: bg promoted to SCHEDULED, s already SCHEDULED.
-    // Since both are now same priority, original order maintained by sort stability
-    // bg was promoted from 0→1, s stays at 1; sort is stable so order should be s, bg
-    const afterBoost = q.getWaitingIds().map((w) => w.id);
-    assert.deepStrictEqual(afterBoost, ["s", "bg"]);
+    // Stable sort by enqueuedAt preserves original order: s before bg
+    assert.deepStrictEqual(
+      q.getWaitingIds().map((w) => w.id),
+      ["s", "bg"],
+    );
 
     q.cancelAllWaiting();
     r1();
@@ -408,18 +502,12 @@ suite("ConcurrencyQueueService", () => {
     const q = new TestConcurrencyQueue(1);
     const r1 = await q.acquire("a", "first");
 
-    let secondResolved = false;
-    const p2 = q.acquire("b", "second").then((r) => {
-      secondResolved = true;
-      return r;
-    });
-
-    assert.strictEqual(secondResolved, false);
+    const secondPromise = q.acquire("b", "second");
+    assert.ok(await isPending(secondPromise), "second should be queued");
 
     // Increase limit to 2 — should drain "b" into running
     q.maxConcurrent = 2;
-    const r2 = await p2;
-    assert.strictEqual(secondResolved, true);
+    const r2 = await secondPromise;
     assert.deepStrictEqual(q.getSnapshot(), {
       running: 2,
       waiting: 0,
@@ -465,10 +553,11 @@ suite("ConcurrencyQueueService", () => {
       maxConcurrent: 2,
     });
 
-    // Queue two more
-    q.acquire("c", "task-c").catch(() => {});
-    q.acquire("d", "task-d").catch(() => {});
-    await new Promise((r) => setTimeout(r, 5));
+    // Queue two more — they won't resolve (verified structurally)
+    const p3 = q.acquire("c", "task-c");
+    const p4 = q.acquire("d", "task-d");
+    assert.ok(await isPending(p3));
+    assert.ok(await isPending(p4));
 
     assert.deepStrictEqual(q.getSnapshot(), {
       running: 2,
@@ -476,8 +565,9 @@ suite("ConcurrencyQueueService", () => {
       maxConcurrent: 2,
     });
 
+    // Release one — one waiting should drain
     r1();
-    await new Promise((r) => setTimeout(r, 5));
+    await p3;
     assert.deepStrictEqual(q.getSnapshot(), {
       running: 2,
       waiting: 1,
@@ -490,41 +580,84 @@ suite("ConcurrencyQueueService", () => {
 
   test("concurrent acquire + release stress test", async () => {
     const q = new TestConcurrencyQueue(2);
-    const releases: Array<() => void> = [];
 
-    // Acquire 5 items rapidly
-    const promises = Array.from({ length: 5 }, (_, i) =>
-      q.acquire(`t${i}`, `task-${i}`, QueuePriority.USER).then((r) => {
-        releases.push(r);
-        return r;
-      }),
-    );
+    // Acquire first 2 immediately
+    const r0 = await q.acquire("t0", "task-0");
+    const r1 = await q.acquire("t1", "task-1");
 
-    // First 2 should resolve immediately
-    await new Promise((r) => setTimeout(r, 10));
-    assert.strictEqual(releases.length, 2);
+    // Queue 3 more — verify they're pending
+    const resolved: number[] = [];
+    const p2 = q.acquire("t2", "task-2").then((r) => { resolved.push(2); return r; });
+    const p3 = q.acquire("t3", "task-3").then((r) => { resolved.push(3); return r; });
+    const p4 = q.acquire("t4", "task-4").then((r) => { resolved.push(4); return r; });
 
-    // Release the first two
-    releases[0]();
-    releases[1]();
-    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(await isPending(p2));
+    assert.deepStrictEqual(resolved, []);
 
-    // Two more should have resolved
-    assert.strictEqual(releases.length, 4);
+    // Release first two — p2 and p3 should drain in
+    r0();
+    r1();
+    const r2 = await p2;
+    const r3 = await p3;
+    assert.deepStrictEqual(resolved, [2, 3]);
 
-    // Release those two
-    releases[2]();
-    releases[3]();
-    await new Promise((r) => setTimeout(r, 10));
+    // Release those two — p4 should drain in
+    r2();
+    r3();
+    const r4 = await p4;
+    assert.deepStrictEqual(resolved, [2, 3, 4]);
 
-    // Last one should resolve
-    assert.strictEqual(releases.length, 5);
-    releases[4]();
-
+    r4();
     assert.deepStrictEqual(q.getSnapshot(), {
       running: 0,
       waiting: 0,
       maxConcurrent: 2,
     });
+  });
+
+  test("AbortSignal cancels queued item", async () => {
+    const q = new TestConcurrencyQueue(1);
+    const r1 = await q.acquire("a", "running");
+
+    const controller = new AbortController();
+    let rejected = false;
+    const p2 = q.acquire("b", "queued", QueuePriority.USER, {
+      signal: controller.signal,
+    }).catch((err) => {
+      rejected = true;
+      assert.ok(err instanceof ConcurrencyQueueCancelledError);
+    });
+
+    controller.abort();
+    await p2;
+    assert.strictEqual(rejected, true);
+    assert.deepStrictEqual(q.getSnapshot(), {
+      running: 1,
+      waiting: 0,
+      maxConcurrent: 1,
+    });
+
+    r1();
+  });
+
+  test("pre-aborted signal cancels immediately", async () => {
+    const q = new TestConcurrencyQueue(1);
+    const r1 = await q.acquire("a", "running");
+
+    const controller = new AbortController();
+    controller.abort(); // abort before acquire
+
+    let rejected = false;
+    const p2 = q.acquire("b", "queued", QueuePriority.USER, {
+      signal: controller.signal,
+    }).catch(() => {
+      rejected = true;
+    });
+
+    await p2;
+    assert.strictEqual(rejected, true);
+    assert.strictEqual(q.getSnapshot().waiting, 0);
+
+    r1();
   });
 });

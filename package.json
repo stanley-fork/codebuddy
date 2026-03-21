@@ -187,12 +187,12 @@
     "commands": [
       {
         "command": "codebuddy.concurrencyQueue.showStatus",
-        "title": "Show Agent Queue Status",
+        "title": "%commands.concurrencyQueueShowStatus%",
         "category": "CodeBuddy"
       },
       {
         "command": "codebuddy.concurrencyQueue.cancelAll",
-        "title": "Cancel All Queued Agent Requests",
+        "title": "%commands.concurrencyQueueCancelAll%",
         "category": "CodeBuddy"
       },
       {
