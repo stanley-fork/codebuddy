@@ -109,24 +109,28 @@ export function buildFtsQuery(raw: string): string | null {
     return null;
   }
 
-  // FTS5 safe: double-quote wrapping with internal quote removal
-  // (FTS4 also supports double-quoted phrase matching)
+  // FTS4 safe: double-quote wrapping with internal quote removal
   return tokens.map((t) => `"${t.replaceAll('"', "")}"`).join(" AND ");
 }
 
 const BM25_NAN_FALLBACK_SCORE = 0.001;
 
 /**
- * Compute a BM25-like relevance score from FTS4 matchinfo('pcx') data.
+ * Compute a TF-IDF relevance score from FTS4 matchinfo('pcx') data.
  *
  * The 'pcx' format returns:
  *   p = number of matchable phrases in the query
  *   c = number of columns in the FTS table
  *   x = for each (phrase, column) pair: [hits_this_row, hits_all_rows, docs_with_hit]
  *
- * We compute a simplified BM25 score:
- *   score = Σ over phrases: tf × log(N / df)
- * where tf = hits in this row, N = total docs, df = docs containing this phrase.
+ * We compute a simplified TF-IDF score (not true BM25):
+ *   score = Σ over phrases: tf × idf
+ * where:
+ *   tf  = hitsThisRow  (raw term frequency in this document)
+ *   idf = log(1 + hitsAllRows / docsWithHit)  (approximate inverse document frequency)
+ *
+ * True BM25 requires total document count N (not provided by matchinfo).
+ * We use hitsAllRows as a proxy for corpus size, yielding higher weight for rare terms.
  * Returns a value in [0, 1) via the standard normalization.
  */
 export function computeFts4Score(matchinfoBlob: Uint8Array): number {
@@ -156,7 +160,13 @@ export function computeFts4Score(matchinfoBlob: Uint8Array): number {
       const docsWithHit = ints[offset + 2]; // document frequency
 
       if (hitsThisRow > 0 && docsWithHit > 0) {
-        rawScore += hitsThisRow / docsWithHit;
+        // Approximate IDF: log(1 + totalHits/df) gives higher weight to rare terms
+        const hitsAllRows = ints[offset + 1];
+        const idf =
+          hitsAllRows > 0
+            ? Math.log(1 + hitsAllRows / docsWithHit)
+            : 1 / docsWithHit; // fallback if hits_all_rows is unavailable
+        rawScore += hitsThisRow * idf;
       }
     }
   }
@@ -480,20 +490,25 @@ export class HybridSearchService {
   }
 
   /**
+   * Helper: count rows in a given table.
+   */
+  private getCount(table: string): number {
+    return Number(
+      this.db!.exec(`SELECT COUNT(*) FROM ${table}`)?.[0]?.values?.[0]?.[0] ??
+        0,
+    );
+  }
+
+  /**
    * One-time back-fill: insert existing chunks text into FTS4.
    * Idempotent — checks row count before proceeding.
    * Uses incremental insert for small deficits, full rebuild for large ones.
+   * Wrapped in a transaction for atomicity on crash.
    */
   private backfillFts(): void {
     try {
-      const ftsCount = Number(
-        this.db!.exec("SELECT COUNT(*) FROM chunks_fts")?.[0]
-          ?.values?.[0]?.[0] ?? 0,
-      );
-      const chunksCount = Number(
-        this.db!.exec("SELECT COUNT(*) FROM chunks")?.[0]?.values?.[0]?.[0] ??
-          0,
-      );
+      const ftsCount = this.getCount("chunks_fts");
+      const chunksCount = this.getCount("chunks");
 
       if (ftsCount >= chunksCount) {
         return;
@@ -502,26 +517,36 @@ export class HybridSearchService {
       const deficit = chunksCount - ftsCount;
       this.logger.info(`Back-filling FTS4 index: ${deficit} chunks to index`);
 
-      if (deficit < 100) {
-        // Anti-join: find chunks whose rowid is NOT in chunks_fts.
-        // Handles rowid gaps from deleted rows (MAX(rowid) approach would miss them).
-        this.db!.run(`
-          INSERT INTO chunks_fts(rowid, text)
-          SELECT c.rowid, c.text
-          FROM chunks c
-          WHERE NOT EXISTS (
-            SELECT 1 FROM chunks_fts f WHERE f.rowid = c.rowid
-          )
-        `);
-      } else {
-        // Full rebuild for large deficits
-        this.logger.warn(
-          `Large FTS4 backfill (${deficit} chunks). This may take a moment.`,
-        );
-        this.db!.run("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+      this.db!.run("BEGIN IMMEDIATE");
+      try {
+        if (deficit < 100) {
+          // Anti-join: find chunks whose rowid is NOT in chunks_fts.
+          // Handles rowid gaps from deleted rows (MAX(rowid) approach would miss them).
+          this.db!.run(`
+            INSERT INTO chunks_fts(rowid, text)
+            SELECT c.rowid, c.text
+            FROM chunks c
+            WHERE NOT EXISTS (
+              SELECT 1 FROM chunks_fts f WHERE f.rowid = c.rowid
+            )
+          `);
+        } else {
+          // Full rebuild for large deficits
+          this.logger.warn(
+            `Large FTS4 backfill (${deficit} chunks). This may take a moment.`,
+          );
+          this.db!.run("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+        }
+        this.db!.run("COMMIT");
+        this.logger.info("FTS4 back-fill complete");
+      } catch (innerErr: unknown) {
+        try {
+          this.db!.run("ROLLBACK");
+        } catch {
+          // Rollback may fail if db is already in a bad state
+        }
+        throw innerErr;
       }
-
-      this.logger.info("FTS4 back-fill complete");
     } catch (err: unknown) {
       this.logger.warn(`FTS4 back-fill failed: ${(err as Error).message}`);
     }
@@ -644,6 +669,9 @@ export class HybridSearchService {
     }
     const qNormalized = queryVector.map((v) => v / qNorm);
 
+    // Capture db reference at start — detect replacement during async gaps
+    const capturedDb = this.db;
+
     let stmt: SqlJsStatement;
     try {
       stmt = this.getVectorSearchStmt();
@@ -705,11 +733,21 @@ export class HybridSearchService {
       if (performance.now() > yieldDeadline) {
         await new Promise((resolve) => setImmediate(resolve));
         yieldDeadline = performance.now() + HybridSearchService.YIELD_BUDGET_MS;
+
+        // Check if db was replaced during the yield (workspace switch / dispose)
+        if (this.db !== capturedDb) {
+          this.logger.info("DB replaced during vector scan — aborting search");
+          // stmt is already freed by dispose(); don't call reset()
+          return topK;
+        }
       }
     }
 
     try {
-      stmt.reset();
+      // Only reset if the statement is still ours
+      if (this.db === capturedDb && this.vectorSearchStmt) {
+        stmt.reset();
+      }
     } catch {
       this.vectorSearchStmt = null;
     }

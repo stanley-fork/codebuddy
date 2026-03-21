@@ -92,20 +92,24 @@ export class ContextRetriever implements vscode.Disposable {
     );
   }
 
-  private static disposed = false;
+  private isDisposed = false;
 
-  static initialize(context?: vscode.ExtensionContext) {
-    if (ContextRetriever.instance && !ContextRetriever.disposed) {
+  static initialize(context?: vscode.ExtensionContext): ContextRetriever {
+    if (ContextRetriever.instance?.isDisposed === false) {
       return ContextRetriever.instance;
     }
     ContextRetriever.instance = new ContextRetriever(context);
-    ContextRetriever.disposed = false;
     return ContextRetriever.instance;
   }
 
   dispose(): void {
+    if (this.isDisposed) return; // idempotent
     this.configChangeDisposable.dispose();
-    ContextRetriever.disposed = true;
+    this.isDisposed = true;
+    // Only clear static ref if WE are the current instance
+    if (ContextRetriever.instance === this) {
+      ContextRetriever.instance = undefined as any;
+    }
   }
 
   async retrieveContext(input: string): Promise<string> {
@@ -118,14 +122,23 @@ export class ContextRetriever implements vscode.Disposable {
     let searchMethod = "Hybrid";
     const hybridConfig = this.hybridSearchConfig;
 
+    // Lazily cache embedding to avoid duplicate LLM API calls on fallback
+    let embedding: number[] | undefined;
+    const getEmbedding = async (): Promise<number[]> => {
+      if (!embedding) {
+        embedding = await this.embeddingService.generateEmbedding(input);
+      }
+      return embedding;
+    };
+
     // ── Try hybrid search (vector + FTS4) ─────────────────────────────
     if (hybridSearch.isReady) {
       try {
         this.logger.info(`Running hybrid search for: ${input}`);
-        const embedding = await this.embeddingService.generateEmbedding(input);
+        const emb = await getEmbedding();
 
         const hybridResults = await hybridSearch.search(
-          embedding,
+          emb,
           input,
           hybridConfig,
         );
@@ -158,9 +171,9 @@ export class ContextRetriever implements vscode.Disposable {
         this.logger.info(
           "No hybrid results; falling back to legacy vector search",
         );
-        const embedding = await this.embeddingService.generateEmbedding(input);
+        const emb = await getEmbedding();
         const legacyResults = await this.vectorStore.search(
-          embedding,
+          emb,
           ContextRetriever.SEARCH_RESULT_COUNT,
         );
         results = legacyResults.map((r) => ({
@@ -273,7 +286,7 @@ export class ContextRetriever implements vscode.Disposable {
     return {
       vectorWeight: clamp(config.get<number>("vectorWeight", 0.7), 0, 1),
       textWeight: clamp(config.get<number>("textWeight", 0.3), 0, 1),
-      topK: clamp(config.get<number>("topK", 10), 1, 100),
+      topK: clamp(config.get<number>("topK", 10), 1, 50),
       mmr: {
         enabled: config.get<boolean>("mmr.enabled", false),
         lambda: clamp(config.get<number>("mmr.lambda", 0.7), 0, 1),
@@ -289,7 +302,7 @@ export class ContextRetriever implements vscode.Disposable {
     };
   }
 
-  private async retrieveCommonFiles(): Promise<any[]> {
+  private async retrieveCommonFiles(): Promise<LegacySearchResult[]> {
     const commonFiles = [
       "README.md",
       "readme.md",
@@ -299,7 +312,7 @@ export class ContextRetriever implements vscode.Disposable {
       "docs/architecture.md", // Added potential architecture doc
     ];
 
-    const results: any[] = [];
+    const results: LegacySearchResult[] = [];
     const workspaceFolders = vscode.workspace.workspaceFolders;
 
     if (!workspaceFolders) {
@@ -335,9 +348,8 @@ export class ContextRetriever implements vscode.Disposable {
 
             results.push({
               document: {
-                id: `common:${fileUri.fsPath}`,
+                filePath: fileUri.fsPath,
                 text: truncated,
-                metadata: { filePath: fileUri.fsPath },
               },
               score: 1.0, // High relevance for common files
             });

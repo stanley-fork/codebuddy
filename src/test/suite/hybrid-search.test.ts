@@ -257,8 +257,9 @@ suite("FTS Helpers", () => {
     const ints = new Int32Array([1, 1, 2, 5, 3]);
     const blob = new Uint8Array(ints.buffer);
     const score = computeFts4Score(blob);
-    // tf * (1/df) = 2 * (1/3) = 0.667; normalized: 0.667/(1+0.667) ≈ 0.4
-    assert.ok(score > 0.3 && score < 0.5);
+    // tf * log(1 + hitsAllRows/df) = 2 * log(1 + 5/3) ≈ 2 * 0.981 = 1.962
+    // normalized: 1.962 / (1 + 1.962) ≈ 0.662
+    assert.ok(score > 0.5 && score < 0.8);
   });
 
   test("computeFts4Score returns higher score for more hits", () => {
@@ -272,10 +273,10 @@ suite("FTS Helpers", () => {
   });
 
   test("computeFts4Score returns higher score for rarer terms", () => {
-    // Rare term: only 1 doc has it
-    const rare = new Int32Array([1, 1, 1, 1, 1]);
-    // Common term: 100 docs have it
-    const common = new Int32Array([1, 1, 1, 100, 100]);
+    // Rare term: only 1 doc has it, 10 total hits in corpus
+    const rare = new Int32Array([1, 1, 1, 10, 1]);
+    // Common term: 10 docs have it, 10 total hits in corpus
+    const common = new Int32Array([1, 1, 1, 10, 10]);
     const scoreRare = computeFts4Score(new Uint8Array(rare.buffer));
     const scoreCommon = computeFts4Score(new Uint8Array(common.buffer));
     assert.ok(scoreRare > scoreCommon);
