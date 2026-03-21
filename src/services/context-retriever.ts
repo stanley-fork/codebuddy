@@ -17,7 +17,20 @@ import { SqliteVectorStore } from "./sqlite-vector-store";
 import {
   HybridSearchService,
   type HybridSearchResult,
+  type HybridSearchConfig,
 } from "../memory/hybrid-search.service";
+
+interface SearchResult {
+  document: { filePath: string; text: string };
+  score: number;
+}
+
+function toSearchResult(r: HybridSearchResult): SearchResult {
+  return {
+    document: { filePath: r.filePath, text: r.snippet },
+    score: r.score,
+  };
+}
 
 export class ContextRetriever {
   private readonly embeddingService: EmbeddingService;
@@ -28,6 +41,8 @@ export class ContextRetriever {
   protected readonly orchestrator: Orchestrator;
   private readonly tavilySearch: TavilySearchProvider;
   private vectorStore: SqliteVectorStore;
+  private hybridSearchConfig: HybridSearchConfig;
+  private readonly configChangeDisposable: vscode.Disposable;
 
   constructor(context?: vscode.ExtensionContext) {
     const provider = getGenerativeAiModel() || "Gemini";
@@ -56,6 +71,17 @@ export class ContextRetriever {
         this.logger.error("Failed to initialize vector store", err);
       });
     }
+
+    // Cache hybrid search config; refresh on settings change
+    this.hybridSearchConfig = this.readHybridSearchConfig();
+    this.configChangeDisposable = vscode.workspace.onDidChangeConfiguration(
+      (e) => {
+        if (e.affectsConfiguration("codebuddy.hybridSearch")) {
+          this.hybridSearchConfig = this.readHybridSearchConfig();
+          this.logger.info("Hybrid search config reloaded");
+        }
+      },
+    );
   }
 
   static initialize(context?: vscode.ExtensionContext) {
@@ -71,9 +97,9 @@ export class ContextRetriever {
     }
 
     const hybridSearch = HybridSearchService.getInstance();
-    let results: any[] = [];
+    let results: SearchResult[] = [];
     let searchMethod = "Hybrid";
-    const hybridConfig = this.getHybridSearchConfig();
+    const hybridConfig = this.hybridSearchConfig;
 
     // ── Try hybrid search (vector + FTS5) ─────────────────────────────
     if (hybridSearch.isReady) {
@@ -87,15 +113,9 @@ export class ContextRetriever {
           hybridConfig,
         );
 
-        results = hybridResults.map((r) => ({
-          document: {
-            filePath: r.filePath,
-            text: r.snippet,
-          },
-          score: r.score,
-        }));
+        results = hybridResults.map(toSearchResult);
         searchMethod = "Hybrid (Vector + BM25)";
-      } catch (error: any) {
+      } catch (error: unknown) {
         this.logger.warn(
           "Hybrid vector search failed, trying keyword-only",
           error,
@@ -107,15 +127,9 @@ export class ContextRetriever {
             input,
             hybridConfig,
           );
-          results = keywordResults.map((r) => ({
-            document: {
-              filePath: r.filePath,
-              text: r.snippet,
-            },
-            score: r.score,
-          }));
+          results = keywordResults.map(toSearchResult);
           searchMethod = "BM25 Keyword";
-        } catch (ftsError: any) {
+        } catch (ftsError: unknown) {
           this.logger.warn("FTS5 search also failed", ftsError);
         }
       }
@@ -126,21 +140,29 @@ export class ContextRetriever {
       try {
         this.logger.info("Falling back to legacy vector search");
         const embedding = await this.embeddingService.generateEmbedding(input);
-        results = await this.vectorStore.search(
+        const legacyResults = await this.vectorStore.search(
           embedding,
           ContextRetriever.SEARCH_RESULT_COUNT,
         );
+        results = legacyResults.map((r) => ({
+          document: { filePath: r.document.filePath, text: r.document.text },
+          score: r.score,
+        }));
         searchMethod = "Semantic";
-      } catch (error: any) {
+      } catch (error: unknown) {
         this.logger.warn(
           "Embedding generation failed, falling back to keyword search",
           error,
         );
         searchMethod = "Keyword (Fallback)";
-        results = await this.vectorStore.keywordSearch(
+        const kwResults = await this.vectorStore.keywordSearch(
           input,
           ContextRetriever.SEARCH_RESULT_COUNT,
         );
+        results = kwResults.map((r: any) => ({
+          document: { filePath: r.document?.filePath ?? r.filePath, text: r.document?.text ?? r.text },
+          score: r.score ?? 0,
+        }));
       }
     }
 
@@ -158,7 +180,10 @@ export class ContextRetriever {
 
       // If it was a general query, append common files to existing results
       // If it was a fallback, we just use common files (and any keyword matches if we had them)
-      results = [...results, ...commonFilesResults];
+      results = [...results, ...commonFilesResults.map((r: any) => ({
+        document: { filePath: r.document?.filePath ?? "", text: r.document?.text ?? "" },
+        score: r.score ?? 0,
+      } as SearchResult))];
 
       if (results.length === 0 && searchMethod.includes("Fallback")) {
         searchMethod = "Keyword (Fallback) + Common Files";
@@ -170,7 +195,7 @@ export class ContextRetriever {
     // Deduplicate by file path
     const seenPaths = new Set();
     results = results.filter((r) => {
-      const filePath = r.document.filePath || r.document.metadata?.filePath;
+      const filePath = r.document.filePath;
       if (!filePath || seenPaths.has(filePath)) return false;
       seenPaths.add(filePath);
       return true;
@@ -186,7 +211,7 @@ export class ContextRetriever {
     return results
       .map(
         (r) =>
-          `File: ${r.document.filePath || r.document.metadata?.filePath}\nRelevance: ${r.score.toFixed(2)} (${searchMethod})\nContent:\n${r.document.text}`,
+          `File: ${r.document.filePath}\nRelevance: ${r.score.toFixed(2)} (${searchMethod})\nContent:\n${r.document.text}`,
       )
       .join("\n\n---\n\n");
   }
@@ -210,7 +235,7 @@ export class ContextRetriever {
   /**
    * Read hybrid search settings from VS Code configuration.
    */
-  private getHybridSearchConfig() {
+  private readHybridSearchConfig(): HybridSearchConfig {
     const config = vscode.workspace.getConfiguration("codebuddy.hybridSearch");
     return {
       vectorWeight: config.get<number>("vectorWeight", 0.7),

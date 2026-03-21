@@ -7,7 +7,6 @@
  * Uses Jaccard similarity over lowercased alphanumeric tokens.
  *
  * @see Carbonell & Goldstein, "The Use of MMR, Diversity-Based Reranking" (1998)
- * @see OpenClaw reference: openclaw/src/memory/mmr.ts
  */
 
 export interface MMRConfig {

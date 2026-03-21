@@ -3,8 +3,6 @@
  *
  * Combines FTS5 keyword recall with vector semantic similarity via weighted
  * score fusion, then applies optional temporal decay and diversity re-ranking.
- *
- * @see OpenClaw reference: openclaw/src/memory/hybrid.ts
  */
 
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
@@ -117,8 +115,13 @@ export function buildFtsQuery(raw: string): string | null {
 /**
  * Convert an FTS5 `bm25()` rank value to a [0, 1) score.
  *
- * FTS5 rank() returns negative BM25 relevance (more negative = more relevant).
- * This maps it to a 0–1 range via `relevance / (1 + relevance)`.
+ * FTS5 has two rank modes:
+ * - BM25 mode (default): rank() returns negative float, more negative = better.
+ *   e.g., rank = -4.2 → score ≈ 0.81
+ * - Ordinal mode: rank() returns 0-based integer position, 0 = best.
+ *   e.g., rank = 0 → score = 1.0, rank = 1 → score = 0.5
+ *
+ * This function handles both by checking the sign.
  */
 export function bm25RankToScore(rank: number): number {
   if (!Number.isFinite(rank)) {
@@ -301,9 +304,9 @@ export class HybridSearchService {
         this.initializedForDb = db;
         this.ftsInitialized = true;
         this.logger.info("FTS5 virtual table initialized");
-      } catch (err) {
-        this.initPromise = null; // allow retry on failure
-        throw err;
+      } finally {
+        // Always clear so the next call (new db) is not blocked
+        this.initPromise = null;
       }
     })();
 
@@ -337,15 +340,13 @@ export class HybridSearchService {
   // ── FTS5 Schema ─────────────────────────────────────────────────────
 
   private createFtsTables(): void {
-    // FTS5 content-sync table — mirrors the `text` column from `chunks`.
-    // content=chunks tells FTS5 to read from the chunks table (external content).
-    // We use a dedicated FTS table for insert-only (no content=) for simplicity
-    // since sql.js FTS5 support with external content can be tricky.
+    // Standalone FTS5 table (not external-content) — avoids the conflict
+    // between content='chunks' mode and manual trigger-based inserts.
+    // We store the chunk id alongside the text for join-back.
     this.db!.run(`
       CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
         text,
-        content='chunks',
-        content_rowid='rowid'
+        tokenize='unicode61'
       )
     `);
 
@@ -398,11 +399,13 @@ export class HybridSearchService {
       this.logger.info(`Back-filling FTS5 index: ${deficit} chunks to index`);
 
       if (deficit < 100) {
-        // Incremental insert for small deficits
+        // Incremental insert for small deficits — LEFT JOIN anti-join
         this.db!.run(`
           INSERT INTO chunks_fts(rowid, text)
-          SELECT c.rowid, c.text FROM chunks c
-          WHERE c.rowid NOT IN (SELECT rowid FROM chunks_fts)
+          SELECT c.rowid, c.text
+          FROM chunks c
+          LEFT JOIN chunks_fts f ON c.rowid = f.rowid
+          WHERE f.rowid IS NULL
         `);
       } else {
         // Full rebuild for large deficits
@@ -470,8 +473,8 @@ export class HybridSearchService {
         });
       }
       stmt.free();
-    } catch (err: any) {
-      this.logger.warn(`FTS5 search failed: ${err.message}`);
+    } catch (err: unknown) {
+      this.logger.warn(`FTS5 search failed: ${(err as Error).message}`);
     }
 
     return results;
@@ -570,6 +573,13 @@ export class HybridSearchService {
         indexedAt: row.indexed_at as string | undefined,
       });
 
+      // Maintain sorted top-K buffer for early-exit pruning
+      topK.sort((a, b) => b.vectorScore - a.vectorScore);
+      if (topK.length > k) {
+        topK.pop();
+      }
+      worstTopKScore = topK[topK.length - 1]?.vectorScore ?? -Infinity;
+
       // Yield to keep the extension host responsive
       if (++rowsProcessed % HybridSearchService.YIELD_INTERVAL === 0) {
         await new Promise((resolve) => setImmediate(resolve));
@@ -583,9 +593,7 @@ export class HybridSearchService {
       this.vectorSearchStmt = null;
     }
 
-    // Deferred sort: single O(n log n) sort instead of per-insertion sort
-    topK.sort((a, b) => b.vectorScore - a.vectorScore);
-    return topK.slice(0, k);
+    return topK;
   }
 
   // ── Hybrid Search (public API) ─────────────────────────────────────
@@ -644,11 +652,15 @@ export class HybridSearchService {
 // ─── Utility ──────────────────────────────────────────────────────────
 
 function cosineSimilarity(a: number[], b: Float32Array): number {
+  if (a.length !== b.length) {
+    throw new Error(
+      `Vector dimension mismatch: query=${a.length}, stored=${b.length}`,
+    );
+  }
   let dot = 0;
   let normA = 0;
   let normB = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
+  for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
     normA += a[i] * a[i];
     normB += b[i] * b[i];
