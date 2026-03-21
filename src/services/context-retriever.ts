@@ -14,6 +14,10 @@ import {
   SearchResponseFormatter,
 } from "../agents/tools/websearch";
 import { SqliteVectorStore } from "./sqlite-vector-store";
+import {
+  HybridSearchService,
+  type HybridSearchResult,
+} from "../memory/hybrid-search.service";
 
 export class ContextRetriever {
   private readonly embeddingService: EmbeddingService;
@@ -66,29 +70,79 @@ export class ContextRetriever {
       return "Semantic search is not available (Vector Store not initialized).";
     }
 
+    const hybridSearch = HybridSearchService.getInstance();
     let results: any[] = [];
-    let searchMethod = "Semantic";
+    let searchMethod = "Hybrid";
 
-    try {
-      this.logger.info(`Generating embedding for query: ${input}`);
-      const embedding = await this.embeddingService.generateEmbedding(input);
-      this.logger.info("Retrieving context from Vector Store");
+    // ── Try hybrid search (vector + FTS5) ─────────────────────────────
+    if (hybridSearch.isReady) {
+      try {
+        this.logger.info(`Running hybrid search for: ${input}`);
+        const embedding = await this.embeddingService.generateEmbedding(input);
 
-      results = await this.vectorStore.search(
-        embedding,
-        ContextRetriever.SEARCH_RESULT_COUNT,
-      );
-    } catch (error: any) {
-      this.logger.warn(
-        "Embedding generation failed, falling back to keyword search",
-        error,
-      );
-      searchMethod = "Keyword (Fallback)";
+        const hybridConfig = this.getHybridSearchConfig();
+        const hybridResults = await hybridSearch.search(
+          embedding,
+          input,
+          hybridConfig,
+        );
 
-      results = await this.vectorStore.keywordSearch(
-        input,
-        ContextRetriever.SEARCH_RESULT_COUNT,
-      );
+        results = hybridResults.map((r) => ({
+          document: {
+            filePath: r.filePath,
+            text: r.snippet,
+          },
+          score: r.score,
+        }));
+        searchMethod = "Hybrid (Vector + BM25)";
+      } catch (error: any) {
+        this.logger.warn(
+          "Hybrid vector search failed, trying keyword-only",
+          error,
+        );
+
+        // Fall back to FTS5 keyword-only search
+        try {
+          const hybridConfig = this.getHybridSearchConfig();
+          const keywordResults = hybridSearch.keywordOnlySearch(
+            input,
+            hybridConfig,
+          );
+          results = keywordResults.map((r) => ({
+            document: {
+              filePath: r.filePath,
+              text: r.snippet,
+            },
+            score: r.score,
+          }));
+          searchMethod = "BM25 Keyword";
+        } catch (ftsError: any) {
+          this.logger.warn("FTS5 search also failed", ftsError);
+        }
+      }
+    }
+
+    // ── Legacy fallback (no FTS5 available) ───────────────────────────
+    if (results.length === 0 && !hybridSearch.isReady) {
+      try {
+        this.logger.info("Falling back to legacy vector search");
+        const embedding = await this.embeddingService.generateEmbedding(input);
+        results = await this.vectorStore.search(
+          embedding,
+          ContextRetriever.SEARCH_RESULT_COUNT,
+        );
+        searchMethod = "Semantic";
+      } catch (error: any) {
+        this.logger.warn(
+          "Embedding generation failed, falling back to keyword search",
+          error,
+        );
+        searchMethod = "Keyword (Fallback)";
+        results = await this.vectorStore.keywordSearch(
+          input,
+          ContextRetriever.SEARCH_RESULT_COUNT,
+        );
+      }
     }
 
     // Check if query is general/architectural
@@ -152,6 +206,26 @@ export class ContextRetriever {
 
     const lowerInput = input.toLowerCase();
     return generalKeywords.some((keyword) => lowerInput.includes(keyword));
+  }
+
+  /**
+   * Read hybrid search settings from VS Code configuration.
+   */
+  private getHybridSearchConfig() {
+    const config = vscode.workspace.getConfiguration("codebuddy.hybridSearch");
+    return {
+      vectorWeight: config.get<number>("vectorWeight", 0.7),
+      textWeight: config.get<number>("textWeight", 0.3),
+      topK: config.get<number>("topK", 10),
+      mmr: {
+        enabled: config.get<boolean>("mmr.enabled", false),
+        lambda: config.get<number>("mmr.lambda", 0.7),
+      },
+      temporalDecay: {
+        enabled: config.get<boolean>("temporalDecay.enabled", false),
+        halfLifeDays: config.get<number>("temporalDecay.halfLifeDays", 30),
+      },
+    };
   }
 
   private async retrieveCommonFiles(): Promise<any[]> {
