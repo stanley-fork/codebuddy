@@ -3,6 +3,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import { FileService } from "./file-service";
+import { WorkspaceIdentityService } from "./workspace-identity.service";
 
 /**
  * Supported rule file locations in priority order
@@ -423,6 +424,9 @@ export class ProjectRulesService implements vscode.Disposable {
   }
 
   private async mergeSettingsRules(): Promise<void> {
+    // Get global rules from ~/.codebuddy/rules.md (lowest priority)
+    const globalRulesContent = this.loadGlobalRules();
+
     // Get custom system prompt from settings
     const customSystemPrompt = vscode.workspace
       .getConfiguration()
@@ -439,8 +443,12 @@ export class ProjectRulesService implements vscode.Disposable {
       .filter((r) => r.enabled)
       .map((r) => r.content);
 
-    // Merge all sources
+    // Merge all sources — priority: workspace file > global file > settings
     const allRules: string[] = [];
+
+    if (globalRulesContent) {
+      allRules.push("## Global Rules\n" + globalRulesContent);
+    }
 
     if (this.cachedRules?.content) {
       allRules.push(this.cachedRules.content);
@@ -473,6 +481,27 @@ export class ProjectRulesService implements vscode.Disposable {
         this.cachedRules.truncated = truncated;
       }
     }
+  }
+
+  /**
+   * Load global rules from ~/.codebuddy/rules.md (shared across all workspaces).
+   */
+  private loadGlobalRules(): string | undefined {
+    try {
+      const globalPath = WorkspaceIdentityService.getGlobalRulesPath();
+      if (fs.existsSync(globalPath)) {
+        const content = fs.readFileSync(globalPath, "utf-8").trim();
+        if (content) {
+          this.logger.info(
+            `Loaded global rules from ${globalPath} (${this.estimateTokens(content)} tokens)`,
+          );
+          return content;
+        }
+      }
+    } catch (error: any) {
+      this.logger.warn(`Failed to load global rules: ${error.message}`);
+    }
+    return undefined;
   }
 
   private setupFileWatchers(): void {

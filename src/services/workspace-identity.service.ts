@@ -1,0 +1,130 @@
+import * as crypto from "crypto";
+import * as os from "os";
+import * as path from "path";
+import * as vscode from "vscode";
+import { Logger, LogLevel } from "../infrastructure/logger/logger";
+
+// ─── Constants ───────────────────────────────────────────────────────
+
+/** Global rules directory: `~/.codebuddy/` */
+const GLOBAL_CODEBUDDY_DIR = path.join(os.homedir(), ".codebuddy");
+
+/** Global rules file: `~/.codebuddy/rules.md` */
+const GLOBAL_RULES_FILE = path.join(GLOBAL_CODEBUDDY_DIR, "rules.md");
+
+// ─── Service ─────────────────────────────────────────────────────────
+
+const logger = Logger.initialize("WorkspaceIdentityService", {
+  minLevel: LogLevel.DEBUG,
+  enableConsole: true,
+  enableFile: true,
+  enableTelemetry: false,
+});
+
+/**
+ * Service to generate stable, workspace-scoped identifiers.
+ *
+ * Produces a short hash of the workspace root path so that chat history,
+ * sessions, and other per-workspace data don't collide across projects.
+ *
+ * The hash is deterministic: the same workspace folder always produces
+ * the same prefix regardless of platform or session.
+ */
+export class WorkspaceIdentityService {
+  private static instance: WorkspaceIdentityService | undefined;
+
+  /** SHA-256 hash prefix (first 12 hex chars) of the workspace root path. */
+  private workspaceHash: string | undefined;
+  /** Resolved workspace root path (first workspace folder). */
+  private workspaceRoot: string | undefined;
+
+  private constructor() {}
+
+  public static getInstance(): WorkspaceIdentityService {
+    if (!WorkspaceIdentityService.instance) {
+      WorkspaceIdentityService.instance = new WorkspaceIdentityService();
+    }
+    return WorkspaceIdentityService.instance;
+  }
+
+  /**
+   * Initialize with the current workspace root.
+   * Call once during extension activation (after workspace folders are available).
+   */
+  public initialize(workspacePath?: string): void {
+    this.workspaceRoot =
+      workspacePath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    if (this.workspaceRoot) {
+      const resolved = path.resolve(this.workspaceRoot);
+      this.workspaceHash = crypto
+        .createHash("sha256")
+        .update(resolved)
+        .digest("hex")
+        .slice(0, 12);
+      logger.info(
+        `Workspace identity: ${path.basename(resolved)} → ${this.workspaceHash}`,
+      );
+    } else {
+      this.workspaceHash = undefined;
+      logger.warn("No workspace root — agent IDs will be global");
+    }
+  }
+
+  // ── Accessors ──────────────────────────────────────────────────────
+
+  /**
+   * Get the workspace-scoped agent ID.
+   *
+   * Format: `agentId-<hash>` when a workspace is open,
+   *         `agentId`        as a fallback (no workspace).
+   *
+   * This is the **only** place the agent ID is constructed — all callers
+   * should use this instead of hardcoding `"agentId"`.
+   */
+  public getAgentId(): string {
+    return this.workspaceHash ? `agentId-${this.workspaceHash}` : "agentId";
+  }
+
+  /**
+   * Get the short hash of the workspace root path.
+   * Returns `undefined` if no workspace is open.
+   */
+  public getWorkspaceHash(): string | undefined {
+    return this.workspaceHash;
+  }
+
+  /**
+   * Get the resolved workspace root path.
+   */
+  public getWorkspaceRoot(): string | undefined {
+    return this.workspaceRoot;
+  }
+
+  /**
+   * Get a human-readable workspace name (folder basename).
+   */
+  public getWorkspaceName(): string {
+    if (!this.workspaceRoot) return "No Workspace";
+    return path.basename(this.workspaceRoot);
+  }
+
+  /**
+   * Path to the global rules file: `~/.codebuddy/rules.md`.
+   */
+  public static getGlobalRulesPath(): string {
+    return GLOBAL_RULES_FILE;
+  }
+
+  /**
+   * Path to the global CodeBuddy directory: `~/.codebuddy/`.
+   */
+  public static getGlobalDir(): string {
+    return GLOBAL_CODEBUDDY_DIR;
+  }
+
+  /** Reset singleton state for unit tests. */
+  public static _resetForTesting(): void {
+    WorkspaceIdentityService.instance = undefined;
+  }
+}

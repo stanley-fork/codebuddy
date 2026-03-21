@@ -142,7 +142,7 @@ export class LocalWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       const messages: Message[] = history.map((h) =>
@@ -222,7 +222,7 @@ export class LocalWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       // Use the LLM instance to chat

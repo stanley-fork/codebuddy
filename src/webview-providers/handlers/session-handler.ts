@@ -2,6 +2,7 @@ import { WebviewMessageHandler, HandlerContext } from "./types";
 import { AgentService } from "../../services/agent-state";
 import { ChatHistoryManager } from "../../services/chat-history-manager";
 import { ChatHistoryCache } from "../../memory/chat-history-cache";
+import { WorkspaceIdentityService } from "../../services/workspace-identity.service";
 import {
   DbChatMessage,
   LlmChatMessage,
@@ -37,6 +38,11 @@ export class SessionHandler implements WebviewMessageHandler {
       publish: (event: string, ...args: any[]) => void;
     },
   ) {}
+
+  /** Workspace-scoped agent ID — never hardcode "agentId". */
+  private get agentId(): string {
+    return WorkspaceIdentityService.getInstance().getAgentId();
+  }
 
   private formatHistoryForLlm(history: DbChatMessage[]): LlmChatMessage[] {
     return history.map((msg) => ({
@@ -84,7 +90,7 @@ export class SessionHandler implements WebviewMessageHandler {
 
     try {
       const history = await this.agentService.getSessionHistory(
-        "agentId",
+        this.agentId,
         targetSessionId,
       );
       if (history.length > 0) {
@@ -105,7 +111,7 @@ export class SessionHandler implements WebviewMessageHandler {
     switch (message.command) {
       case "get-sessions": {
         try {
-          const sessions = await this.agentService.getSessions("agentId");
+          const sessions = await this.agentService.getSessions(this.agentId);
           await ctx.webview.webview.postMessage({
             type: "sessions-list",
             sessions,
@@ -130,12 +136,12 @@ export class SessionHandler implements WebviewMessageHandler {
               .trim()
               .substring(0, 255) || "New Chat";
           const sessionId = await this.agentService.createSession(
-            "agentId",
+            this.agentId,
             title,
           );
           ChatHistoryCache.swap(sessionId, []);
           this.setCurrentSessionId(sessionId);
-          const sessions = await this.agentService.getSessions("agentId");
+          const sessions = await this.agentService.getSessions(this.agentId);
           await ctx.webview.webview.postMessage({
             type: "session-created",
             sessionId,
@@ -157,7 +163,7 @@ export class SessionHandler implements WebviewMessageHandler {
         try {
           const sessionId = message.message?.sessionId;
           if (!sessionId) throw new Error("Session ID is required");
-          await this.agentService.switchSession("agentId", sessionId);
+          await this.agentService.switchSession(this.agentId, sessionId);
           const { formattedHistory } = await this.loadSessionHistory(sessionId);
           this.setCurrentSessionId(sessionId);
           await ctx.webview.webview.postMessage({
@@ -177,14 +183,14 @@ export class SessionHandler implements WebviewMessageHandler {
           const sessionId = message.message?.sessionId;
           ctx.logger.info(`Attempting to delete session: ${sessionId}`);
           if (!sessionId) throw new Error("Session ID is required");
-          await this.agentService.deleteSession("agentId", sessionId);
+          await this.agentService.deleteSession(this.agentId, sessionId);
           ctx.logger.info(`Deleted session from database: ${sessionId}`);
           ChatHistoryCache.delete(sessionId);
           if (this.getCurrentSessionId() === sessionId) {
             this.setCurrentSessionId(null);
             ChatHistoryCache.deactivate();
           }
-          const sessions = await this.agentService.getSessions("agentId");
+          const sessions = await this.agentService.getSessions(this.agentId);
           ctx.logger.info(
             `Remaining sessions after delete: ${sessions.length}`,
           );
@@ -206,11 +212,11 @@ export class SessionHandler implements WebviewMessageHandler {
           if (!sessionId || !title)
             throw new Error("Session ID and title are required");
           await this.agentService.updateSessionTitle(
-            "agentId",
+            this.agentId,
             sessionId,
             title,
           );
-          const sessions = await this.agentService.getSessions("agentId");
+          const sessions = await this.agentService.getSessions(this.agentId);
           await ctx.webview.webview.postMessage({
             type: "session-title-updated",
             sessionId,
@@ -225,8 +231,9 @@ export class SessionHandler implements WebviewMessageHandler {
 
       case "get-current-session": {
         try {
-          const sessionId =
-            await this.agentService.getCurrentSession("agentId");
+          const sessionId = await this.agentService.getCurrentSession(
+            this.agentId,
+          );
           await ctx.webview.webview.postMessage({
             type: "current-session",
             sessionId,
@@ -238,7 +245,7 @@ export class SessionHandler implements WebviewMessageHandler {
       }
 
       case "clear-history":
-        await this.chatHistoryManager.clearHistory("agentId");
+        await this.chatHistoryManager.clearHistory(this.agentId);
         this.orchestrator.publish("onClearHistory", message);
         try {
           await ctx.webview.webview.postMessage({ command: "history-cleared" });
@@ -295,7 +302,7 @@ export class SessionHandler implements WebviewMessageHandler {
     }
 
     this.chatHistorySyncPromise = (async () => {
-      const agentId = "agentId";
+      const agentId = this.agentId;
       const maxAttempts = 2;
       const retryDelayMs = 150;
 
@@ -404,7 +411,7 @@ export class SessionHandler implements WebviewMessageHandler {
     }
 
     try {
-      const agentId = "agentId";
+      const agentId = this.agentId;
       const history = (await this.agentService.getChatHistory(agentId)) || [];
 
       if (history.length < 6) {

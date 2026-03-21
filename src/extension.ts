@@ -77,6 +77,8 @@ import {
   AccessControlService,
   type AccessControlMode,
 } from "./services/access-control.service";
+import { WorkspaceIdentityService } from "./services/workspace-identity.service";
+import { ChatHistoryRepository } from "./infrastructure/repository/db-chat-history";
 
 /** QuickPick item augmented with the target access mode. */
 interface AccessModeQuickPickItem extends vscode.QuickPickItem {
@@ -225,6 +227,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // Initialize External Security Config (must be before terminal for deny-pattern enforcement)
     const externalSecurityConfig = ExternalSecurityConfigService.getInstance();
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    // Initialize Workspace Identity Service (must be before any service that uses agent IDs)
+    WorkspaceIdentityService.getInstance().initialize(workspacePath);
+
     await externalSecurityConfig.initialize(workspacePath);
     context.subscriptions.push(externalSecurityConfig);
 
@@ -747,6 +753,43 @@ export async function activate(context: vscode.ExtensionContext) {
         }
       }),
     );
+
+    // Clear workspace context command
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "codebuddy.clearWorkspaceContext",
+        async () => {
+          const identity = WorkspaceIdentityService.getInstance();
+          const wsName = identity.getWorkspaceName();
+          const confirm = await vscode.window.showWarningMessage(
+            `Clear all chat history and sessions for "${wsName}"? This cannot be undone.`,
+            { modal: true },
+            "Clear",
+          );
+          if (confirm !== "Clear") return;
+
+          const agentId = identity.getAgentId();
+          await ChatHistoryRepository.getInstance().clearAllForAgent(agentId);
+          vscode.window.showInformationMessage(
+            `Workspace context cleared for "${wsName}".`,
+          );
+        },
+      ),
+    );
+
+    // Workspace identity status bar
+    const workspaceIdentity = WorkspaceIdentityService.getInstance();
+    if (workspaceIdentity.getWorkspaceHash()) {
+      const wsStatusBar = vscode.window.createStatusBarItem(
+        vscode.StatusBarAlignment.Right,
+        45,
+      );
+      wsStatusBar.text = `$(folder) ${workspaceIdentity.getWorkspaceName()}`;
+      wsStatusBar.tooltip = `CodeBuddy Workspace: ${workspaceIdentity.getWorkspaceName()}\nID: ${workspaceIdentity.getAgentId()}\nClick to clear workspace context`;
+      wsStatusBar.command = "codebuddy.clearWorkspaceContext";
+      wsStatusBar.show();
+      context.subscriptions.push(wsStatusBar);
+    }
 
     // Run Doctor in background (after all services ready — non-blocking)
     setImmediate(() => {

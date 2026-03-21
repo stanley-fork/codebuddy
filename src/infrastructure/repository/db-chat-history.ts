@@ -461,6 +461,33 @@ export class ChatHistoryRepository {
   }
 
   /**
+   * Clear all workspace context for a specific agent (history, sessions, summaries).
+   */
+  public async clearAllForAgent(agentId: string): Promise<void> {
+    try {
+      await this.dbService.ensureInitialized();
+      this.dbService.executeSqlCommand(
+        "DELETE FROM chat_history WHERE agent_id = ?",
+        [agentId],
+      );
+      this.dbService.executeSqlCommand(
+        "DELETE FROM chat_sessions WHERE agent_id = ?",
+        [agentId],
+      );
+      this.dbService.executeSqlCommand(
+        "DELETE FROM chat_summaries WHERE agent_id = ?",
+        [agentId],
+      );
+      this.logger.info(`Cleared all workspace context for agent ${agentId}`);
+    } catch (error: any) {
+      this.logger.warn(
+        `Failed to clear workspace context for agent ${agentId}:`,
+        error,
+      );
+    }
+  }
+
+  /**
    * Clear all chat history
    */
   public async clearAll(): Promise<void> {

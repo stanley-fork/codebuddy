@@ -100,7 +100,9 @@ export class GeminiWebViewProvider extends BaseWebViewProvider {
     if (Memory.has("chatHistory")) {
       this.chatHistory = Memory.get("chatHistory");
     } else {
-      const dbHistory = await this.chatRepository.get("agentId");
+      const dbHistory = await this.chatRepository.get(
+        BaseWebViewProvider.getAgentId(),
+      );
       if (dbHistory && dbHistory.length > 0) {
         this.chatHistory = dbHistory.map((h: any) => ({
           role: h.type === "user" ? "user" : "model",
@@ -137,7 +139,7 @@ export class GeminiWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       const chat = this.model.startChat({
@@ -198,7 +200,9 @@ export class GeminiWebViewProvider extends BaseWebViewProvider {
     if (Memory.has("chatHistory")) {
       this.chatHistory = Memory.get("chatHistory");
     } else {
-      const dbHistory = await this.chatRepository.get("agentId");
+      const dbHistory = await this.chatRepository.get(
+        BaseWebViewProvider.getAgentId(),
+      );
       if (dbHistory && dbHistory.length > 0) {
         this.chatHistory = dbHistory.map((h: any) => ({
           role: h.type === "user" ? "user" : "model",
@@ -241,7 +245,7 @@ export class GeminiWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       const chat = this.model.startChat({
