@@ -124,16 +124,13 @@ export class FileTool {
           identity.validatePathWithinWorkspace(cfg.file_path) === undefined,
       );
       if (violations.length > 0) {
-        const names = violations
-          .map((cfg) => `"${path.basename(cfg.file_path!)}"`)
-          .join(", ");
         return violations.map((cfg) => ({
-          content: `Error: Access denied — ${names} ${violations.length === 1 ? "is" : "are"} outside the workspace.`,
+          content: `Error: Access denied — the requested path is outside the workspace boundary.`,
           function: cfg.function_name,
         }));
       }
     }
-    return await this.contextRetriever?.readFiles(fileConfigs);
+    return (await this.contextRetriever?.readFiles(fileConfigs)) ?? [];
   }
   config() {
     return {
@@ -183,7 +180,7 @@ export class ListFilesTool {
           identity.getWorkspaceRoot() &&
           identity.validatePathWithinWorkspace(dirPath) === undefined
         ) {
-          return `Error: Access denied — "${path.basename(dirPath)}" is outside the workspace.`;
+          return `Error: Access denied — the requested path is outside the workspace boundary.`;
         }
       }
       const targetDir = dirPath
@@ -245,7 +242,7 @@ export class EditFileTool {
         identity.getWorkspaceRoot() &&
         identity.validatePathWithinWorkspace(filePath) === undefined
       ) {
-        return `Error: Access denied — "${path.basename(filePath)}" is outside the workspace.`;
+        return `Error: Access denied — the requested path is outside the workspace boundary.`;
       }
       const uri = vscode.Uri.file(filePath);
       let newContent = "";

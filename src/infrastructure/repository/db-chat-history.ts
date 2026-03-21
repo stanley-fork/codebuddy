@@ -462,25 +462,47 @@ export class ChatHistoryRepository {
 
   /**
    * Clear all workspace context for a specific agent (history, sessions, summaries).
-   * Throws on failure so callers can show accurate feedback.
+   * Wrapped in a transaction for atomicity. Throws on failure so callers can
+   * show accurate feedback.
    */
   public async clearAllForAgent(agentId: string): Promise<void> {
+    // Guard: validate agentId format to prevent accidental full-table wipes
+    if (agentId !== "agentId" && !/^agentId-[a-f0-9]{12}$/.test(agentId)) {
+      throw new Error(
+        `clearAllForAgent: invalid agentId format "${agentId}". ` +
+          `Expected "agentId" or "agentId-<12hex>".`,
+      );
+    }
+
     await this.dbService.ensureInitialized();
-    // executeSqlCommand is synchronous — run sequentially so a failure
-    // in one table doesn't leave the others silently skipped.
-    this.dbService.executeSqlCommand(
-      "DELETE FROM chat_history WHERE agent_id = ?",
-      [agentId],
-    );
-    this.dbService.executeSqlCommand(
-      "DELETE FROM chat_sessions WHERE agent_id = ?",
-      [agentId],
-    );
-    this.dbService.executeSqlCommand(
-      "DELETE FROM chat_summaries WHERE agent_id = ?",
-      [agentId],
-    );
-    this.logger.info(`Cleared all workspace context for agent ${agentId}`);
+
+    this.dbService.executeSqlCommand("BEGIN TRANSACTION", []);
+    try {
+      const h = this.dbService.executeSqlCommand(
+        "DELETE FROM chat_history WHERE agent_id = ?",
+        [agentId],
+      );
+      const s = this.dbService.executeSqlCommand(
+        "DELETE FROM chat_sessions WHERE agent_id = ?",
+        [agentId],
+      );
+      const sm = this.dbService.executeSqlCommand(
+        "DELETE FROM chat_summaries WHERE agent_id = ?",
+        [agentId],
+      );
+      this.dbService.executeSqlCommand("COMMIT", []);
+      this.logger.info(
+        `Cleared workspace context for ${agentId}: ` +
+          `${h.changes} history, ${s.changes} sessions, ${sm.changes} summaries`,
+      );
+    } catch (error) {
+      this.dbService.executeSqlCommand("ROLLBACK", []);
+      this.logger.error(
+        `Failed to clear workspace context — rolled back`,
+        error,
+      );
+      throw error;
+    }
   }
 
   /**
