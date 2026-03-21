@@ -524,14 +524,24 @@ export class SqliteVectorStore implements vscode.Disposable {
     return this.initialized ? this.db : null;
   }
 
-  /** Register a callback invoked after the db is initialized. */
-  onInitialized(callback: (db: SqlJsDatabase) => Promise<void>): void {
+  /** Register a callback invoked after the db is initialized. Returns a Disposable for removal. */
+  onInitialized(
+    callback: (db: SqlJsDatabase) => Promise<void>,
+  ): vscode.Disposable {
     this.onDbInitializedCallbacks.push(callback);
+    return new vscode.Disposable(() => {
+      const idx = this.onDbInitializedCallbacks.indexOf(callback);
+      if (idx !== -1) this.onDbInitializedCallbacks.splice(idx, 1);
+    });
   }
 
-  /** Register a callback invoked before the db is disposed. */
-  onDisposing(callback: () => void): void {
+  /** Register a callback invoked before the db is disposed. Returns a Disposable for removal. */
+  onDisposing(callback: () => void): vscode.Disposable {
     this.onDbDisposingCallbacks.push(callback);
+    return new vscode.Disposable(() => {
+      const idx = this.onDbDisposingCallbacks.indexOf(callback);
+      if (idx !== -1) this.onDbDisposingCallbacks.splice(idx, 1);
+    });
   }
 
   dispose(): void {

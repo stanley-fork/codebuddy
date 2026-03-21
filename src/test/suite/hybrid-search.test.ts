@@ -176,13 +176,14 @@ suite("MMR Re-ranking", () => {
 
   test("applyMMR returns same order when disabled", () => {
     const items = [
-      { score: 0.5, snippet: "a", filePath: "a.ts", startLine: 1 },
-      { score: 0.9, snippet: "b", filePath: "b.ts", startLine: 1 },
+      { score: 0.9, snippet: "a", filePath: "a.ts", startLine: 1 },
+      { score: 0.5, snippet: "b", filePath: "b.ts", startLine: 1 },
     ];
     const out = applyMMR(items, { enabled: false });
-    // Should be a copy, not re-ranked
+    // Should preserve original order, not re-ranked
     assert.strictEqual(out.length, 2);
     assert.strictEqual(out[0].snippet, "a");
+    assert.strictEqual(out[1].snippet, "b");
   });
 
   test("applyMMR promotes diverse results", () => {

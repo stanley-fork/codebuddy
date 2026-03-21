@@ -32,6 +32,14 @@ function toSearchResult(r: HybridSearchResult): SearchResult {
   };
 }
 
+/** Minimal shape for legacy vector store search results. */
+interface LegacySearchResult {
+  document?: { filePath?: string; text?: string };
+  filePath?: string;
+  text?: string;
+  score?: number;
+}
+
 export class ContextRetriever implements vscode.Disposable {
   private readonly embeddingService: EmbeddingService;
   private static readonly SEARCH_RESULT_COUNT = 5;
@@ -84,15 +92,20 @@ export class ContextRetriever implements vscode.Disposable {
     );
   }
 
+  private static disposed = false;
+
   static initialize(context?: vscode.ExtensionContext) {
-    if (!ContextRetriever.instance) {
-      ContextRetriever.instance = new ContextRetriever(context);
+    if (ContextRetriever.instance && !ContextRetriever.disposed) {
+      return ContextRetriever.instance;
     }
+    ContextRetriever.instance = new ContextRetriever(context);
+    ContextRetriever.disposed = false;
     return ContextRetriever.instance;
   }
 
   dispose(): void {
     this.configChangeDisposable.dispose();
+    ContextRetriever.disposed = true;
   }
 
   async retrieveContext(input: string): Promise<string> {
@@ -139,10 +152,12 @@ export class ContextRetriever implements vscode.Disposable {
       }
     }
 
-    // ── Legacy fallback (hybrid search was never attempted) ─────────────
-    if (results.length === 0 && !hybridSearch.isReady) {
+    // ── Legacy fallback (hybrid returned nothing or was never attempted) ──
+    if (results.length === 0) {
       try {
-        this.logger.info("Falling back to legacy vector search");
+        this.logger.info(
+          "No hybrid results; falling back to legacy vector search",
+        );
         const embedding = await this.embeddingService.generateEmbedding(input);
         const legacyResults = await this.vectorStore.search(
           embedding,
@@ -152,10 +167,10 @@ export class ContextRetriever implements vscode.Disposable {
           document: { filePath: r.document.filePath, text: r.document.text },
           score: r.score,
         }));
-        searchMethod = "Semantic";
+        searchMethod = "Semantic (Legacy Fallback)";
       } catch (error: unknown) {
         this.logger.warn(
-          "Embedding generation failed, falling back to keyword search",
+          "Legacy vector search also failed, falling back to keyword search",
           error,
         );
         searchMethod = "Keyword (Fallback)";
@@ -163,10 +178,10 @@ export class ContextRetriever implements vscode.Disposable {
           input,
           ContextRetriever.SEARCH_RESULT_COUNT,
         );
-        results = kwResults.map((r: any) => ({
+        results = kwResults.map((r: LegacySearchResult) => ({
           document: {
-            filePath: r.document?.filePath ?? r.filePath,
-            text: r.document?.text ?? r.text,
+            filePath: r.document?.filePath ?? r.filePath ?? "",
+            text: r.document?.text ?? r.text ?? "",
           },
           score: r.score ?? 0,
         }));
@@ -190,7 +205,7 @@ export class ContextRetriever implements vscode.Disposable {
       results = [
         ...results,
         ...commonFilesResults.map(
-          (r: any) =>
+          (r: LegacySearchResult) =>
             ({
               document: {
                 filePath: r.document?.filePath ?? "",
