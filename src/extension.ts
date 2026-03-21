@@ -30,6 +30,7 @@ import { Memory } from "./memory/base";
 import { Orchestrator } from "./orchestrator";
 import { AgentRunningGuardService } from "./services/agent-running-guard.service";
 import { CompletionStatusBarService } from "./services/completion-status-bar.service";
+import { ConcurrencyQueueService } from "./services/concurrency-queue.service";
 import { ContextRetriever } from "./services/context-retriever";
 import { InlineCompletionService } from "./services/inline-completion.service";
 import { OutputManager } from "./services/output-manager";
@@ -1116,6 +1117,58 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize Status Bar
     const completionStatusBar = new CompletionStatusBarService(context);
+
+    // Initialize Concurrency Queue status bar + commands
+    const concurrencyQueue = ConcurrencyQueueService.getInstance();
+    concurrencyQueue.initStatusBar(context);
+    context.subscriptions.push(concurrencyQueue);
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "codebuddy.concurrencyQueue.showStatus",
+        async () => {
+          const snap = concurrencyQueue.getSnapshot();
+          const waiting = concurrencyQueue.getWaitingIds();
+          const lines = [
+            `Agent Queue: ${snap.running}/${snap.maxConcurrent} slots in use`,
+          ];
+          if (waiting.length > 0) {
+            lines.push("", "Queued:");
+            for (const w of waiting) {
+              lines.push(`  • ${w.label}`);
+            }
+          }
+          if (waiting.length > 0) {
+            const action = await vscode.window.showInformationMessage(
+              lines.join("\n"),
+              "Cancel All Queued",
+            );
+            if (action === "Cancel All Queued") {
+              const count = concurrencyQueue.cancelAllWaiting();
+              vscode.window.showInformationMessage(
+                `Cancelled ${count} queued requests.`,
+              );
+            }
+          } else {
+            vscode.window.showInformationMessage(lines[0]);
+          }
+        },
+      ),
+    );
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "codebuddy.concurrencyQueue.cancelAll",
+        () => {
+          const count = concurrencyQueue.cancelAllWaiting();
+          vscode.window.showInformationMessage(
+            count > 0
+              ? `Cancelled ${count} queued requests.`
+              : "No queued requests to cancel.",
+          );
+        },
+      ),
+    );
 
     // Register Completion Commands
     context.subscriptions.push(
