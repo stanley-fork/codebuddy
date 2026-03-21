@@ -156,7 +156,7 @@ suite("MMR Re-ranking", () => {
     assert.strictEqual(jaccardSimilarity(a, b), 0);
   });
 
-  test("jaccardSimilarity returns 0.5 for half-overlapping sets", () => {
+  test("jaccardSimilarity returns 1/3 for one-of-three shared tokens", () => {
     const a = new Set(["a", "b"]);
     const b = new Set(["b", "c"]);
     // intersection=1, union=3 → 1/3
