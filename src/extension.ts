@@ -349,6 +349,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize ContextRetriever for semantic search
     const contextRetriever = ContextRetriever.initialize(context);
+    context.subscriptions.push(contextRetriever);
 
     // Initialize Persistent Codebase Service and Git Watcher
     const persistentCodebaseService =

@@ -32,7 +32,7 @@ function toSearchResult(r: HybridSearchResult): SearchResult {
   };
 }
 
-export class ContextRetriever {
+export class ContextRetriever implements vscode.Disposable {
   private readonly embeddingService: EmbeddingService;
   private static readonly SEARCH_RESULT_COUNT = 5;
   private readonly logger: Logger;
@@ -89,6 +89,10 @@ export class ContextRetriever {
       ContextRetriever.instance = new ContextRetriever(context);
     }
     return ContextRetriever.instance;
+  }
+
+  dispose(): void {
+    this.configChangeDisposable.dispose();
   }
 
   async retrieveContext(input: string): Promise<string> {
@@ -248,18 +252,24 @@ export class ContextRetriever {
    * Read hybrid search settings from VS Code configuration.
    */
   private readHybridSearchConfig(): HybridSearchConfig {
+    const clamp = (v: number, lo: number, hi: number) =>
+      Math.max(lo, Math.min(hi, v));
     const config = vscode.workspace.getConfiguration("codebuddy.hybridSearch");
     return {
-      vectorWeight: config.get<number>("vectorWeight", 0.7),
-      textWeight: config.get<number>("textWeight", 0.3),
-      topK: config.get<number>("topK", 10),
+      vectorWeight: clamp(config.get<number>("vectorWeight", 0.7), 0, 1),
+      textWeight: clamp(config.get<number>("textWeight", 0.3), 0, 1),
+      topK: clamp(config.get<number>("topK", 10), 1, 100),
       mmr: {
         enabled: config.get<boolean>("mmr.enabled", false),
-        lambda: config.get<number>("mmr.lambda", 0.7),
+        lambda: clamp(config.get<number>("mmr.lambda", 0.7), 0, 1),
       },
       temporalDecay: {
         enabled: config.get<boolean>("temporalDecay.enabled", false),
-        halfLifeDays: config.get<number>("temporalDecay.halfLifeDays", 30),
+        halfLifeDays: clamp(
+          config.get<number>("temporalDecay.halfLifeDays", 30),
+          1,
+          365,
+        ),
       },
     };
   }
