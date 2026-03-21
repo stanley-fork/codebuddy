@@ -141,6 +141,26 @@ export class WorkspaceIdentityService {
     return resolved;
   }
 
+  /**
+   * Validate that a file path (absolute or relative) is within the workspace.
+   *
+   * Returns the resolved absolute path if valid, or `undefined` if:
+   * - the path escapes the workspace root, or
+   * - no workspace is open (callers should fall back to permissive behavior).
+   *
+   * This is the non-throwing variant for use in LLM tool boundaries.
+   */
+  public validatePathWithinWorkspace(filePath: string): string | undefined {
+    if (!this.workspaceRoot) return undefined;
+    const resolved = path.resolve(this.workspaceRoot, filePath);
+    const rel = path.relative(this.workspaceRoot, resolved);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      logger.warn(`Blocked path traversal attempt: ${filePath}`);
+      return undefined;
+    }
+    return resolved;
+  }
+
   /** Reset singleton state for unit tests. */
   public static _resetForTesting(): void {
     WorkspaceIdentityService.instance = undefined;
