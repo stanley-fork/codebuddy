@@ -14,23 +14,9 @@ import {
   type TemporalDecayConfig,
 } from "./temporal-decay";
 import { applyMMR, DEFAULT_MMR_CONFIG, type MMRConfig } from "./mmr";
+import type { SqlJsDatabase, SqlJsStatement } from "../types/sql-js.d";
 
-// ─── sql.js Structural Types ──────────────────────────────────────────
-
-interface SqlJsStatement {
-  bind(params: (string | number | null | Uint8Array)[]): void;
-  step(): boolean;
-  getAsObject(): Record<string, unknown>;
-  free(): void;
-  reset(): void;
-}
-
-interface SqlJsDatabase {
-  run(sql: string, params?: (string | number | null)[]): void;
-  exec(sql: string): Array<{ columns: string[]; values: unknown[][] }>;
-  prepare(sql: string): SqlJsStatement;
-  close(): void;
-}
+export type { SqlJsDatabase, SqlJsStatement };
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -158,7 +144,14 @@ export function mergeHybridResults(params: {
   keyword: KeywordHit[];
   config?: Partial<HybridSearchConfig>;
 }): HybridSearchResult[] {
-  const cfg = { ...DEFAULT_HYBRID_CONFIG, ...params.config };
+  const input = params.config ?? {};
+  const cfg: HybridSearchConfig = {
+    ...DEFAULT_HYBRID_CONFIG,
+    ...input,
+    // Deep-merge nested objects to preserve defaults for unspecified fields
+    mmr: { ...DEFAULT_MMR_CONFIG, ...input.mmr },
+    temporalDecay: { ...DEFAULT_TEMPORAL_DECAY_CONFIG, ...input.temporalDecay },
+  };
 
   // Normalize weights to sum to 1.0 for consistent scoring
   const weightSum = cfg.vectorWeight + cfg.textWeight;
@@ -238,19 +231,14 @@ export function mergeHybridResults(params: {
   }));
 
   // ── 3. Temporal decay ──────────────────────────────────────────────
-  const decayConfig = {
-    ...DEFAULT_TEMPORAL_DECAY_CONFIG,
-    ...cfg.temporalDecay,
-  };
-  merged = applyTemporalDecay(merged, decayConfig, cfg.nowMs);
+  merged = applyTemporalDecay(merged, cfg.temporalDecay, cfg.nowMs);
 
   // ── 4. Sort by score ───────────────────────────────────────────────
   merged.sort((a, b) => b.score - a.score);
 
   // ── 5. MMR diversity re-ranking ────────────────────────────────────
-  const mmrConfig = { ...DEFAULT_MMR_CONFIG, ...cfg.mmr };
-  if (mmrConfig.enabled) {
-    merged = applyMMR(merged, mmrConfig);
+  if (cfg.mmr.enabled) {
+    merged = applyMMR(merged, cfg.mmr);
   }
 
   // ── 6. Top-K ──────────────────────────────────────────────────────
@@ -326,6 +314,26 @@ export class HybridSearchService {
     return this.ftsInitialized && this.db !== null;
   }
 
+  /**
+   * Clean up resources. Must be called when the underlying database is
+   * replaced (workspace change) or when the extension deactivates.
+   */
+  dispose(): void {
+    if (this.vectorSearchStmt) {
+      try {
+        this.vectorSearchStmt.free();
+      } catch {
+        // Statement may already be freed if db was closed
+      }
+      this.vectorSearchStmt = null;
+    }
+    this.db = null;
+    this.ftsInitialized = false;
+    this.initializedForDb = null;
+    this.initPromise = null;
+    this.logger.info("HybridSearchService disposed");
+  }
+
   // ── FTS5 Schema ─────────────────────────────────────────────────────
 
   private createFtsTables(): void {
@@ -369,25 +377,44 @@ export class HybridSearchService {
   /**
    * One-time back-fill: insert existing chunks text into FTS5.
    * Idempotent — checks row count before proceeding.
+   * Uses incremental insert for small deficits, full rebuild for large ones.
    */
   private backfillFts(): void {
     try {
-      const ftsCountResult = this.db!.exec("SELECT COUNT(*) FROM chunks_fts");
-      const ftsCount = Number(ftsCountResult?.[0]?.values?.[0]?.[0] ?? 0);
+      const ftsCount = Number(
+        this.db!.exec("SELECT COUNT(*) FROM chunks_fts")?.[0]
+          ?.values?.[0]?.[0] ?? 0,
+      );
+      const chunksCount = Number(
+        this.db!.exec("SELECT COUNT(*) FROM chunks")?.[0]?.values?.[0]?.[0] ??
+          0,
+      );
 
-      const chunksCountResult = this.db!.exec("SELECT COUNT(*) FROM chunks");
-      const chunksCount = Number(chunksCountResult?.[0]?.values?.[0]?.[0] ?? 0);
-
-      if (ftsCount < chunksCount) {
-        this.logger.info(
-          `Back-filling FTS5 index: ${chunksCount - ftsCount} chunks to index`,
-        );
-        // Rebuild from scratch for safety
-        this.db!.run("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
-        this.logger.info("FTS5 back-fill complete");
+      if (ftsCount >= chunksCount) {
+        return;
       }
-    } catch (err: any) {
-      this.logger.warn(`FTS5 back-fill failed: ${err.message}`);
+
+      const deficit = chunksCount - ftsCount;
+      this.logger.info(`Back-filling FTS5 index: ${deficit} chunks to index`);
+
+      if (deficit < 100) {
+        // Incremental insert for small deficits
+        this.db!.run(`
+          INSERT INTO chunks_fts(rowid, text)
+          SELECT c.rowid, c.text FROM chunks c
+          WHERE c.rowid NOT IN (SELECT rowid FROM chunks_fts)
+        `);
+      } else {
+        // Full rebuild for large deficits
+        this.logger.warn(
+          `Large FTS5 backfill (${deficit} chunks). This may take a moment.`,
+        );
+        this.db!.run("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+      }
+
+      this.logger.info("FTS5 back-fill complete");
+    } catch (err: unknown) {
+      this.logger.warn(`FTS5 back-fill failed: ${(err as Error).message}`);
     }
   }
 
@@ -487,8 +514,18 @@ export class HybridSearchService {
       return [];
     }
 
-    const stmt = this.getVectorSearchStmt();
-    stmt.bind([HybridSearchService.VECTOR_SCAN_LIMIT]);
+    let stmt: SqlJsStatement;
+    try {
+      stmt = this.getVectorSearchStmt();
+      stmt.bind([HybridSearchService.VECTOR_SCAN_LIMIT]);
+    } catch (err) {
+      // Invalidate cached statement on bind failure
+      this.vectorSearchStmt = null;
+      this.logger.warn(
+        `Vector search stmt preparation failed: ${(err as Error).message}`,
+      );
+      return [];
+    }
 
     const topK: VectorHit[] = [];
     let worstTopKScore = -Infinity;
@@ -521,7 +558,7 @@ export class HybridSearchService {
         continue;
       }
 
-      const hit: VectorHit = {
+      topK.push({
         id: row.id as string,
         filePath: row.file_path as string,
         startLine: row.start_line as number,
@@ -531,23 +568,24 @@ export class HybridSearchService {
         chunkType: row.chunk_type as string,
         language: row.language as string,
         indexedAt: row.indexed_at as string | undefined,
-      };
-
-      topK.push(hit);
-      topK.sort((a, b) => b.vectorScore - a.vectorScore);
-      if (topK.length > k) {
-        topK.pop();
-      }
-      worstTopKScore = topK[topK.length - 1]?.vectorScore ?? -Infinity;
+      });
 
       // Yield to keep the extension host responsive
       if (++rowsProcessed % HybridSearchService.YIELD_INTERVAL === 0) {
         await new Promise((resolve) => setImmediate(resolve));
       }
     }
-    stmt.reset(); // reuse the prepared statement
 
-    return topK;
+    try {
+      stmt.reset();
+    } catch {
+      // If reset fails, invalidate so next call gets a fresh statement
+      this.vectorSearchStmt = null;
+    }
+
+    // Deferred sort: single O(n log n) sort instead of per-insertion sort
+    topK.sort((a, b) => b.vectorScore - a.vectorScore);
+    return topK.slice(0, k);
   }
 
   // ── Hybrid Search (public API) ─────────────────────────────────────

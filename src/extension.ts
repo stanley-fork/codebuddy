@@ -54,6 +54,7 @@ import { WebViewProviderManager } from "./webview-providers/manager";
 import { CodeBuddyAgentService } from "./agents/services/codebuddy-agent.service";
 import { NotificationService } from "./services/notification.service";
 import { SqliteVectorStore } from "./services/sqlite-vector-store";
+import { HybridSearchService } from "./memory/hybrid-search.service";
 import { StandupService } from "./services/standup.service";
 import { MeetingIntelligenceService } from "./services/meeting-intelligence.service";
 import { TeamGraphStore } from "./services/team-graph-store";
@@ -283,6 +284,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize shared vector store (used by AstIndexingService + ContextRetriever)
     const vectorStore = SqliteVectorStore.getInstance();
+    const hybridSearch = HybridSearchService.getInstance();
+    vectorStore.onInitialized((db) => hybridSearch.initializeFts(db));
+    vectorStore.onDisposing(() => hybridSearch.dispose());
     await vectorStore.initialize(context);
     context.subscriptions.push(vectorStore);
 
@@ -1605,6 +1609,9 @@ export async function deactivate(context: vscode.ExtensionContext) {
 
   // Dispose agent service (clears caches, ends streams, unsubscribes events)
   CodeBuddyAgentService.getInstance().dispose();
+
+  // Dispose hybrid search service (frees prepared statements)
+  HybridSearchService.getInstance().dispose();
 
   // Flush and close telemetry persistence
   try {

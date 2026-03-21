@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as crypto from "crypto";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
-import { HybridSearchService } from "../memory/hybrid-search.service";
+import type { SqlJsDatabase } from "../types/sql-js.d";
 
 export interface VectorDocument {
   id: string;
@@ -46,6 +46,10 @@ export class SqliteVectorStore implements vscode.Disposable {
   private dbPath = "";
   private isDirty = false;
   private saveTimer: NodeJS.Timeout | null = null;
+  private onDbInitializedCallbacks: Array<
+    (db: SqlJsDatabase) => Promise<void>
+  > = [];
+  private onDbDisposingCallbacks: Array<() => void> = [];
 
   private constructor() {
     this.logger = Logger.initialize("SqliteVectorStore", {
@@ -119,8 +123,10 @@ export class SqliteVectorStore implements vscode.Disposable {
       this.db = new this.SQL.Database(data);
       this.createTables();
 
-      // Initialize FTS5 hybrid search (creates virtual table + back-fills)
-      await HybridSearchService.getInstance().initializeFts(this.db);
+      // Initialize FTS5 hybrid search via callback (avoids circular dependency)
+      for (const cb of this.onDbInitializedCallbacks) {
+        await cb(this.db);
+      }
 
       this.saveToDisk();
 
@@ -511,14 +517,32 @@ export class SqliteVectorStore implements vscode.Disposable {
   }
 
   /**
-   * Expose the underlying sql.js database for the HybridSearchService.
+   * Expose the underlying sql.js database.
    * Returns null if the store is not initialized.
    */
-  getDatabase(): any {
+  getDatabase(): SqlJsDatabase | null {
     return this.initialized ? this.db : null;
   }
 
+  /** Register a callback invoked after the db is initialized. */
+  onInitialized(callback: (db: SqlJsDatabase) => Promise<void>): void {
+    this.onDbInitializedCallbacks.push(callback);
+  }
+
+  /** Register a callback invoked before the db is disposed. */
+  onDisposing(callback: () => void): void {
+    this.onDbDisposingCallbacks.push(callback);
+  }
+
   dispose(): void {
+    // Notify listeners before closing db
+    for (const cb of this.onDbDisposingCallbacks) {
+      try {
+        cb();
+      } catch {
+        /* ignore */
+      }
+    }
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
     }

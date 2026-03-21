@@ -121,8 +121,8 @@ export class ContextRetriever {
       }
     }
 
-    // ── Legacy fallback (no FTS5 available or no results) ─────────────
-    if (results.length === 0 || !hybridSearch.isReady) {
+    // ── Legacy fallback (hybrid search was never attempted) ─────────────
+    if (results.length === 0 && !hybridSearch.isReady) {
       try {
         this.logger.info("Falling back to legacy vector search");
         const embedding = await this.embeddingService.generateEmbedding(input);
