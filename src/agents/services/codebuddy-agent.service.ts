@@ -1087,7 +1087,7 @@ export class CodeBuddyAgentService {
       );
     }
 
-    const conversationId = threadId ?? `thread-${Date.now()}`;
+    const conversationId = threadId ?? `thread-${randomUUID()}`;
 
     // ── Concurrency gate ──────────────────────────────────────
     // Acquire a slot before setting up the stream. If all slots are taken,
