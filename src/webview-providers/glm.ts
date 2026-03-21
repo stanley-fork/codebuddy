@@ -128,7 +128,7 @@ export class GLMWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -225,7 +225,7 @@ export class GLMWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [

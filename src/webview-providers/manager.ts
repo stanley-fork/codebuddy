@@ -22,6 +22,7 @@ import { LocalWebViewProvider } from "./local";
 import type { IProviderFactory } from "./provider-factory.interface";
 import { toProviderKey } from "./provider-name";
 import { Terminal } from "../utils/terminal";
+import { WorkspaceIdentityService } from "../services/workspace-identity.service";
 
 export class WebViewProviderManager
   implements vscode.Disposable, IProviderFactory
@@ -45,7 +46,16 @@ export class WebViewProviderManager
   protected readonly orchestrator: Orchestrator;
   protected readonly chatHistoryManager: ChatHistoryManager;
 
-  static readonly AgentId = "agentId"; // TODO This is hardcoded for now,in upcoming versions, requests will be tagged to respective agents.
+  /** @deprecated Use WorkspaceIdentityService.getInstance().getAgentId() instead. */
+  static readonly AgentId = "agentId";
+
+  /**
+   * Workspace-scoped agent ID.
+   * Replaces the hardcoded `AgentId` with a per-workspace hash.
+   */
+  static getAgentId(): string {
+    return WorkspaceIdentityService.getInstance().getAgentId();
+  }
   private readonly logger: Logger;
   private readonly notificationService: NotificationService;
 
