@@ -1137,6 +1137,7 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
 
+          const CANCEL_ALL_ID = "__cancel_all__";
           const items: vscode.QuickPickItem[] = [
             ...waiting.map((w) => ({
               label: `$(clock) ${w.label}`,
@@ -1145,7 +1146,8 @@ export async function activate(context: vscode.ExtensionContext) {
             })),
             {
               label: "$(trash) Cancel All Queued",
-              description: "",
+              description: CANCEL_ALL_ID,
+              detail: `Cancel all ${waiting.length} queued requests`,
             },
           ];
 
@@ -1156,7 +1158,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
           if (!picked) return;
 
-          if (picked.label.includes("Cancel All")) {
+          if (picked.description === CANCEL_ALL_ID) {
             const count = concurrencyQueue.cancelAllWaiting();
             vscode.window.showInformationMessage(
               `Cancelled ${count} queued requests.`,
@@ -1165,7 +1167,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const cancelled = concurrencyQueue.cancel(picked.description);
             if (cancelled) {
               vscode.window.showInformationMessage(
-                `Cancelled: ${picked.label}`,
+                `Cancelled: ${picked.label.replace(/^\$\([^)]+\)\s*/, "")}`,
               );
             }
           }

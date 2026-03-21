@@ -15,14 +15,20 @@ export enum QueueItemStatus {
   CANCELLED = "cancelled",
 }
 
-/** A queued operation waiting for a concurrency slot. */
-export interface QueueItem<T = unknown> {
+/** Public read-only view of a queue item (for UI / status purposes). */
+export interface QueueItemView {
   readonly id: string;
   readonly label: string;
   readonly priority: QueuePriority;
   readonly enqueuedAt: number;
+  readonly status: QueueItemStatus;
+}
+
+/** Internal mutable implementation — not exported. */
+interface QueueItemInternal extends QueueItemView {
+  priority: QueuePriority;
   status: QueueItemStatus;
-  resolve: (value: T) => void;
+  resolve: (value: () => void) => void;
   reject: (reason: unknown) => void;
 }
 
@@ -33,10 +39,17 @@ export interface QueueSnapshot {
   maxConcurrent: number;
 }
 
-/** Time (ms) after which a waiting item gets its priority boosted by 1 level. */
+/**
+ * Time (ms) after which a waiting item gets its priority boosted by 1 level.
+ * Intentionally not configurable — a 60s wait is long enough that promotion
+ * is always appropriate; making it configurable adds surface area for no gain.
+ */
 const STARVATION_BOOST_MS = 60_000;
 
-/** How often we check for starvation (ms). */
+/**
+ * How often the starvation timer fires (ms).
+ * 15s granularity strikes a balance between responsiveness and overhead.
+ */
 const STARVATION_CHECK_INTERVAL_MS = 15_000;
 
 /** Hard cap on waiting queue depth to prevent unbounded memory growth. */
@@ -55,10 +68,13 @@ export class ConcurrencyQueueService implements vscode.Disposable {
   private readonly logger: Logger;
 
   /** Items actively consuming a concurrency slot. */
-  private readonly running = new Map<string, QueueItem>();
+  private readonly running = new Map<string, QueueItemInternal>();
 
   /** Items waiting for a slot, kept sorted by effective priority. */
-  private readonly waiting: QueueItem[] = [];
+  private readonly waiting: QueueItemInternal[] = [];
+
+  /** O(1) lookup index for waiting item IDs. Kept in sync with `waiting`. */
+  private readonly waitingIds = new Set<string>();
 
   /** Status bar item showing queue state. */
   private statusBarItem: vscode.StatusBarItem | null = null;
@@ -81,7 +97,7 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,
       enableFile: true,
-      enableTelemetry: true,
+      enableTelemetry: false, // telemetry reserved for business-significant events
     });
 
     this._maxConcurrent = this.readMaxConcurrent();
@@ -147,7 +163,7 @@ export class ConcurrencyQueueService implements vscode.Disposable {
     }
 
     // Prevent duplicate IDs — callers must use unique identifiers
-    if (this.running.has(id) || this.waiting.some((w) => w.id === id)) {
+    if (this.running.has(id) || this.waitingIds.has(id)) {
       throw new Error(
         `ConcurrencyQueue: duplicate id "${id}". ` +
           `Use a unique id per acquire call.`,
@@ -156,7 +172,7 @@ export class ConcurrencyQueueService implements vscode.Disposable {
 
     // Fast path: slot available
     if (this.running.size < this._maxConcurrent) {
-      const item: QueueItem = {
+      const item: QueueItemInternal = {
         id,
         label,
         priority,
@@ -186,21 +202,10 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       `Queueing "${label}" (priority=${QueuePriority[priority]}, waiting=${this.waiting.length})`,
     );
 
-    // Build a unified abort signal from caller signal + timeout
-    const signals: AbortSignal[] = [];
-    if (options?.signal) signals.push(options.signal);
-    if (options?.timeoutMs != null) {
-      signals.push(AbortSignal.timeout(options.timeoutMs));
-    }
-    const signal =
-      signals.length > 1
-        ? AbortSignal.any(signals)
-        : signals.length === 1
-          ? signals[0]
-          : undefined;
+    const signal = this.buildAbortSignal(options?.signal, options?.timeoutMs);
 
     return new Promise<() => void>((resolve, reject) => {
-      const item: QueueItem = {
+      const item: QueueItemInternal = {
         id,
         label,
         priority,
@@ -234,10 +239,12 @@ export class ConcurrencyQueueService implements vscode.Disposable {
    * Running operations are NOT cancelled here — use the agent's cancelStream instead.
    */
   cancel(id: string): boolean {
+    if (!this.waitingIds.has(id)) return false;
     const idx = this.waiting.findIndex((item) => item.id === id);
     if (idx === -1) return false;
 
     const [item] = this.waiting.splice(idx, 1);
+    this.waitingIds.delete(id);
     item.status = QueueItemStatus.CANCELLED;
     item.reject(new ConcurrencyQueueCancelledError(id));
     this.logger.info(`Cancelled queued item: "${item.label}"`);
@@ -254,6 +261,7 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       item.status = QueueItemStatus.CANCELLED;
       item.reject(new ConcurrencyQueueCancelledError(item.id));
     }
+    this.waitingIds.clear();
     if (count > 0) {
       this.logger.info(`Cancelled ${count} queued items`);
       this.fireChange();
@@ -301,7 +309,8 @@ export class ConcurrencyQueueService implements vscode.Disposable {
   }
 
   /** Insert into the waiting list, maintaining descending-priority + FIFO order. */
-  private insertSorted(item: QueueItem): void {
+  private insertSorted(item: QueueItemInternal): void {
+    this.waitingIds.add(item.id);
     // Find the first item with strictly lower priority
     let i = 0;
     while (
@@ -319,19 +328,25 @@ export class ConcurrencyQueueService implements vscode.Disposable {
     return () => {
       if (released) return;
       released = true;
+      if (this.disposed) {
+        // Service is shutting down — just clean up our local reference
+        this.running.delete(id);
+        return;
+      }
       this.running.delete(id);
       this.logger.debug(
         `Slot released: ${id} (${this.running.size}/${this._maxConcurrent})`,
       );
-      this.drain();
-      this.fireChange();
+      this.drain(); // drain handles fireChange internally
     };
   }
 
   /** Move waiting items into running slots. */
   private drain(): void {
+    let drained = false;
     while (this.waiting.length > 0 && this.running.size < this._maxConcurrent) {
       const item = this.waiting.shift()!;
+      this.waitingIds.delete(item.id);
 
       // Skip cancelled items that are still in the array
       if (item.status === QueueItemStatus.CANCELLED) continue;
@@ -339,11 +354,13 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       item.status = QueueItemStatus.RUNNING;
       this.running.set(item.id, item);
       this.logger.info(
-        `Slot granted to queued item: "${item.label}" (${this.running.size}/${this._maxConcurrent})`,
+        `Slot granted: "${item.label}" (${this.running.size}/${this._maxConcurrent})`,
       );
-      item.resolve(undefined);
+      item.resolve(this.createReleaser(item.id));
+      drained = true;
     }
-    this.fireChange();
+    // Fire once, only if state actually changed
+    if (drained) this.fireChange();
   }
 
   /** Boost priority of items that have waited too long. */
@@ -354,8 +371,7 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       if (item.status !== QueueItemStatus.WAITING) continue;
       const waited = now - item.enqueuedAt;
       if (waited >= STARVATION_BOOST_MS && item.priority < QueuePriority.USER) {
-        // Boost priority by 1 level (mutate the readonly via cast — internal only)
-        (item as { priority: QueuePriority }).priority = Math.min(
+        item.priority = Math.min(
           item.priority + 1,
           QueuePriority.USER,
         ) as QueuePriority;
@@ -375,6 +391,53 @@ export class ConcurrencyQueueService implements vscode.Disposable {
     }
   }
 
+  /**
+   * Build a unified AbortSignal from an optional caller signal and timeout.
+   * Includes runtime guards for `AbortSignal.timeout()` (Node 17.3+) and
+   * `AbortSignal.any()` (Node 20+) to support older VS Code engine targets.
+   */
+  private buildAbortSignal(
+    callerSignal?: AbortSignal,
+    timeoutMs?: number,
+  ): AbortSignal | undefined {
+    const signals: AbortSignal[] = [];
+
+    if (callerSignal) signals.push(callerSignal);
+
+    if (timeoutMs != null) {
+      if (typeof AbortSignal.timeout === "function") {
+        signals.push(AbortSignal.timeout(timeoutMs));
+      } else {
+        // Fallback for runtimes without AbortSignal.timeout
+        const ctrl = new AbortController();
+        setTimeout(
+          () => ctrl.abort(new Error(`Queue timeout after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+        signals.push(ctrl.signal);
+      }
+    }
+
+    if (signals.length === 0) return undefined;
+    if (signals.length === 1) return signals[0];
+
+    if (typeof AbortSignal.any === "function") {
+      return AbortSignal.any(signals);
+    }
+
+    // Fallback for runtimes without AbortSignal.any
+    const ctrl = new AbortController();
+    const abort = () => ctrl.abort();
+    for (const s of signals) {
+      if (s.aborted) {
+        ctrl.abort();
+        return ctrl.signal;
+      }
+      s.addEventListener("abort", abort, { once: true });
+    }
+    return ctrl.signal;
+  }
+
   private fireChange(): void {
     this.updateStatusBar();
     this._onDidChange.fire(this.getSnapshot());
@@ -390,7 +453,7 @@ export class ConcurrencyQueueService implements vscode.Disposable {
     }
 
     if (snap.waiting > 0) {
-      this.statusBarItem.text = `$(loading~spin) ${snap.running} running, ${snap.waiting} queued`;
+      this.statusBarItem.text = `$(watch) ${snap.running} running, ${snap.waiting} queued`;
       this.statusBarItem.backgroundColor = new vscode.ThemeColor(
         "statusBarItem.warningBackground",
       );
@@ -419,8 +482,9 @@ export class ConcurrencyQueueService implements vscode.Disposable {
     // Reject all waiting items
     this.cancelAllWaiting();
 
-    // Clear running (don't reject — they're already running)
+    // Clear running (don't reject — they're already running; releasers guard on disposed)
     this.running.clear();
+    this.waitingIds.clear();
 
     this.statusBarItem?.dispose();
     this._onDidChange.dispose();
