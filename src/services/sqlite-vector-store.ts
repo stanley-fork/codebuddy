@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as crypto from "crypto";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
+import type { SqlJsDatabase } from "../types/sql-js.d";
 
 export interface VectorDocument {
   id: string;
@@ -45,6 +46,10 @@ export class SqliteVectorStore implements vscode.Disposable {
   private dbPath = "";
   private isDirty = false;
   private saveTimer: NodeJS.Timeout | null = null;
+  private onDbInitializedCallbacks: Array<
+    (db: SqlJsDatabase) => Promise<void>
+  > = [];
+  private onDbDisposingCallbacks: Array<() => void> = [];
 
   private constructor() {
     this.logger = Logger.initialize("SqliteVectorStore", {
@@ -117,6 +122,12 @@ export class SqliteVectorStore implements vscode.Disposable {
 
       this.db = new this.SQL.Database(data);
       this.createTables();
+
+      // Initialize FTS4 hybrid search via callback (avoids circular dependency)
+      for (const cb of this.onDbInitializedCallbacks) {
+        await cb(this.db);
+      }
+
       this.saveToDisk();
 
       this.initialized = true;
@@ -505,7 +516,43 @@ export class SqliteVectorStore implements vscode.Disposable {
     return this.initialized;
   }
 
+  /**
+   * Expose the underlying sql.js database.
+   * Returns null if the store is not initialized.
+   */
+  getDatabase(): SqlJsDatabase | null {
+    return this.initialized ? this.db : null;
+  }
+
+  /** Register a callback invoked after the db is initialized. Returns a Disposable for removal. */
+  onInitialized(
+    callback: (db: SqlJsDatabase) => Promise<void>,
+  ): vscode.Disposable {
+    this.onDbInitializedCallbacks.push(callback);
+    return new vscode.Disposable(() => {
+      const idx = this.onDbInitializedCallbacks.indexOf(callback);
+      if (idx !== -1) this.onDbInitializedCallbacks.splice(idx, 1);
+    });
+  }
+
+  /** Register a callback invoked before the db is disposed. Returns a Disposable for removal. */
+  onDisposing(callback: () => void): vscode.Disposable {
+    this.onDbDisposingCallbacks.push(callback);
+    return new vscode.Disposable(() => {
+      const idx = this.onDbDisposingCallbacks.indexOf(callback);
+      if (idx !== -1) this.onDbDisposingCallbacks.splice(idx, 1);
+    });
+  }
+
   dispose(): void {
+    // Notify listeners before closing db
+    for (const cb of this.onDbDisposingCallbacks) {
+      try {
+        cb();
+      } catch {
+        /* ignore */
+      }
+    }
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
     }

@@ -14,8 +14,33 @@ import {
   SearchResponseFormatter,
 } from "../agents/tools/websearch";
 import { SqliteVectorStore } from "./sqlite-vector-store";
+import {
+  HybridSearchService,
+  type HybridSearchResult,
+  type HybridSearchConfig,
+} from "../memory/hybrid-search.service";
 
-export class ContextRetriever {
+interface SearchResult {
+  document: { filePath: string; text: string };
+  score: number;
+}
+
+function toSearchResult(r: HybridSearchResult): SearchResult {
+  return {
+    document: { filePath: r.filePath, text: r.snippet },
+    score: r.score,
+  };
+}
+
+/** Minimal shape for legacy vector store search results. */
+interface LegacySearchResult {
+  document?: { filePath?: string; text?: string };
+  filePath?: string;
+  text?: string;
+  score?: number;
+}
+
+export class ContextRetriever implements vscode.Disposable {
   private readonly embeddingService: EmbeddingService;
   private static readonly SEARCH_RESULT_COUNT = 5;
   private readonly logger: Logger;
@@ -24,6 +49,8 @@ export class ContextRetriever {
   protected readonly orchestrator: Orchestrator;
   private readonly tavilySearch: TavilySearchProvider;
   private vectorStore: SqliteVectorStore;
+  private hybridSearchConfig: HybridSearchConfig;
+  private readonly configChangeDisposable: vscode.Disposable;
 
   constructor(context?: vscode.ExtensionContext) {
     const provider = getGenerativeAiModel() || "Gemini";
@@ -52,13 +79,37 @@ export class ContextRetriever {
         this.logger.error("Failed to initialize vector store", err);
       });
     }
+
+    // Cache hybrid search config; refresh on settings change
+    this.hybridSearchConfig = this.readHybridSearchConfig();
+    this.configChangeDisposable = vscode.workspace.onDidChangeConfiguration(
+      (e) => {
+        if (e.affectsConfiguration("codebuddy.hybridSearch")) {
+          this.hybridSearchConfig = this.readHybridSearchConfig();
+          this.logger.info("Hybrid search config reloaded");
+        }
+      },
+    );
   }
 
-  static initialize(context?: vscode.ExtensionContext) {
-    if (!ContextRetriever.instance) {
-      ContextRetriever.instance = new ContextRetriever(context);
+  private isDisposed = false;
+
+  static initialize(context?: vscode.ExtensionContext): ContextRetriever {
+    if (ContextRetriever.instance?.isDisposed === false) {
+      return ContextRetriever.instance;
     }
+    ContextRetriever.instance = new ContextRetriever(context);
     return ContextRetriever.instance;
+  }
+
+  dispose(): void {
+    if (this.isDisposed) return; // idempotent
+    this.configChangeDisposable.dispose();
+    this.isDisposed = true;
+    // Only clear static ref if WE are the current instance
+    if (ContextRetriever.instance === this) {
+      ContextRetriever.instance = undefined as any;
+    }
   }
 
   async retrieveContext(input: string): Promise<string> {
@@ -66,29 +117,88 @@ export class ContextRetriever {
       return "Semantic search is not available (Vector Store not initialized).";
     }
 
-    let results: any[] = [];
-    let searchMethod = "Semantic";
+    const hybridSearch = HybridSearchService.getInstance();
+    let results: SearchResult[] = [];
+    let searchMethod = "Hybrid";
+    const hybridConfig = this.hybridSearchConfig;
 
-    try {
-      this.logger.info(`Generating embedding for query: ${input}`);
-      const embedding = await this.embeddingService.generateEmbedding(input);
-      this.logger.info("Retrieving context from Vector Store");
+    // Lazily cache embedding to avoid duplicate LLM API calls on fallback
+    let embedding: number[] | undefined;
+    const getEmbedding = async (): Promise<number[]> => {
+      if (!embedding) {
+        embedding = await this.embeddingService.generateEmbedding(input);
+      }
+      return embedding;
+    };
 
-      results = await this.vectorStore.search(
-        embedding,
-        ContextRetriever.SEARCH_RESULT_COUNT,
-      );
-    } catch (error: any) {
-      this.logger.warn(
-        "Embedding generation failed, falling back to keyword search",
-        error,
-      );
-      searchMethod = "Keyword (Fallback)";
+    // ── Try hybrid search (vector + FTS4) ─────────────────────────────
+    if (hybridSearch.isReady) {
+      try {
+        this.logger.info(`Running hybrid search for: ${input}`);
+        const emb = await getEmbedding();
 
-      results = await this.vectorStore.keywordSearch(
-        input,
-        ContextRetriever.SEARCH_RESULT_COUNT,
-      );
+        const hybridResults = await hybridSearch.search(
+          emb,
+          input,
+          hybridConfig,
+        );
+
+        results = hybridResults.map(toSearchResult);
+        searchMethod = "Hybrid (Vector + BM25)";
+      } catch (error: unknown) {
+        this.logger.warn(
+          "Hybrid vector search failed, trying keyword-only",
+          error,
+        );
+
+        // Fall back to FTS4 keyword-only search
+        try {
+          const keywordResults = hybridSearch.keywordOnlySearch(
+            input,
+            hybridConfig,
+          );
+          results = keywordResults.map(toSearchResult);
+          searchMethod = "BM25 Keyword";
+        } catch (ftsError: unknown) {
+          this.logger.warn("FTS4 search also failed", ftsError);
+        }
+      }
+    }
+
+    // ── Legacy fallback (hybrid returned nothing or was never attempted) ──
+    if (results.length === 0) {
+      try {
+        this.logger.info(
+          "No hybrid results; falling back to legacy vector search",
+        );
+        const emb = await getEmbedding();
+        const legacyResults = await this.vectorStore.search(
+          emb,
+          ContextRetriever.SEARCH_RESULT_COUNT,
+        );
+        results = legacyResults.map((r) => ({
+          document: { filePath: r.document.filePath, text: r.document.text },
+          score: r.score,
+        }));
+        searchMethod = "Semantic (Legacy Fallback)";
+      } catch (error: unknown) {
+        this.logger.warn(
+          "Legacy vector search also failed, falling back to keyword search",
+          error,
+        );
+        searchMethod = "Keyword (Fallback)";
+        const kwResults = await this.vectorStore.keywordSearch(
+          input,
+          ContextRetriever.SEARCH_RESULT_COUNT,
+        );
+        results = kwResults.map((r: LegacySearchResult) => ({
+          document: {
+            filePath: r.document?.filePath ?? r.filePath ?? "",
+            text: r.document?.text ?? r.text ?? "",
+          },
+          score: r.score ?? 0,
+        }));
+      }
     }
 
     // Check if query is general/architectural
@@ -105,7 +215,19 @@ export class ContextRetriever {
 
       // If it was a general query, append common files to existing results
       // If it was a fallback, we just use common files (and any keyword matches if we had them)
-      results = [...results, ...commonFilesResults];
+      results = [
+        ...results,
+        ...commonFilesResults.map(
+          (r: LegacySearchResult) =>
+            ({
+              document: {
+                filePath: r.document?.filePath ?? "",
+                text: r.document?.text ?? "",
+              },
+              score: r.score ?? 0,
+            }) as SearchResult,
+        ),
+      ];
 
       if (results.length === 0 && searchMethod.includes("Fallback")) {
         searchMethod = "Keyword (Fallback) + Common Files";
@@ -117,7 +239,7 @@ export class ContextRetriever {
     // Deduplicate by file path
     const seenPaths = new Set();
     results = results.filter((r) => {
-      const filePath = r.document.filePath || r.document.metadata?.filePath;
+      const filePath = r.document.filePath;
       if (!filePath || seenPaths.has(filePath)) return false;
       seenPaths.add(filePath);
       return true;
@@ -133,7 +255,7 @@ export class ContextRetriever {
     return results
       .map(
         (r) =>
-          `File: ${r.document.filePath || r.document.metadata?.filePath}\nRelevance: ${r.score.toFixed(2)} (${searchMethod})\nContent:\n${r.document.text}`,
+          `File: ${r.document.filePath}\nRelevance: ${r.score.toFixed(2)} (${searchMethod})\nContent:\n${r.document.text}`,
       )
       .join("\n\n---\n\n");
   }
@@ -154,7 +276,33 @@ export class ContextRetriever {
     return generalKeywords.some((keyword) => lowerInput.includes(keyword));
   }
 
-  private async retrieveCommonFiles(): Promise<any[]> {
+  /**
+   * Read hybrid search settings from VS Code configuration.
+   */
+  private readHybridSearchConfig(): HybridSearchConfig {
+    const clamp = (v: number, lo: number, hi: number) =>
+      Math.max(lo, Math.min(hi, v));
+    const config = vscode.workspace.getConfiguration("codebuddy.hybridSearch");
+    return {
+      vectorWeight: clamp(config.get<number>("vectorWeight", 0.7), 0, 1),
+      textWeight: clamp(config.get<number>("textWeight", 0.3), 0, 1),
+      topK: clamp(config.get<number>("topK", 10), 1, 50),
+      mmr: {
+        enabled: config.get<boolean>("mmr.enabled", false),
+        lambda: clamp(config.get<number>("mmr.lambda", 0.7), 0, 1),
+      },
+      temporalDecay: {
+        enabled: config.get<boolean>("temporalDecay.enabled", false),
+        halfLifeDays: clamp(
+          config.get<number>("temporalDecay.halfLifeDays", 30),
+          1,
+          365,
+        ),
+      },
+    };
+  }
+
+  private async retrieveCommonFiles(): Promise<LegacySearchResult[]> {
     const commonFiles = [
       "README.md",
       "readme.md",
@@ -164,7 +312,7 @@ export class ContextRetriever {
       "docs/architecture.md", // Added potential architecture doc
     ];
 
-    const results: any[] = [];
+    const results: LegacySearchResult[] = [];
     const workspaceFolders = vscode.workspace.workspaceFolders;
 
     if (!workspaceFolders) {
@@ -200,9 +348,8 @@ export class ContextRetriever {
 
             results.push({
               document: {
-                id: `common:${fileUri.fsPath}`,
+                filePath: fileUri.fsPath,
                 text: truncated,
-                metadata: { filePath: fileUri.fsPath },
               },
               score: 1.0, // High relevance for common files
             });
