@@ -7,6 +7,7 @@ import * as vscode from "vscode";
 import { DiffReviewService } from "../services/diff-review.service";
 import { ComposerService, FileEdit } from "../services/composer.service";
 import * as path from "path";
+import { WorkspaceIdentityService } from "../services/workspace-identity.service";
 import { TodoTool } from "./todo";
 import { MemoryTool } from "./memory";
 export { TodoTool, MemoryTool };
@@ -115,7 +116,21 @@ export class FileTool {
   constructor(private readonly contextRetriever?: ContextRetriever) {}
 
   public async execute(fileConfigs: IFileToolConfig[]) {
-    return await this.contextRetriever?.readFiles(fileConfigs);
+    const identity = WorkspaceIdentityService.getInstance();
+    if (identity.getWorkspaceRoot()) {
+      const violations = fileConfigs.filter(
+        (cfg) =>
+          cfg.file_path &&
+          identity.validatePathWithinWorkspace(cfg.file_path) === undefined,
+      );
+      if (violations.length > 0) {
+        return violations.map((cfg) => ({
+          content: `Error: Access denied — the requested path is outside the workspace boundary.`,
+          function: cfg.function_name,
+        }));
+      }
+    }
+    return (await this.contextRetriever?.readFiles(fileConfigs)) ?? [];
   }
   config() {
     return {
@@ -159,6 +174,15 @@ export class FileTool {
 export class ListFilesTool {
   public async execute(dirPath?: string): Promise<string> {
     try {
+      if (dirPath) {
+        const identity = WorkspaceIdentityService.getInstance();
+        if (
+          identity.getWorkspaceRoot() &&
+          identity.validatePathWithinWorkspace(dirPath) === undefined
+        ) {
+          return `Error: Access denied — the requested path is outside the workspace boundary.`;
+        }
+      }
       const targetDir = dirPath
         ? vscode.Uri.file(dirPath)
         : vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -213,6 +237,13 @@ export class EditFileTool {
     replace?: string, // For replace
   ): Promise<string> {
     try {
+      const identity = WorkspaceIdentityService.getInstance();
+      if (
+        identity.getWorkspaceRoot() &&
+        identity.validatePathWithinWorkspace(filePath) === undefined
+      ) {
+        return `Error: Access denied — the requested path is outside the workspace boundary.`;
+      }
       const uri = vscode.Uri.file(filePath);
       let newContent = "";
 

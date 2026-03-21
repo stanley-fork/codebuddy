@@ -116,7 +116,7 @@ export class AnthropicWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       const stream = await this.model.messages.create({
@@ -212,7 +212,7 @@ export class AnthropicWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       const chatCompletion = await this.model.messages.create({

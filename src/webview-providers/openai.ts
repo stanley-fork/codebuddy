@@ -115,7 +115,7 @@ export class OpenAIWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       const chatCompletionStream = await this.model.chat.completions.create({
@@ -203,7 +203,7 @@ export class OpenAIWebViewProvider extends BaseWebViewProvider {
         this.chatHistory,
         6000,
         systemInstruction,
-        "agentId",
+        BaseWebViewProvider.getAgentId(),
       );
 
       // Convert history to OpenAI format

@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { WebviewMessageHandler, HandlerContext } from "./types";
 import { AgentService } from "../../services/agent-state";
+import { getWorkspaceAgentId } from "../../services/workspace-identity.service";
 import type { MCPToolResult } from "../../MCP/types";
 import type { ISecurityPolicy } from "../../services/security-policy.interface";
 
@@ -188,6 +189,10 @@ export class BrowserHandler implements WebviewMessageHandler {
     private readonly getCurrentSessionId: () => string | null,
   ) {}
 
+  private getAgentId(): string {
+    return getWorkspaceAgentId();
+  }
+
   private async handleBrowserOpen(
     url: string,
     browserType: string | undefined,
@@ -306,7 +311,7 @@ export class BrowserHandler implements WebviewMessageHandler {
             url: reader.currentArticle?.url || "reader-selection",
           };
           const readerContent = `📎 **Context added from Reader:**\n\n${sanitizedText}\n\n*This content will be included as context in your next message to the AI.*`;
-          await this.agentService.addChatMessage("agentId", {
+          await this.agentService.addChatMessage(this.getAgentId(), {
             content: readerContent,
             type: "model",
             sessionId: this.getCurrentSessionId() ?? undefined,
