@@ -1095,9 +1095,11 @@ export class CodeBuddyAgentService {
     const concurrencyQueue = ConcurrencyQueueService.getInstance();
     let releaseSlot: (() => void) | null = null;
     try {
+      const queueLabel =
+        sanitizedMessage.trim().substring(0, 80) || "(empty request)";
       releaseSlot = await concurrencyQueue.acquire(
         conversationId,
-        sanitizedMessage.substring(0, 80),
+        queueLabel,
         QueuePriority.USER,
       );
     } catch (err) {

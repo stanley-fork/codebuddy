@@ -24,7 +24,11 @@ export interface QueueItemView {
   readonly status: QueueItemStatus;
 }
 
-/** Internal mutable implementation — not exported. */
+/**
+ * Internal mutable implementation — not exported.
+ * `priority` and `status` intentionally override their `readonly` parents
+ * so that `boostStarvedItems()` and `drain()` can mutate them in-place.
+ */
 interface QueueItemInternal extends QueueItemView {
   priority: QueuePriority;
   status: QueueItemStatus;
@@ -52,8 +56,12 @@ const STARVATION_BOOST_MS = 60_000;
  */
 const STARVATION_CHECK_INTERVAL_MS = 15_000;
 
-/** Hard cap on waiting queue depth to prevent unbounded memory growth. */
-const MAX_QUEUE_DEPTH = 50;
+/**
+ * Multiplier for deriving the queue depth cap from maxConcurrent.
+ * e.g., maxConcurrent=3 → maxQueueDepth=30, maxConcurrent=10 → 100.
+ * This ensures queue capacity scales proportionally with the concurrency limit.
+ */
+const QUEUE_DEPTH_MULTIPLIER = 10;
 
 /**
  * ConcurrencyQueueService
@@ -120,6 +128,10 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       () => this.boostStarvedItems(),
       STARVATION_CHECK_INTERVAL_MS,
     );
+    // Allow Node.js to exit even if this timer is active (test-friendly)
+    if (typeof this.starvationTimer.unref === "function") {
+      this.starvationTimer.unref();
+    }
 
     this.logger.info(
       `ConcurrencyQueueService initialized (max=${this._maxConcurrent})`,
@@ -190,9 +202,10 @@ export class ConcurrencyQueueService implements vscode.Disposable {
     }
 
     // Back-pressure: reject if queue is full
-    if (this.waiting.length >= MAX_QUEUE_DEPTH) {
+    const maxDepth = this.maxQueueDepth;
+    if (this.waiting.length >= maxDepth) {
       throw new ConcurrencyQueueFullError(
-        `Queue is full (${MAX_QUEUE_DEPTH} items waiting). ` +
+        `Queue is full (${this.waiting.length}/${maxDepth} items waiting). ` +
           `Try again later or cancel pending requests.`,
       );
     }
@@ -240,8 +253,17 @@ export class ConcurrencyQueueService implements vscode.Disposable {
    */
   cancel(id: string): boolean {
     if (!this.waitingIds.has(id)) return false;
+
     const idx = this.waiting.findIndex((item) => item.id === id);
-    if (idx === -1) return false;
+    if (idx === -1) {
+      // Invariant violation: Set and array are out of sync
+      this.logger.error(
+        `cancel() invariant violation: id "${id}" in waitingIds but not in waiting array. ` +
+          `Cleaning up Set to prevent further corruption.`,
+      );
+      this.waitingIds.delete(id);
+      return false;
+    }
 
     const [item] = this.waiting.splice(idx, 1);
     this.waitingIds.delete(id);
@@ -278,9 +300,16 @@ export class ConcurrencyQueueService implements vscode.Disposable {
     };
   }
 
-  /** List of ids currently waiting. */
+  /** Derived hard cap on waiting queue depth. Scales with maxConcurrent. */
+  get maxQueueDepth(): number {
+    return this._maxConcurrent * QUEUE_DEPTH_MULTIPLIER;
+  }
+
+  /** List of ids currently waiting. Returns a frozen snapshot. */
   getWaitingIds(): ReadonlyArray<{ id: string; label: string }> {
-    return this.waiting.map((w) => ({ id: w.id, label: w.label }));
+    return Object.freeze(
+      this.waiting.map((w) => ({ id: w.id, label: w.label })),
+    );
   }
 
   // ── Status bar ──────────────────────────────────────────────
@@ -289,6 +318,12 @@ export class ConcurrencyQueueService implements vscode.Disposable {
    * Create and attach the status bar item. Call once during extension activation.
    */
   initStatusBar(context: vscode.ExtensionContext): void {
+    if (this.statusBarItem) {
+      this.logger.warn(
+        "initStatusBar() called more than once — ignoring duplicate",
+      );
+      return;
+    }
     this.statusBarItem = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Left,
       -100, // low absolute priority — placed after higher-priority left-aligned items
@@ -352,6 +387,10 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       if (item.status === QueueItemStatus.CANCELLED) continue;
 
       item.status = QueueItemStatus.RUNNING;
+      // IMPORTANT: running.set() must precede item.resolve() so that running.size
+      // is accurate for the next loop iteration. item.resolve() only schedules a
+      // microtask (the awaiting caller's .then()); it does NOT synchronously call
+      // back into drain().
       this.running.set(item.id, item);
       this.logger.info(
         `Slot granted: "${item.label}" (${this.running.size}/${this._maxConcurrent})`,
@@ -410,10 +449,14 @@ export class ConcurrencyQueueService implements vscode.Disposable {
       } else {
         // Fallback for runtimes without AbortSignal.timeout
         const ctrl = new AbortController();
-        setTimeout(
+        const timer = setTimeout(
           () => ctrl.abort(new Error(`Queue timeout after ${timeoutMs}ms`)),
           timeoutMs,
         );
+        // Ensure timer doesn't leak if the signal is aborted externally first
+        callerSignal?.addEventListener("abort", () => clearTimeout(timer), {
+          once: true,
+        });
         signals.push(ctrl.signal);
       }
     }
@@ -453,7 +496,7 @@ export class ConcurrencyQueueService implements vscode.Disposable {
     }
 
     if (snap.waiting > 0) {
-      this.statusBarItem.text = `$(watch) ${snap.running} running, ${snap.waiting} queued`;
+      this.statusBarItem.text = `$(loading~spin) ${snap.running} running, ${snap.waiting} queued`;
       this.statusBarItem.backgroundColor = new vscode.ThemeColor(
         "statusBarItem.warningBackground",
       );

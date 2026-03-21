@@ -61,7 +61,7 @@ class ConcurrencyQueueFullError extends Error {
   }
 }
 
-const DEFAULT_MAX_QUEUE_DEPTH = 50;
+const QUEUE_DEPTH_MULTIPLIER = 10;
 
 /**
  * Stripped-down queue (no vscode imports, no status bar, no timers).
@@ -74,9 +74,9 @@ class TestConcurrencyQueue {
   private _maxConcurrent: number;
   private _maxQueueDepth: number;
 
-  constructor(maxConcurrent: number = 3, maxQueueDepth: number = DEFAULT_MAX_QUEUE_DEPTH) {
+  constructor(maxConcurrent: number = 3, maxQueueDepth?: number) {
     this._maxConcurrent = maxConcurrent;
-    this._maxQueueDepth = maxQueueDepth;
+    this._maxQueueDepth = maxQueueDepth ?? maxConcurrent * QUEUE_DEPTH_MULTIPLIER;
   }
 
   get maxConcurrent(): number {
