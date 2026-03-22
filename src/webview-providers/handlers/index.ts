@@ -20,3 +20,4 @@ export { CheckpointHandler } from "./checkpoint-handler";
 export { ComposerHandler } from "./composer-handler";
 export { StandupHandler } from "./standup-handler";
 export { DoctorHandler } from "./doctor-handler";
+export { OnboardingHandler } from "./onboarding-handler";

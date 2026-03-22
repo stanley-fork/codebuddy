@@ -163,6 +163,9 @@
           "when": "workspaceFolderCount != 0"
         },
         {
+          "command": "codebuddy.showOnboarding"
+        },
+        {
           "command": "codebuddy.doctorAutoFix",
           "when": "workspaceFolderCount != 0"
         },
@@ -308,6 +311,11 @@
       {
         "command": "codebuddy.runDoctor",
         "title": "Run Doctor",
+        "category": "CodeBuddy"
+      },
+      {
+        "command": "codebuddy.showOnboarding",
+        "title": "Show Onboarding Wizard",
         "category": "CodeBuddy"
       },
       {
