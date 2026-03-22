@@ -10,6 +10,7 @@ import { useContentStore } from "../stores/content.store";
 import { useChatStore } from "../stores/chat.store";
 import { useStandupStore } from "../stores/standup.store";
 import { useDoctorStore } from "../stores/doctor.store";
+import { useOnboardingStore } from "../stores/onboarding.store";
 import type { IWebviewMessage } from "./useStreamingChat";
 
 interface ConfigData {
@@ -420,6 +421,37 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
               message.error,
               message.fixesApplied,
             );
+          break;
+
+        // ── Onboarding ──
+        case "onboarding-state": {
+          const ob = useOnboardingStore.getState();
+          if (message.data?.shouldShow) {
+            ob.setProviders(message.data.providers ?? []);
+            ob.setProjectInfo(message.data.projectInfo ?? null);
+            ob.setSuggestedTasks(message.data.suggestedTasks ?? []);
+            ob.show();
+          }
+          break;
+        }
+        case "onboarding-test-result":
+          useOnboardingStore.getState().setTestResult(message.data ?? null);
+          break;
+        case "onboarding-step-result":
+          useOnboardingStore.getState().setStepCompleting(false);
+          break;
+        case "onboarding-providers-updated":
+          useOnboardingStore.getState().setProviders(message.providers ?? []);
+          break;
+        case "onboarding-project-detected": {
+          const obs = useOnboardingStore.getState();
+          if (message.projectInfo) obs.setProjectInfo(message.projectInfo);
+          if (message.suggestedTasks)
+            obs.setSuggestedTasks(message.suggestedTasks);
+          break;
+        }
+        case "onboarding-completed":
+          useOnboardingStore.getState().setVisible(false);
           break;
 
         default:

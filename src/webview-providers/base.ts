@@ -69,6 +69,7 @@ import {
   SettingsHandler,
   StandupHandler,
   DoctorHandler,
+  OnboardingHandler,
 } from "./handlers";
 import { HandlerContext, MessageHandlerRegistry } from "./handlers/types";
 import { AccessControlService } from "../services/access-control.service";
@@ -268,6 +269,7 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
     this.handlerRegistry.register(new ComposerHandler());
     this.handlerRegistry.register(new StandupHandler());
     this.handlerRegistry.register(new DoctorHandler());
+    this.handlerRegistry.register(new OnboardingHandler());
     this.handlerRegistry.register(
       new PerformanceHandler(
         () => this.performanceProfiler,
