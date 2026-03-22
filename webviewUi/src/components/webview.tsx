@@ -43,6 +43,8 @@ import { ObservabilityPanel } from "./observability/ObservabilityPanel";
 import { CoWorkerPanel } from "./coworker/CoWorkerPanel";
 import { BrowserPanel } from "./browser/BrowserPanel";
 import { PanelErrorBoundary } from "./PanelErrorBoundary";
+import { OnboardingWizard } from "./onboarding/OnboardingWizard";
+import { useOnboardingStore } from "../stores/onboarding.store";
 import {
   SidebarNav,
   SettingsToggleButton,
@@ -91,6 +93,9 @@ export const WebviewUI = () => {
   const isObservabilityOpen = usePanelStore((s) => s.isObservabilityOpen);
   const isCoWorkerOpen = usePanelStore((s) => s.isCoWorkerOpen);
   const isBrowserPanelOpen = usePanelStore((s) => s.isBrowserPanelOpen);
+
+  // Onboarding
+  const onboardingVisible = useOnboardingStore((s) => s.isVisible);
 
   // Sessions store
   const sessions = useSessionsStore((s) => s.sessions);
@@ -166,6 +171,12 @@ export const WebviewUI = () => {
     vsCode.postMessage({ command: "request-chat-history" });
     vsCode.postMessage({ command: "notifications-get" });
   }, []);
+
+  // Trigger onboarding hydration — the handler will decide whether to show the wizard
+  const onboardingHydrate = useOnboardingStore((s) => s.hydrate);
+  useEffect(() => {
+    onboardingHydrate();
+  }, [onboardingHydrate]);
 
   // Highlight code blocks when messages update
   useEffect(() => {
@@ -248,6 +259,9 @@ export const WebviewUI = () => {
 
   return (
     <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      {/* Onboarding Wizard Overlay */}
+      {onboardingVisible && <OnboardingWizard />}
+
       {/* Sidebar Navigation — flexbox container replaces hardcoded pixel positions */}
       <SidebarNav aria-label="Sidebar actions">
         <SettingsToggleButton
