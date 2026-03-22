@@ -19,7 +19,11 @@ type OnboardingDismissMessage = { command: "onboarding-dismiss" };
 type OnboardingTestProviderMessage = {
   command: "onboarding-test-provider";
   provider: string;
-  apiKey?: string;
+};
+type OnboardingStoreProviderKeyMessage = {
+  command: "onboarding-store-provider-key";
+  provider: string;
+  apiKey: string;
 };
 type OnboardingDetectProjectMessage = { command: "onboarding-detect-project" };
 
@@ -29,6 +33,7 @@ type OnboardingMessage =
   | OnboardingSkipMessage
   | OnboardingDismissMessage
   | OnboardingTestProviderMessage
+  | OnboardingStoreProviderKeyMessage
   | OnboardingDetectProjectMessage;
 
 const ONBOARDING_COMMANDS = [
@@ -37,6 +42,7 @@ const ONBOARDING_COMMANDS = [
   "onboarding-skip",
   "onboarding-dismiss",
   "onboarding-test-provider",
+  "onboarding-store-provider-key",
   "onboarding-detect-project",
 ] as const;
 
@@ -156,11 +162,50 @@ export class OnboardingHandler implements WebviewMessageHandler {
         break;
       }
 
+      case "onboarding-store-provider-key": {
+        try {
+          if (!svc.isValidProviderId(message.provider)) {
+            ctx.logger.warn(`Rejected unknown provider: ${message.provider}`);
+            ctx.webview.webview.postMessage({
+              command: "onboarding-test-result",
+              data: {
+                provider: message.provider,
+                success: false,
+                latencyMs: 0,
+                error: "Unknown provider",
+              } as ProviderTestResult,
+            });
+            return;
+          }
+          if (!message.apiKey || message.apiKey.length < 10) {
+            ctx.webview.webview.postMessage({
+              command: "onboarding-test-result",
+              data: {
+                provider: message.provider,
+                success: false,
+                latencyMs: 0,
+                error: "Invalid key format",
+              } as ProviderTestResult,
+            });
+            return;
+          }
+          await svc.saveProviderConfig(message.provider, message.apiKey);
+          ctx.webview.webview.postMessage({
+            command: "onboarding-providers-updated",
+            providers: svc.getProviders(),
+          });
+        } catch (err) {
+          ctx.logger.error(
+            `OnboardingHandler store key failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        break;
+      }
+
       case "onboarding-test-provider": {
         try {
           const result: ProviderTestResult = await svc.testProvider(
             message.provider,
-            message.apiKey,
           );
           ctx.webview.webview.postMessage({
             command: "onboarding-test-result",

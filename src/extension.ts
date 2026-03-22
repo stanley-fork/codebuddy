@@ -339,6 +339,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Initialize Onboarding Service (first-run wizard)
     const onboardingService = OnboardingService.getInstance();
     onboardingService.initialize(context);
+    onboardingService.setSecretStorage(secretStorageService);
     context.subscriptions.push(onboardingService);
 
     // Use dynamic import for DeveloperAgent to ensure it's loaded AFTER telemetry initialization
@@ -1542,7 +1543,18 @@ export async function activate(context: vscode.ExtensionContext) {
           false,
         );
         await context.globalState.update("codebuddy.onboarding.version", 0);
-        // The webview will hydrate and show the wizard on next sync
+        // Push re-hydration to any open webview panel
+        const provider =
+          WebViewProviderManager.getInstance(context).getCurrentProvider();
+        if (provider?.currentWebView?.webview) {
+          await provider.currentWebView.webview.postMessage({
+            command: "onboarding-request-hydrate",
+          });
+        } else {
+          vscode.window.showInformationMessage(
+            "Onboarding wizard will appear when you next open CodeBuddy.",
+          );
+        }
       },
     };
 

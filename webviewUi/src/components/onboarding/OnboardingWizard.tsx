@@ -1,10 +1,10 @@
 import React, { useEffect, useState, useCallback } from "react";
 import {
   useOnboardingStore,
+  STEP_ORDER,
   type ProviderInfo,
   type ProjectInfo,
   type SuggestedTask,
-  type OnboardingStep,
 } from "../../stores/onboarding.store";
 import {
   Overlay,
@@ -48,17 +48,9 @@ import {
 } from "./styles";
 import { vscode } from "../../utils/vscode";
 
-// ─── Step Order ─────────────────────────────────────────
+// ─── Step metadata (derived from the store's STEP_ORDER) ─
 
-const STEPS: OnboardingStep[] = [
-  "welcome",
-  "provider",
-  "workspace",
-  "security",
-  "firstTask",
-];
-
-const STEP_LABELS: Record<OnboardingStep, string> = {
+const STEP_LABELS: Record<string, string> = {
   welcome: "Welcome",
   provider: "Provider",
   workspace: "Workspace",
@@ -77,38 +69,41 @@ export const OnboardingWizard: React.FC = () => {
     suggestedTasks,
     isTestingProvider,
     testResult,
+    stepCompleting,
     nextStep,
     prevStep,
     skip,
     dismiss,
     completeStep,
+    submitProviderKey,
     testProvider,
   } = useOnboardingStore();
 
   if (!isVisible) return null;
 
-  const stepIdx = STEPS.indexOf(currentStep);
+  const stepIdx = STEP_ORDER.indexOf(currentStep);
   const isFirstStep = stepIdx === 0;
-  const isLastStep = stepIdx === STEPS.length - 1;
+  const isLastStep = stepIdx === STEP_ORDER.length - 1;
 
   return (
-    <Overlay>
+    <Overlay role="dialog" aria-modal="true" aria-label="Onboarding Wizard">
       <WizardContainer>
         <WizardHeader>
-          <StepIndicator>
-            {STEPS.map((s, i) => (
+          <StepIndicator role="navigation" aria-label="Wizard steps">
+            {STEP_ORDER.map((s, i) => (
               <StepDot
                 key={s}
                 $active={i === stepIdx}
                 $completed={i < stepIdx}
-                title={STEP_LABELS[s]}
+                title={STEP_LABELS[s] ?? s}
+                aria-label={`Step ${i + 1}: ${STEP_LABELS[s] ?? s}${i === stepIdx ? " (current)" : i < stepIdx ? " (completed)" : ""}`}
               />
             ))}
           </StepIndicator>
-          <SkipButton onClick={skip}>Skip setup</SkipButton>
+          <SkipButton onClick={skip} aria-label="Skip onboarding setup">Skip setup</SkipButton>
         </WizardHeader>
 
-        <StepContent key={currentStep}>
+        <StepContent key={currentStep} role="region" aria-label={STEP_LABELS[currentStep] ?? currentStep}>
           {currentStep === "welcome" && <WelcomeStep />}
           {currentStep === "provider" && (
             <ProviderStep
@@ -116,17 +111,23 @@ export const OnboardingWizard: React.FC = () => {
               isTestingProvider={isTestingProvider}
               testResult={testResult}
               onTestProvider={testProvider}
+              onSubmitKey={submitProviderKey}
               onComplete={completeStep}
+              stepCompleting={stepCompleting}
             />
           )}
           {currentStep === "workspace" && (
             <WorkspaceStep
               projectInfo={projectInfo}
               onComplete={completeStep}
+              stepCompleting={stepCompleting}
             />
           )}
           {currentStep === "security" && (
-            <SecurityStep onComplete={completeStep} />
+            <SecurityStep
+              onComplete={completeStep}
+              stepCompleting={stepCompleting}
+            />
           )}
           {currentStep === "firstTask" && (
             <FirstTaskStep
@@ -138,16 +139,16 @@ export const OnboardingWizard: React.FC = () => {
 
         <NavRow>
           {!isFirstStep ? (
-            <SecondaryButton onClick={prevStep}>Back</SecondaryButton>
+            <SecondaryButton onClick={prevStep} aria-label="Go to previous step">Back</SecondaryButton>
           ) : (
             <div />
           )}
           {!isLastStep ? (
-            <PrimaryButton onClick={nextStep}>
+            <PrimaryButton onClick={nextStep} aria-label="Go to next step">
               {currentStep === "welcome" ? "Get Started" : "Next"}
             </PrimaryButton>
           ) : (
-            <PrimaryButton onClick={dismiss}>
+            <PrimaryButton onClick={dismiss} aria-label="Close wizard and start using CodeBuddy">
               Start Using CodeBuddy
             </PrimaryButton>
           )}
@@ -220,8 +221,10 @@ interface ProviderStepProps {
   providers: ProviderInfo[];
   isTestingProvider: boolean;
   testResult: { provider: string; success: boolean; error?: string } | null;
-  onTestProvider: (provider: string, apiKey?: string) => void;
+  onTestProvider: (provider: string) => void;
+  onSubmitKey: (provider: string, apiKey: string) => void;
   onComplete: (step: number, data: Record<string, unknown>) => void;
+  stepCompleting: boolean;
 }
 
 const ProviderStep: React.FC<ProviderStepProps> = ({
@@ -229,7 +232,9 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
   isTestingProvider,
   testResult,
   onTestProvider,
+  onSubmitKey,
   onComplete,
+  stepCompleting,
 }) => {
   const [selectedProvider, setSelectedProvider] = useState<string>("");
   const [apiKey, setApiKey] = useState("");
@@ -240,10 +245,19 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
   }, []);
 
   const handleSave = useCallback(() => {
-    if (selectedProvider && apiKey) {
-      onComplete(1, { provider: selectedProvider, apiKey });
-    }
-  }, [selectedProvider, apiKey, onComplete]);
+    if (stepCompleting || !selectedProvider || !apiKey) return;
+    // Store key securely via dedicated command, then mark step complete
+    onSubmitKey(selectedProvider, apiKey);
+    onComplete(1, { provider: selectedProvider });
+    setApiKey(""); // clear local state immediately
+  }, [selectedProvider, apiKey, onSubmitKey, onComplete, stepCompleting]);
+
+  const handleTest = useCallback(() => {
+    if (!selectedProvider || !apiKey) return;
+    // Store the key first, then test from stored key
+    onSubmitKey(selectedProvider, apiKey);
+    onTestProvider(selectedProvider);
+  }, [selectedProvider, apiKey, onSubmitKey, onTestProvider]);
 
   const alreadyConfigured = providers.filter((p) => p.configured);
 
@@ -294,17 +308,19 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
               onChange={(e) => setApiKey(e.target.value)}
               autoComplete="off"
               spellCheck={false}
+              aria-label="API key input"
             />
             <PrimaryButton
-              onClick={() => onTestProvider(selectedProvider, apiKey)}
+              onClick={handleTest}
               disabled={!apiKey || isTestingProvider}
               style={{ flexShrink: 0 }}
+              aria-label="Test API key"
             >
               {isTestingProvider ? "Testing..." : "Test"}
             </PrimaryButton>
           </div>
           {testResult && testResult.provider === selectedProvider && (
-            <div style={{ marginTop: 8 }}>
+            <div style={{ marginTop: 8 }} role="status" aria-live="polite">
               {testResult.success ? (
                 <StatusBadge $variant="success">✓ Key looks valid</StatusBadge>
               ) : (
@@ -317,9 +333,11 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
           {apiKey && (
             <PrimaryButton
               onClick={handleSave}
+              disabled={stepCompleting}
               style={{ marginTop: 12, width: "100%" }}
+              aria-label="Save API key and set as active provider"
             >
-              Save & Set as Active Provider
+              {stepCompleting ? "Saving..." : "Save & Set as Active Provider"}
             </PrimaryButton>
           )}
         </InputGroup>
@@ -349,11 +367,13 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
 interface WorkspaceStepProps {
   projectInfo: ProjectInfo | null;
   onComplete: (step: number, data: Record<string, unknown>) => void;
+  stepCompleting: boolean;
 }
 
 const WorkspaceStep: React.FC<WorkspaceStepProps> = ({
   projectInfo,
   onComplete,
+  stepCompleting,
 }) => {
   const [createRules, setCreateRules] = useState(true);
 
@@ -419,10 +439,12 @@ const WorkspaceStep: React.FC<WorkspaceStepProps> = ({
       </CheckboxRow>
 
       <PrimaryButton
-        onClick={() => onComplete(2, { createRules })}
+        onClick={() => !stepCompleting && onComplete(2, { createRules })}
+        disabled={stepCompleting}
         style={{ marginTop: 12 }}
+        aria-label="Apply workspace configuration"
       >
-        Apply Configuration
+        {stepCompleting ? "Applying..." : "Apply Configuration"}
       </PrimaryButton>
     </>
   );
@@ -449,16 +471,17 @@ const PROFILES = [
     id: "trusted",
     name: "Trusted",
     description:
-      "All tools with auto-approve. Only catastrophic commands blocked. For experienced users in  trusted environments.",
+      "All tools with auto-approve. Only catastrophic commands blocked. For experienced users in trusted environments.",
     icon: "⚡",
   },
 ];
 
 interface SecurityStepProps {
   onComplete: (step: number, data: Record<string, unknown>) => void;
+  stepCompleting: boolean;
 }
 
-const SecurityStep: React.FC<SecurityStepProps> = ({ onComplete }) => {
+const SecurityStep: React.FC<SecurityStepProps> = ({ onComplete, stepCompleting }) => {
   const [selectedProfile, setSelectedProfile] = useState("standard");
 
   return (
@@ -491,11 +514,13 @@ const SecurityStep: React.FC<SecurityStepProps> = ({ onComplete }) => {
 
       <PrimaryButton
         onClick={() =>
-          onComplete(3, { permissionProfile: selectedProfile })
+          !stepCompleting && onComplete(3, { permissionProfile: selectedProfile })
         }
+        disabled={stepCompleting}
         style={{ marginTop: 16 }}
+        aria-label="Apply security profile"
       >
-        Apply Security Profile
+        {stepCompleting ? "Applying..." : "Apply Security Profile"}
       </PrimaryButton>
     </>
   );

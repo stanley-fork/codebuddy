@@ -278,9 +278,8 @@ export const WelcomeSubtitle = styled.p`
   color: var(--vscode-descriptionForeground, #888);
   font-size: 14px;
   line-height: 1.6;
-  margin: 0 0 32px 0;
+  margin: 0 auto 32px auto;
   max-width: 480px;
-  margin-inline: auto;
 `;
 
 export const FeatureList = styled.div`

@@ -1,23 +1,17 @@
 import * as vscode from "vscode";
 import * as path from "path";
-import * as fs from "fs";
+import * as fs from "fs/promises";
 import { Logger } from "../infrastructure/logger/logger";
 import { LogLevel } from "./telemetry";
 import { APP_CONFIG, generativeAiModels } from "../application/constant";
 import { getConfigValue } from "../utils/utils";
+import type { SecretStorageService } from "./secret-storage";
 
 // ─── Types ──────────────────────────────────────────────
 
 export interface OnboardingState {
   completed: boolean;
   version: number;
-  currentStep: number;
-  /** ISO timestamp of when the wizard was completed / dismissed. */
-  completedAt: string | null;
-  /** Detected project info for workspace config step. */
-  projectInfo: ProjectInfo | null;
-  /** Which provider the user selected during onboarding. */
-  selectedProvider: string | null;
 }
 
 export interface ProjectInfo {
@@ -48,6 +42,27 @@ const ONBOARDING_VERSION_KEY = "codebuddy.onboarding.version";
 const CURRENT_WIZARD_VERSION = 1;
 
 const STEP_COUNT = 5;
+
+/** Named step indices — shared with the handler to avoid magic numbers. */
+export const ONBOARDING_STEPS = {
+  WELCOME: 0,
+  PROVIDER: 1,
+  WORKSPACE: 2,
+  SECURITY: 3,
+  FIRST_TASK: 4,
+} as const;
+
+/** Set of valid provider IDs for input validation. */
+const VALID_PROVIDER_IDS = new Set([
+  "anthropic",
+  "openai",
+  "gemini",
+  "groq",
+  "deepseek",
+  "qwen",
+  "glm",
+  "local",
+]);
 
 /** Provider display info, ordered by popularity. */
 const PROVIDERS = [
@@ -138,6 +153,7 @@ export class OnboardingService implements vscode.Disposable {
   private readonly logger: Logger;
   private readonly disposables: vscode.Disposable[] = [];
   private context: vscode.ExtensionContext | undefined;
+  private secretStorage: SecretStorageService | undefined;
 
   private constructor() {
     this.logger = Logger.initialize("OnboardingService", {
@@ -161,6 +177,13 @@ export class OnboardingService implements vscode.Disposable {
   initialize(context: vscode.ExtensionContext): void {
     this.context = context;
     this.logger.info("OnboardingService initialized");
+  }
+
+  /**
+   * Inject SecretStorageService after it's initialized.
+   */
+  setSecretStorage(service: SecretStorageService): void {
+    this.secretStorage = service;
   }
 
   // ─── First-Run Detection ───────────────────────────────
@@ -191,14 +214,7 @@ export class OnboardingService implements vscode.Disposable {
 
   getState(): OnboardingState {
     if (!this.context) {
-      return {
-        completed: false,
-        version: 0,
-        currentStep: 0,
-        completedAt: null,
-        projectInfo: null,
-        selectedProvider: null,
-      };
+      return { completed: false, version: 0 };
     }
 
     return {
@@ -207,10 +223,6 @@ export class OnboardingService implements vscode.Disposable {
         false,
       ),
       version: this.context.globalState.get<number>(ONBOARDING_VERSION_KEY, 0),
-      currentStep: 0,
-      completedAt: null,
-      projectInfo: null,
-      selectedProvider: null,
     };
   }
 
@@ -220,28 +232,36 @@ export class OnboardingService implements vscode.Disposable {
     if (!this.context) return;
 
     switch (result.step) {
-      case 1: // Provider Setup
-        if (result.data.provider && result.data.apiKey) {
-          await this.saveProviderConfig(
-            result.data.provider as string,
-            result.data.apiKey as string,
+      case ONBOARDING_STEPS.PROVIDER:
+        // API key is stored separately via onboarding-store-provider-key.
+        // This step just records the provider selection.
+        if (result.data.provider) {
+          await vscode.workspace
+            .getConfiguration()
+            .update(
+              APP_CONFIG.generativeAi,
+              PROVIDERS.find((p) => p.id === result.data.provider)?.model ??
+                result.data.provider,
+              vscode.ConfigurationTarget.Global,
+            );
+          this.logger.info(
+            `Onboarding: ${result.data.provider} set as active provider`,
           );
         }
         break;
 
-      case 2: // Workspace Config
+      case ONBOARDING_STEPS.WORKSPACE:
         if (result.data.createRules) {
           await this.scaffoldRulesFile();
         }
         if (result.data.enableSkills && Array.isArray(result.data.skills)) {
-          // Skills enablement is handled by SkillService — just log intent
           this.logger.info(
             `Onboarding: user selected ${(result.data.skills as string[]).length} skills`,
           );
         }
         break;
 
-      case 3: // Security Review
+      case ONBOARDING_STEPS.SECURITY:
         if (result.data.permissionProfile) {
           await vscode.workspace
             .getConfiguration()
@@ -293,25 +313,7 @@ export class OnboardingService implements vscode.Disposable {
       | undefined;
 
     return PROVIDERS.map((p) => {
-      let configured = false;
-      try {
-        const { SecretStorageService } = require("./secret-storage");
-        const key = SecretStorageService.getInstance().getApiKey(p.configKey);
-        if (key && key !== "apiKey" && key !== "not-needed" && key !== "") {
-          configured = true;
-        }
-      } catch {
-        // SecretStorage not yet initialized — check settings fallback
-        const settingsKey = getConfigValue(p.configKey) as string | undefined;
-        if (
-          settingsKey &&
-          settingsKey !== "apiKey" &&
-          settingsKey !== "not-needed" &&
-          settingsKey !== ""
-        ) {
-          configured = true;
-        }
-      }
+      let configured = this.isKeyConfigured(p.configKey);
 
       // Local provider is always "configured" if base URL is set
       if (p.id === "local") {
@@ -333,12 +335,35 @@ export class OnboardingService implements vscode.Disposable {
   }
 
   /**
+   * Checks if a provider key is configured via SecretStorage or settings.
+   */
+  private isKeyConfigured(configKey: string): boolean {
+    const INVALID_VALUES = new Set(["", "apiKey", "not-needed"]);
+
+    if (this.secretStorage) {
+      try {
+        const key = this.secretStorage.getApiKey(configKey);
+        return !!key && !INVALID_VALUES.has(key);
+      } catch {
+        // SecretStorage threw — fall through to settings
+      }
+    }
+
+    const settingsKey = getConfigValue(configKey) as string | undefined;
+    return !!settingsKey && !INVALID_VALUES.has(settingsKey);
+  }
+
+  /**
+   * Validates a provider ID against the known set.
+   */
+  isValidProviderId(providerId: string): boolean {
+    return VALID_PROVIDER_IDS.has(providerId);
+  }
+
+  /**
    * Save an API key for a provider and set it as active.
    */
-  private async saveProviderConfig(
-    providerId: string,
-    apiKey: string,
-  ): Promise<void> {
+  async saveProviderConfig(providerId: string, apiKey: string): Promise<void> {
     const provider = PROVIDERS.find((p) => p.id === providerId);
     if (!provider) {
       this.logger.warn(`Unknown provider: ${providerId}`);
@@ -346,14 +371,20 @@ export class OnboardingService implements vscode.Disposable {
     }
 
     // Store the API key securely
-    try {
-      const { SecretStorageService } = await import("./secret-storage");
-      await SecretStorageService.getInstance().storeApiKey(
-        provider.configKey,
-        apiKey,
-      );
-    } catch {
-      // Fallback to settings
+    if (this.secretStorage) {
+      try {
+        await this.secretStorage.storeApiKey(provider.configKey, apiKey);
+      } catch {
+        // Fallback to settings
+        await vscode.workspace
+          .getConfiguration()
+          .update(
+            provider.configKey,
+            apiKey,
+            vscode.ConfigurationTarget.Global,
+          );
+      }
+    } else {
       await vscode.workspace
         .getConfiguration()
         .update(provider.configKey, apiKey, vscode.ConfigurationTarget.Global);
@@ -374,12 +405,10 @@ export class OnboardingService implements vscode.Disposable {
   }
 
   /**
-   * Test that a provider's API key works by making a lightweight request.
+   * Test that a provider's stored API key works by making a lightweight check.
+   * Does NOT accept raw keys — uses SecretStorage / settings.
    */
-  async testProvider(
-    providerId: string,
-    apiKey?: string,
-  ): Promise<ProviderTestResult> {
+  async testProvider(providerId: string): Promise<ProviderTestResult> {
     const provider = PROVIDERS.find((p) => p.id === providerId);
     if (!provider) {
       return {
@@ -392,21 +421,6 @@ export class OnboardingService implements vscode.Disposable {
 
     const start = Date.now();
     try {
-      // For now, check that the key is non-empty. A full connection test
-      // would require importing each provider SDK which is expensive.
-      // The failover service will detect broken keys at first use.
-      let key = apiKey;
-      if (!key) {
-        try {
-          const { SecretStorageService } = await import("./secret-storage");
-          key = SecretStorageService.getInstance().getApiKey(
-            provider.configKey,
-          );
-        } catch {
-          key = getConfigValue(provider.configKey) as string | undefined;
-        }
-      }
-
       if (providerId === "local") {
         const baseUrl = getConfigValue(APP_CONFIG.localBaseUrl) as
           | string
@@ -442,6 +456,18 @@ export class OnboardingService implements vscode.Disposable {
             error: err instanceof Error ? err.message : "Connection failed",
           };
         }
+      }
+
+      // Read key from SecretStorage or settings
+      let key: string | undefined;
+      if (this.secretStorage) {
+        try {
+          key = this.secretStorage.getApiKey(provider.configKey);
+        } catch {
+          key = getConfigValue(provider.configKey) as string | undefined;
+        }
+      } else {
+        key = getConfigValue(provider.configKey) as string | undefined;
       }
 
       if (!key || key === "apiKey" || key === "not-needed" || key === "") {
@@ -501,10 +527,10 @@ export class OnboardingService implements vscode.Disposable {
     const languages: string[] = [];
     const frameworks: string[] = [];
 
-    // Detect languages by checking for indicator files
+    // Detect languages by checking for indicator files (async)
     let topLevelFiles: string[];
     try {
-      topLevelFiles = fs.readdirSync(root);
+      topLevelFiles = await fs.readdir(root);
     } catch {
       topLevelFiles = [];
     }
@@ -529,48 +555,51 @@ export class OnboardingService implements vscode.Disposable {
 
     // Detect frameworks from package.json dependencies
     const pkgJsonPath = path.join(root, "package.json");
-    if (fs.existsSync(pkgJsonPath)) {
-      try {
-        const raw = fs.readFileSync(pkgJsonPath, "utf-8");
-        const pkg = JSON.parse(raw);
-        const allDeps = {
-          ...(pkg.dependencies || {}),
-          ...(pkg.devDependencies || {}),
-        };
+    try {
+      const raw = await fs.readFile(pkgJsonPath, "utf-8");
+      const pkg = JSON.parse(raw);
+      const allDeps = {
+        ...(pkg.dependencies || {}),
+        ...(pkg.devDependencies || {}),
+      };
 
-        for (const [fw, indicators] of Object.entries(FRAMEWORK_INDICATORS)) {
-          for (const indicator of indicators) {
-            if (indicator in allDeps) {
-              frameworks.push(fw);
-              break;
-            }
+      for (const [fw, indicators] of Object.entries(FRAMEWORK_INDICATORS)) {
+        for (const indicator of indicators) {
+          if (indicator in allDeps) {
+            frameworks.push(fw);
+            break;
           }
         }
-      } catch {
-        // Invalid package.json — skip
       }
+    } catch {
+      // package.json missing or invalid — skip
     }
 
     // Detect Python frameworks from requirements.txt
     const reqPath = path.join(root, "requirements.txt");
-    if (fs.existsSync(reqPath)) {
-      try {
-        const raw = fs.readFileSync(reqPath, "utf-8").toLowerCase();
-        for (const [fw, indicators] of Object.entries(FRAMEWORK_INDICATORS)) {
-          for (const indicator of indicators) {
-            if (raw.includes(indicator)) {
-              if (!frameworks.includes(fw)) frameworks.push(fw);
-              break;
-            }
+    try {
+      const raw = (await fs.readFile(reqPath, "utf-8")).toLowerCase();
+      for (const [fw, indicators] of Object.entries(FRAMEWORK_INDICATORS)) {
+        for (const indicator of indicators) {
+          if (raw.includes(indicator)) {
+            if (!frameworks.includes(fw)) frameworks.push(fw);
+            break;
           }
         }
-      } catch {
-        // Skip
       }
+    } catch {
+      // requirements.txt missing — skip
     }
 
-    const hasGit =
-      topLevelFiles.includes(".git") || fs.existsSync(path.join(root, ".git"));
+    let hasGit = topLevelFiles.includes(".git");
+    if (!hasGit) {
+      try {
+        await fs.access(path.join(root, ".git"));
+        hasGit = true;
+      } catch {
+        hasGit = false;
+      }
+    }
     const hasDocker =
       topLevelFiles.includes("Dockerfile") ||
       topLevelFiles.includes("docker-compose.yml") ||
@@ -602,15 +631,16 @@ export class OnboardingService implements vscode.Disposable {
     if (!folder) return;
 
     const rulesPath = path.join(folder.uri.fsPath, ".codebuddy", "rules.md");
-    if (fs.existsSync(rulesPath)) {
+    try {
+      await fs.access(rulesPath);
       this.logger.info("Rules file already exists, skipping scaffold");
       return;
+    } catch {
+      // File doesn't exist — continue to create
     }
 
     const dir = path.dirname(rulesPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    await fs.mkdir(dir, { recursive: true });
 
     const info = await this.detectProjectInfo();
     const langLine =
@@ -643,7 +673,7 @@ ${fwLine}
 - Validate all user inputs at system boundaries.
 `;
 
-    fs.writeFileSync(rulesPath, content, "utf-8");
+    await fs.writeFile(rulesPath, content, "utf-8");
     this.logger.info("Scaffolded .codebuddy/rules.md");
   }
 

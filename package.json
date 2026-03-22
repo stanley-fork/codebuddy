@@ -163,7 +163,8 @@
           "when": "workspaceFolderCount != 0"
         },
         {
-          "command": "codebuddy.showOnboarding"
+          "command": "codebuddy.showOnboarding",
+          "when": "workspaceFolderCount != 0"
         },
         {
           "command": "codebuddy.doctorAutoFix",
