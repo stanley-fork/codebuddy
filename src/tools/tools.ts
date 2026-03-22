@@ -8,6 +8,10 @@ import { DiffReviewService } from "../services/diff-review.service";
 import { ComposerService, FileEdit } from "../services/composer.service";
 import * as path from "path";
 import { WorkspaceIdentityService } from "../services/workspace-identity.service";
+import {
+  BrowserService,
+  BrowserActionResult,
+} from "../services/browser.service";
 import { TodoTool } from "./todo";
 import { MemoryTool } from "./memory";
 export { TodoTool, MemoryTool };
@@ -515,6 +519,179 @@ export class DeepTerminalTool {
   }
 }
 
+export type BrowserAction =
+  | "navigate"
+  | "click"
+  | "type"
+  | "screenshot"
+  | "snapshot"
+  | "evaluate"
+  | "hover"
+  | "select_option"
+  | "press_key"
+  | "go_back"
+  | "go_forward"
+  | "wait"
+  | "tab_list"
+  | "tab_new"
+  | "tab_close";
+
+export class BrowserTool {
+  public async execute(input: {
+    action: BrowserAction;
+    url?: string;
+    ref?: string;
+    text?: string;
+    value?: string;
+    expression?: string;
+    key?: string;
+    time?: number;
+  }): Promise<string> {
+    const browser = BrowserService.getInstance();
+    let result: BrowserActionResult;
+
+    try {
+      switch (input.action) {
+        case "navigate":
+          if (!input.url) return "Error: url is required for navigate action.";
+          result = await browser.navigate(input.url);
+          break;
+        case "click":
+          if (!input.ref)
+            return "Error: ref is required for click action. Use snapshot first to get element refs.";
+          result = await browser.click(input.ref);
+          break;
+        case "type":
+          if (!input.ref) return "Error: ref is required for type action.";
+          if (!input.text) return "Error: text is required for type action.";
+          result = await browser.type(input.ref, input.text);
+          break;
+        case "screenshot":
+          result = await browser.screenshot();
+          break;
+        case "snapshot":
+          result = await browser.snapshot();
+          break;
+        case "evaluate":
+          if (!input.expression)
+            return "Error: expression is required for evaluate action.";
+          result = await browser.evaluate(input.expression);
+          break;
+        case "hover":
+          if (!input.ref) return "Error: ref is required for hover action.";
+          result = await browser.hover(input.ref);
+          break;
+        case "select_option":
+          if (!input.ref)
+            return "Error: ref is required for select_option action.";
+          if (!input.value)
+            return "Error: value is required for select_option action.";
+          result = await browser.selectOption(input.ref, input.value);
+          break;
+        case "press_key":
+          if (!input.key) return "Error: key is required for press_key action.";
+          result = await browser.pressKey(input.key);
+          break;
+        case "go_back":
+          result = await browser.goBack();
+          break;
+        case "go_forward":
+          result = await browser.goForward();
+          break;
+        case "wait":
+          result = await browser.wait(input.time ?? 2000);
+          break;
+        case "tab_list":
+          result = await browser.tabList();
+          break;
+        case "tab_new":
+          result = await browser.tabNew(input.url);
+          break;
+        case "tab_close":
+          result = await browser.tabClose();
+          break;
+        default:
+          return `Error: Unknown action "${input.action}".`;
+      }
+
+      if (result.imageData) {
+        return `[Screenshot captured: ${result.imageData.mimeType}]\n${result.content}`;
+      }
+      return result.content;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Error: ${message}`;
+    }
+  }
+
+  config() {
+    return {
+      name: "browser",
+      description:
+        "Control a headless browser via Playwright. Navigate pages, click elements, type text, take screenshots, read page snapshots (accessibility tree), and execute JavaScript. " +
+        "Workflow: 1) navigate to a URL, 2) snapshot to see the page structure and element refs, 3) interact using refs from the snapshot.",
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          action: {
+            type: SchemaType.STRING,
+            enum: [
+              "navigate",
+              "click",
+              "type",
+              "screenshot",
+              "snapshot",
+              "evaluate",
+              "hover",
+              "select_option",
+              "press_key",
+              "go_back",
+              "go_forward",
+              "wait",
+              "tab_list",
+              "tab_new",
+              "tab_close",
+            ],
+            description: "The browser action to perform.",
+          },
+          url: {
+            type: SchemaType.STRING,
+            description: "URL for navigate/tab_new actions.",
+          },
+          ref: {
+            type: SchemaType.STRING,
+            description:
+              "Element reference from a previous snapshot (for click, type, hover, select_option).",
+          },
+          text: {
+            type: SchemaType.STRING,
+            description: "Text to type (for type action).",
+          },
+          value: {
+            type: SchemaType.STRING,
+            description: "Value to select (for select_option action).",
+          },
+          expression: {
+            type: SchemaType.STRING,
+            description:
+              "JavaScript expression to evaluate in the page context.",
+          },
+          key: {
+            type: SchemaType.STRING,
+            description:
+              "Key to press (for press_key action, e.g. 'Enter', 'Tab', 'ArrowDown').",
+          },
+          time: {
+            type: SchemaType.INTEGER,
+            description: "Time to wait in ms (for wait action, default 2000).",
+          },
+        },
+        required: ["action"],
+      },
+    };
+  }
+}
+
 export class RipgrepSearchTool {
   public async execute(pattern: string, glob?: string): Promise<string> {
     const results: string[] = [];
@@ -972,6 +1149,7 @@ export const TOOL_CONFIGS = {
   ListFilesTool: { tool: ListFilesTool, useContextRetriever: false },
   EditFileTool: { tool: EditFileTool, useContextRetriever: false },
   WebPreviewTool: { tool: WebPreviewTool, useContextRetriever: false },
+  BrowserTool: { tool: BrowserTool, useContextRetriever: false },
   TodoTool: { tool: TodoTool, useContextRetriever: false },
   MemoryTool: { tool: MemoryTool, useContextRetriever: false },
   TestRunnerTool: { tool: TestRunnerTool, useContextRetriever: false },
