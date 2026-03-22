@@ -8,6 +8,11 @@ import { DiffReviewService } from "../services/diff-review.service";
 import { ComposerService, FileEdit } from "../services/composer.service";
 import * as path from "path";
 import { WorkspaceIdentityService } from "../services/workspace-identity.service";
+import { BROWSER_ACTIONS, BrowserAction } from "./browser-actions";
+import {
+  BrowserService,
+  BrowserActionResult,
+} from "../services/browser.service";
 import { TodoTool } from "./todo";
 import { MemoryTool } from "./memory";
 export { TodoTool, MemoryTool };
@@ -515,6 +520,153 @@ export class DeepTerminalTool {
   }
 }
 
+// BrowserAction type imported from ./browser-actions (single source of truth)
+
+function assertNever(x: never): never {
+  throw new Error(`Unhandled browser action: ${JSON.stringify(x)}`);
+}
+
+export class BrowserTool {
+  private async dispatchAction(
+    browser: BrowserService,
+    input: {
+      action: BrowserAction;
+      url?: string;
+      ref?: string;
+      text?: string;
+      value?: string;
+      expression?: string;
+      key?: string;
+      time?: number;
+    },
+  ): Promise<BrowserActionResult> {
+    switch (input.action) {
+      case "navigate":
+        if (!input.url) throw new Error("url is required for navigate action.");
+        return browser.navigate(input.url);
+      case "click":
+        if (!input.ref)
+          throw new Error(
+            "ref is required for click action. Use snapshot first to get element refs.",
+          );
+        return browser.click(input.ref);
+      case "type":
+        if (!input.ref) throw new Error("ref is required for type action.");
+        if (!input.text) throw new Error("text is required for type action.");
+        return browser.type(input.ref, input.text);
+      case "screenshot":
+        return browser.screenshot();
+      case "snapshot":
+        return browser.snapshot();
+      case "evaluate":
+        if (!input.expression)
+          throw new Error("expression is required for evaluate action.");
+        return browser.evaluate(input.expression);
+      case "hover":
+        if (!input.ref) throw new Error("ref is required for hover action.");
+        return browser.hover(input.ref);
+      case "select_option":
+        if (!input.ref)
+          throw new Error("ref is required for select_option action.");
+        if (!input.value)
+          throw new Error("value is required for select_option action.");
+        return browser.selectOption(input.ref, input.value);
+      case "press_key":
+        if (!input.key)
+          throw new Error("key is required for press_key action.");
+        return browser.pressKey(input.key);
+      case "go_back":
+        return browser.goBack();
+      case "go_forward":
+        return browser.goForward();
+      case "wait":
+        return browser.wait(input.time ?? 2000);
+      case "tab_list":
+        return browser.tabList();
+      case "tab_new":
+        return browser.tabNew(input.url);
+      case "tab_close":
+        return browser.tabClose();
+      default:
+        return assertNever(input.action);
+    }
+  }
+
+  public async execute(input: {
+    action: BrowserAction;
+    url?: string;
+    ref?: string;
+    text?: string;
+    value?: string;
+    expression?: string;
+    key?: string;
+    time?: number;
+  }): Promise<string> {
+    const browser = BrowserService.getInstance();
+    try {
+      const result = await this.dispatchAction(browser, input);
+      if (result.imageData) {
+        return `[Screenshot captured: ${result.imageData.mimeType}]\n${result.content}`;
+      }
+      return result.content;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Error: ${message}`;
+    }
+  }
+
+  config() {
+    return {
+      name: "browser",
+      description:
+        "Control a headless browser via Playwright. Navigate pages, click elements, type text, take screenshots, read page snapshots (accessibility tree), and execute JavaScript. " +
+        "Workflow: 1) navigate to a URL, 2) snapshot to see the page structure and element refs, 3) interact using refs from the snapshot.",
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          action: {
+            type: SchemaType.STRING,
+            enum: [...BROWSER_ACTIONS],
+            description: "The browser action to perform.",
+          },
+          url: {
+            type: SchemaType.STRING,
+            description: "URL for navigate/tab_new actions.",
+          },
+          ref: {
+            type: SchemaType.STRING,
+            description:
+              "Element reference from a previous snapshot (for click, type, hover, select_option).",
+          },
+          text: {
+            type: SchemaType.STRING,
+            description: "Text to type (for type action).",
+          },
+          value: {
+            type: SchemaType.STRING,
+            description: "Value to select (for select_option action).",
+          },
+          expression: {
+            type: SchemaType.STRING,
+            description:
+              "JavaScript expression to evaluate in the page context.",
+          },
+          key: {
+            type: SchemaType.STRING,
+            description:
+              "Key to press (for press_key action, e.g. 'Enter', 'Tab', 'ArrowDown').",
+          },
+          time: {
+            type: SchemaType.INTEGER,
+            description: "Time to wait in ms (for wait action, default 2000).",
+          },
+        },
+        required: ["action"],
+      },
+    };
+  }
+}
+
 export class RipgrepSearchTool {
   public async execute(pattern: string, glob?: string): Promise<string> {
     const results: string[] = [];
@@ -972,6 +1124,7 @@ export const TOOL_CONFIGS = {
   ListFilesTool: { tool: ListFilesTool, useContextRetriever: false },
   EditFileTool: { tool: EditFileTool, useContextRetriever: false },
   WebPreviewTool: { tool: WebPreviewTool, useContextRetriever: false },
+  BrowserTool: { tool: BrowserTool, useContextRetriever: false },
   TodoTool: { tool: TodoTool, useContextRetriever: false },
   MemoryTool: { tool: MemoryTool, useContextRetriever: false },
   TestRunnerTool: { tool: TestRunnerTool, useContextRetriever: false },
