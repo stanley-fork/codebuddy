@@ -234,8 +234,9 @@ export const WelcomeHero = styled.div`
 `;
 
 export const WelcomeLogo = styled.div`
-  font-size: 48px;
   margin-bottom: 16px;
+  display: flex;
+  justify-content: center;
 `;
 
 export const WelcomeTitle = styled.h1`
@@ -270,10 +271,10 @@ export const FeatureItem = styled.div`
 `;
 
 export const FeatureIcon = styled.span`
-  font-size: 18px;
   flex-shrink: 0;
-  line-height: 1;
+  line-height: 0;
   margin-top: 2px;
+  color: var(--vscode-foreground, #ccc);
 `;
 
 export const FeatureText = styled.div`
@@ -345,6 +346,9 @@ export const ProfileName = styled.div`
   font-size: 13px;
   font-weight: 500;
   margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 `;
 
 export const ProfileDescription = styled.div`
@@ -373,8 +377,9 @@ export const TaskCard = styled.div`
 `;
 
 export const TaskIcon = styled.span`
-  font-size: 20px;
   flex-shrink: 0;
+  line-height: 0;
+  color: var(--vscode-foreground, #ccc);
 `;
 
 export const TaskLabel = styled.span`

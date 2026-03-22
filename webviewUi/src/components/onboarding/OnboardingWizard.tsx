@@ -46,6 +46,23 @@ import {
   TaskLabel,
 } from "./styles";
 import { vscode } from "../../utils/vscode";
+import {
+  CodeBuddyLogo,
+  ChatBubbleIcon,
+  SearchIcon,
+  LockIcon,
+  GlobeIcon,
+  WrenchIcon,
+  RefreshIcon,
+  ShieldIcon,
+  BoltIcon,
+  ChartIcon,
+  BugIcon,
+  PackageIcon,
+  FileTextIcon,
+  FlaskIcon,
+  PartyIcon,
+} from "./icons";
 
 // ─── Step metadata (derived from the store's STEP_ORDER) ─
 
@@ -114,7 +131,6 @@ export const OnboardingWizard: React.FC = () => {
               onTestProvider={testProvider}
               onRequestKeyInput={requestKeyInput}
               onComplete={completeStep}
-              stepCompleting={stepCompleting}
               isSavingKey={isSavingKey}
               savedKeyProvider={savedKeyProvider}
             />
@@ -165,7 +181,7 @@ export const OnboardingWizard: React.FC = () => {
 
 const WelcomeStep: React.FC = () => (
   <WelcomeHero>
-    <WelcomeLogo>🤖</WelcomeLogo>
+    <WelcomeLogo><CodeBuddyLogo /></WelcomeLogo>
     <WelcomeTitle>Welcome to CodeBuddy</WelcomeTitle>
     <WelcomeSubtitle>
       Your autonomous AI software engineer for VS Code. Let&apos;s get you set
@@ -173,42 +189,42 @@ const WelcomeStep: React.FC = () => (
     </WelcomeSubtitle>
     <FeatureList>
       <FeatureItem>
-        <FeatureIcon>💬</FeatureIcon>
+        <FeatureIcon><ChatBubbleIcon /></FeatureIcon>
         <FeatureText>
           <strong>Agent Mode</strong>
           Autonomous coding with file edits, terminal, and browser
         </FeatureText>
       </FeatureItem>
       <FeatureItem>
-        <FeatureIcon>🔍</FeatureIcon>
+        <FeatureIcon><SearchIcon /></FeatureIcon>
         <FeatureText>
           <strong>Codebase Search</strong>
           Hybrid semantic + keyword search across your entire project
         </FeatureText>
       </FeatureItem>
       <FeatureItem>
-        <FeatureIcon>🔒</FeatureIcon>
+        <FeatureIcon><LockIcon /></FeatureIcon>
         <FeatureText>
           <strong>Security Built-in</strong>
           Permission profiles, credential proxy, and safety guardrails
         </FeatureText>
       </FeatureItem>
       <FeatureItem>
-        <FeatureIcon>🌐</FeatureIcon>
+        <FeatureIcon><GlobeIcon /></FeatureIcon>
         <FeatureText>
           <strong>8 LLM Providers</strong>
           Anthropic, OpenAI, Gemini, Groq, Deepseek, and more
         </FeatureText>
       </FeatureItem>
       <FeatureItem>
-        <FeatureIcon>🛠️</FeatureIcon>
+        <FeatureIcon><WrenchIcon /></FeatureIcon>
         <FeatureText>
           <strong>16+ Skills</strong>
           GitHub, Jira, AWS, Kubernetes, databases, and more
         </FeatureText>
       </FeatureItem>
       <FeatureItem>
-        <FeatureIcon>🔄</FeatureIcon>
+        <FeatureIcon><RefreshIcon /></FeatureIcon>
         <FeatureText>
           <strong>Provider Failover</strong>
           Automatic fallback when your primary provider is down
@@ -227,7 +243,6 @@ interface ProviderStepProps {
   onTestProvider: (provider: string) => void;
   onRequestKeyInput: (provider: string) => void;
   onComplete: (step: number, data: Record<string, unknown>) => void;
-  stepCompleting: boolean;
   isSavingKey: boolean;
   savedKeyProvider: string | null;
 }
@@ -239,7 +254,6 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
   onTestProvider,
   onRequestKeyInput,
   onComplete,
-  stepCompleting,
   isSavingKey,
   savedKeyProvider,
 }) => {
@@ -462,21 +476,21 @@ const PROFILES = [
     name: "Restricted",
     description:
       "Read-only tools only. All terminal commands blocked. Best for reviewing code safely.",
-    icon: "🔒",
+    icon: LockIcon,
   },
   {
     id: "standard",
     name: "Standard",
     description:
       "All tools enabled. Dangerous terminal commands blocked. Recommended for most users.",
-    icon: "🛡️",
+    icon: ShieldIcon,
   },
   {
     id: "trusted",
     name: "Trusted",
     description:
       "All tools with auto-approve. Only catastrophic commands blocked. For experienced users in trusted environments.",
-    icon: "⚡",
+    icon: BoltIcon,
   },
 ];
 
@@ -513,7 +527,7 @@ const SecurityStep: React.FC<SecurityStepProps> = ({ onComplete, stepCompleting 
             aria-selected={selectedProfile === p.id}
           >
             <ProfileName>
-              {p.icon} {p.name}
+              <p.icon size={16} /> {p.name}
               {selectedProfile === p.id && (
                 <StatusBadge $variant="info" style={{ marginLeft: 8 }}>
                   Selected
@@ -546,7 +560,7 @@ interface FirstTaskStepProps {
   onDismiss: () => void;
 }
 
-const TASK_ICONS = ["📊", "🔍", "🐛", "📦", "📝", "🧪"];
+const TASK_ICONS = [ChartIcon, SearchIcon, BugIcon, PackageIcon, FileTextIcon, FlaskIcon];
 
 const FirstTaskStep: React.FC<FirstTaskStepProps> = ({
   suggestedTasks,
@@ -563,7 +577,10 @@ const FirstTaskStep: React.FC<FirstTaskStepProps> = ({
 
   return (
     <>
-      <StepTitle>You&apos;re All Set! 🎉</StepTitle>
+      <StepTitle>
+        You&apos;re All Set!{" "}
+        <span style={{ verticalAlign: "middle", lineHeight: 0 }}><PartyIcon size={24} /></span>
+      </StepTitle>
       <StepSubtitle>
         CodeBuddy is ready. Try one of these to get started, or just start
         typing in the chat.
@@ -572,7 +589,7 @@ const FirstTaskStep: React.FC<FirstTaskStepProps> = ({
       <CardGrid>
         {suggestedTasks.map((task, i) => (
           <TaskCard key={task.label} onClick={() => handleTaskClick(task.prompt)}>
-            <TaskIcon>{TASK_ICONS[i % TASK_ICONS.length]}</TaskIcon>
+            <TaskIcon>{React.createElement(TASK_ICONS[i % TASK_ICONS.length])}</TaskIcon>
             <TaskLabel>{task.label}</TaskLabel>
           </TaskCard>
         ))}
