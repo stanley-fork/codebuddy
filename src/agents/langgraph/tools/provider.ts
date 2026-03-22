@@ -16,6 +16,7 @@ import {
   WebPreviewTool,
   SearchTool,
   DeepTerminalTool,
+  BrowserTool,
   TodoTool,
   MemoryTool,
   TestRunnerTool,
@@ -40,6 +41,7 @@ import { LangChainTodoTool } from "./todo";
 import { LangChainMemoryTool } from "./memory";
 import { LangChainTestRunnerTool } from "./test-runner";
 import { LangChainComposerTool } from "./composer";
+import { LangChainBrowserTool } from "./browser";
 import {
   DebugControlTool,
   DebugEvaluateTool,
@@ -143,6 +145,12 @@ class EditFileToolFactory implements IToolFactory {
 class WebPreviewToolFactory implements IToolFactory {
   createTool(): StructuredTool<any> {
     return new LangChainWebPreviewTool(new WebPreviewTool());
+  }
+}
+
+class BrowserToolFactory implements IToolFactory {
+  createTool(): StructuredTool<any> {
+    return new LangChainBrowserTool(new BrowserTool());
   }
 }
 
@@ -266,6 +274,7 @@ const TOOL_ROLE_MAPPING: Record<string, string[]> = {
     "manage_tasks",
     "manage_core_memory",
     "compose_files",
+    "browser",
   ],
   "doc-writer": [
     "search",
@@ -285,6 +294,7 @@ const TOOL_ROLE_MAPPING: Record<string, string[]> = {
     "search_vector_db",
     "standup_intelligence",
     "team_graph",
+    "browser",
   ],
   "file-organizer": [
     "file",
@@ -328,6 +338,7 @@ const TOOL_ROLE_MAPPING: Record<string, string[]> = {
     "manage_tasks",
     "standup_intelligence",
     "team_graph",
+    "browser",
   ],
   reviewer: [
     "analyze",
@@ -366,6 +377,7 @@ const TOOL_ROLE_MAPPING: Record<string, string[]> = {
     "search_vector_db",
     "manage_terminal",
     "run_tests",
+    "browser",
   ],
   debugger: [
     "debug_get_state",
@@ -383,6 +395,7 @@ const TOOL_ROLE_MAPPING: Record<string, string[]> = {
     "edit_file",
     "ripgrep_search",
     "get_diagnostics",
+    "browser",
   ],
   "architecture-expert": [
     "get_architecture_knowledge",
@@ -424,6 +437,7 @@ export class ToolProvider {
       // new ListFilesToolFactory(), // Provided by DeepAgent backend
       // new EditFileToolFactory(), // Provided by DeepAgent backend
       new WebPreviewToolFactory(),
+      new BrowserToolFactory(),
       new SearchToolFactory(this.contextRetriever),
       new TodoToolFactory(),
       new MemoryToolFactory(),
