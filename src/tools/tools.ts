@@ -8,6 +8,7 @@ import { DiffReviewService } from "../services/diff-review.service";
 import { ComposerService, FileEdit } from "../services/composer.service";
 import * as path from "path";
 import { WorkspaceIdentityService } from "../services/workspace-identity.service";
+import { BROWSER_ACTIONS, BrowserAction } from "./browser-actions";
 import {
   BrowserService,
   BrowserActionResult,
@@ -519,22 +520,7 @@ export class DeepTerminalTool {
   }
 }
 
-export type BrowserAction =
-  | "navigate"
-  | "click"
-  | "type"
-  | "screenshot"
-  | "snapshot"
-  | "evaluate"
-  | "hover"
-  | "select_option"
-  | "press_key"
-  | "go_back"
-  | "go_forward"
-  | "wait"
-  | "tab_list"
-  | "tab_new"
-  | "tab_close";
+// BrowserAction type imported from ./browser-actions (single source of truth)
 
 export class BrowserTool {
   public async execute(input: {
@@ -635,23 +621,7 @@ export class BrowserTool {
         properties: {
           action: {
             type: SchemaType.STRING,
-            enum: [
-              "navigate",
-              "click",
-              "type",
-              "screenshot",
-              "snapshot",
-              "evaluate",
-              "hover",
-              "select_option",
-              "press_key",
-              "go_back",
-              "go_forward",
-              "wait",
-              "tab_list",
-              "tab_new",
-              "tab_close",
-            ],
+            enum: [...BROWSER_ACTIONS],
             description: "The browser action to perform.",
           },
           url: {

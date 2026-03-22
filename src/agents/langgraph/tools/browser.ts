@@ -1,28 +1,11 @@
 import { z } from "zod";
 import { Logger, LogLevel } from "../../../infrastructure/logger/logger";
 import { BrowserTool } from "../../../tools/tools";
+import { BROWSER_ACTIONS } from "../../../tools/browser-actions";
 import { StructuredTool } from "@langchain/core/tools";
 
 const browserSchema = z.object({
-  action: z
-    .enum([
-      "navigate",
-      "click",
-      "type",
-      "screenshot",
-      "snapshot",
-      "evaluate",
-      "hover",
-      "select_option",
-      "press_key",
-      "go_back",
-      "go_forward",
-      "wait",
-      "tab_list",
-      "tab_new",
-      "tab_close",
-    ])
-    .describe("The browser action to perform."),
+  action: z.enum(BROWSER_ACTIONS).describe("The browser action to perform."),
   url: z.string().optional().describe("URL for navigate/tab_new actions."),
   ref: z
     .string()
@@ -53,6 +36,9 @@ const browserSchema = z.object({
 
 type BrowserToolInput = z.infer<typeof browserSchema>;
 
+// StructuredTool<any> is intentional — StructuredTool<typeof browserSchema>
+// triggers TS2589 ("Type instantiation is excessively deep"). All tools
+// in this codebase use <any> for the same reason.
 export class LangChainBrowserTool extends StructuredTool<any> {
   private readonly logger: Logger;
   constructor(private readonly toolInstance: BrowserTool) {

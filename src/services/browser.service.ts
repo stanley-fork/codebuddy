@@ -3,23 +3,49 @@
  *
  * Wraps MCPService.callTool() calls to the "playwright" MCP server, adding:
  *  - SSRF validation via NavigationGuard on every navigation
+ *  - Input validation via InputGuard on ref/key parameters
  *  - Typed action methods that map to browser_* MCP tools
  *  - Structured result parsing (text + image content)
  *  - Timeout protection on all MCP calls
  *  - Audit logging for security-sensitive operations (evaluate)
+ *  - Post-navigation DNS rebinding check (best-effort)
  *
  * The Playwright MCP server is started on-demand by MCPService (stdio transport).
+ *
+ * ⚠️ KNOWN LIMITATION: DNS Rebinding
+ * The navigation guard validates the literal URL hostname at call time.
+ * DNS rebinding attacks (where a domain resolves to a private IP after validation)
+ * are mitigated with a best-effort post-navigation hostname check. For high-security
+ * deployments, consider running Playwright in a network-isolated sandbox or using
+ * a DNS-level firewall to deny PTR lookups to RFC 1918 ranges.
  */
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import { MCPService } from "../MCP/service";
 import { MCPToolResult } from "../MCP/types";
 import { assertNavigationAllowed } from "./navigation-guard";
+import { assertSafeRef, assertSafeKey } from "./input-guard";
 
 const MCP_SERVER = "playwright";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_EXPRESSION_LENGTH = 4096;
 const MIN_WAIT_MS = 0;
 const MAX_WAIT_MS = 30_000;
+
+/**
+ * Patterns that indicate potentially dangerous JS expressions.
+ * Blocked at the service layer as defense-in-depth (the MCP sandbox
+ * is the primary isolation boundary).
+ */
+const DANGEROUS_EXPRESSION_PATTERNS = [
+  /\bfetch\s*\(/i,
+  /\bXMLHttpRequest\b/i,
+  /\bnew\s+WebSocket\b/i,
+  /\bnavigator\.sendBeacon\b/i,
+  /\bimport\s*\(/i,
+  /\bdocument\.cookie\b/i,
+  /\blocalStorage\b/i,
+  /\bsessionStorage\b/i,
+];
 
 export interface BrowserActionResult {
   success: boolean;
@@ -36,23 +62,26 @@ async function withTimeout<T>(
   ms: number,
   label: string,
 ): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
+  let timerId: ReturnType<typeof setTimeout> | undefined;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(
       () =>
         reject(new Error(`Browser action timed out after ${ms}ms: ${label}`)),
       ms,
     );
   });
+
   try {
-    return await Promise.race([promise, timeout]);
+    return await Promise.race([promise, timeoutPromise]);
   } finally {
-    clearTimeout(timer!);
+    if (timerId !== undefined) clearTimeout(timerId);
   }
 }
 
 /**
  * Parse an MCPToolResult into a BrowserActionResult.
+ * Uses array accumulation + join for O(n) string building.
  */
 function parseResult(result: MCPToolResult): BrowserActionResult {
   if (result.isError) {
@@ -62,20 +91,24 @@ function parseResult(result: MCPToolResult): BrowserActionResult {
     return { success: false, content: text || "Unknown MCP error" };
   }
 
-  let text = "";
+  const textParts: string[] = [];
   let imageData: { base64: string; mimeType: string } | undefined;
 
   for (const entry of result.content) {
     if (entry.type === "image" && entry.data && entry.mimeType) {
       imageData = { base64: entry.data, mimeType: entry.mimeType };
     } else if (entry.text) {
-      text += (text ? "\n" : "") + entry.text;
+      textParts.push(entry.text);
     } else {
-      text += (text ? "\n" : "") + JSON.stringify(entry);
+      textParts.push(JSON.stringify(entry));
     }
   }
 
-  return { success: true, content: text || "(empty response)", imageData };
+  return {
+    success: true,
+    content: textParts.join("\n") || "(empty response)",
+    imageData,
+  };
 }
 
 export class BrowserService {
@@ -107,6 +140,11 @@ export class BrowserService {
     return new BrowserService(mcp, logger);
   }
 
+  /** Reset singleton — for extension deactivation cleanup. */
+  static dispose(): void {
+    BrowserService.instance = null;
+  }
+
   // ── Core Actions ────────────────────────────────────────────────────────
 
   async navigate(url: string): Promise<BrowserActionResult> {
@@ -117,13 +155,43 @@ export class BrowserService {
       DEFAULT_TIMEOUT_MS,
       "navigate",
     );
-    return parseResult(result);
+    const parsed = parseResult(result);
+
+    // Post-navigation DNS rebinding check (best-effort)
+    if (parsed.success) {
+      try {
+        const hostnameResult = await withTimeout(
+          this.mcp.callTool(
+            "browser_evaluate",
+            { expression: "window.location.hostname" },
+            MCP_SERVER,
+          ),
+          5_000,
+          "post-navigate-hostname-check",
+        );
+        const resolvedHost = parseResult(hostnameResult).content.trim();
+        if (resolvedHost) {
+          assertNavigationAllowed(`https://${resolvedHost}/`);
+        }
+      } catch (err) {
+        this.logger.warn(
+          "Post-navigation hostname check failed — possible DNS rebinding",
+          {
+            url: safeUrl,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+      }
+    }
+
+    return parsed;
   }
 
   async click(ref: string): Promise<BrowserActionResult> {
-    this.logger.info(`browser_click → ref=${ref}`);
+    const safeRef = assertSafeRef(ref);
+    this.logger.info(`browser_click → ref=${safeRef}`);
     const result = await withTimeout(
-      this.mcp.callTool("browser_click", { ref }, MCP_SERVER),
+      this.mcp.callTool("browser_click", { ref: safeRef }, MCP_SERVER),
       DEFAULT_TIMEOUT_MS,
       "click",
     );
@@ -131,9 +199,10 @@ export class BrowserService {
   }
 
   async type(ref: string, text: string): Promise<BrowserActionResult> {
-    this.logger.info(`browser_type → ref=${ref}`);
+    const safeRef = assertSafeRef(ref);
+    this.logger.info(`browser_type → ref=${safeRef}`);
     const result = await withTimeout(
-      this.mcp.callTool("browser_type", { ref, text }, MCP_SERVER),
+      this.mcp.callTool("browser_type", { ref: safeRef, text }, MCP_SERVER),
       DEFAULT_TIMEOUT_MS,
       "type",
     );
@@ -141,11 +210,12 @@ export class BrowserService {
   }
 
   async selectOption(ref: string, value: string): Promise<BrowserActionResult> {
-    this.logger.info(`browser_select_option → ref=${ref}`);
+    const safeRef = assertSafeRef(ref);
+    this.logger.info(`browser_select_option → ref=${safeRef}`);
     const result = await withTimeout(
       this.mcp.callTool(
         "browser_select_option",
-        { ref, values: [value] },
+        { ref: safeRef, values: [value] },
         MCP_SERVER,
       ),
       DEFAULT_TIMEOUT_MS,
@@ -155,9 +225,10 @@ export class BrowserService {
   }
 
   async hover(ref: string): Promise<BrowserActionResult> {
-    this.logger.info(`browser_hover → ref=${ref}`);
+    const safeRef = assertSafeRef(ref);
+    this.logger.info(`browser_hover → ref=${safeRef}`);
     const result = await withTimeout(
-      this.mcp.callTool("browser_hover", { ref }, MCP_SERVER),
+      this.mcp.callTool("browser_hover", { ref: safeRef }, MCP_SERVER),
       DEFAULT_TIMEOUT_MS,
       "hover",
     );
@@ -165,9 +236,10 @@ export class BrowserService {
   }
 
   async pressKey(key: string): Promise<BrowserActionResult> {
-    this.logger.info(`browser_press_key → ${key}`);
+    const safeKey = assertSafeKey(key);
+    this.logger.info(`browser_press_key → ${safeKey}`);
     const result = await withTimeout(
-      this.mcp.callTool("browser_press_key", { key }, MCP_SERVER),
+      this.mcp.callTool("browser_press_key", { key: safeKey }, MCP_SERVER),
       DEFAULT_TIMEOUT_MS,
       "press_key",
     );
@@ -200,6 +272,20 @@ export class BrowserService {
         success: false,
         content: `Error: expression exceeds maximum length (${MAX_EXPRESSION_LENGTH} chars).`,
       };
+    }
+
+    // Block known dangerous patterns (defense-in-depth)
+    for (const pattern of DANGEROUS_EXPRESSION_PATTERNS) {
+      if (pattern.test(expression)) {
+        this.logger.warn(
+          `browser_evaluate BLOCKED — dangerous pattern detected: ${pattern.source}`,
+          { expressionPreview: expression.slice(0, 120) },
+        );
+        return {
+          success: false,
+          content: `Error: expression contains a blocked pattern (${pattern.source}). Use navigate() for network requests.`,
+        };
+      }
     }
 
     // Audit log — security-critical operation
@@ -269,19 +355,17 @@ export class BrowserService {
   }
 
   async tabNew(url?: string): Promise<BrowserActionResult> {
+    const params: Record<string, string> = {};
+
     if (url) {
-      const safeUrl = assertNavigationAllowed(url);
-      this.logger.info(`browser_tab_new → ${safeUrl}`);
-      const result = await withTimeout(
-        this.mcp.callTool("browser_tab_new", { url: safeUrl }, MCP_SERVER),
-        DEFAULT_TIMEOUT_MS,
-        "tab_new",
-      );
-      return parseResult(result);
+      params.url = assertNavigationAllowed(url);
+      this.logger.info(`browser_tab_new → ${params.url}`);
+    } else {
+      this.logger.info("browser_tab_new (blank)");
     }
-    this.logger.info("browser_tab_new (blank)");
+
     const result = await withTimeout(
-      this.mcp.callTool("browser_tab_new", {}, MCP_SERVER),
+      this.mcp.callTool("browser_tab_new", params, MCP_SERVER),
       DEFAULT_TIMEOUT_MS,
       "tab_new",
     );
