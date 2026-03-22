@@ -15,6 +15,7 @@
 const MAX_REF_LENGTH = 512;
 
 /** Null bytes, control chars, and shell/template-injection characters */
+// eslint-disable-next-line no-control-regex
 const BLOCKED_IN_REF = /[\x00-\x1f\x7f;|&`$(){}\\]/;
 
 /** Keyboard key names: Enter, ArrowDown, F5, Shift+A, etc. */
