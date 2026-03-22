@@ -72,6 +72,11 @@ import {
   runSecurityDiagnostics,
 } from "./commands/security-config.command";
 import { DoctorService } from "./services/doctor.service";
+import {
+  OnboardingService,
+  ONBOARDING_COMPLETED_KEY,
+  ONBOARDING_VERSION_KEY,
+} from "./services/onboarding.service";
 import { CredentialProxyService } from "./services/credential-proxy.service";
 import { setProxyContext, clearProxyContext } from "./services/proxy-context";
 import { PermissionScopeService } from "./services/permission-scope.service";
@@ -334,6 +339,12 @@ export async function activate(context: vscode.ExtensionContext) {
       workspacePath: workspacePath ?? "",
     });
     context.subscriptions.push(doctorService);
+
+    // Initialize Onboarding Service (first-run wizard)
+    const onboardingService = OnboardingService.getInstance();
+    onboardingService.initialize(context);
+    onboardingService.setSecretStorage(secretStorageService);
+    context.subscriptions.push(onboardingService);
 
     // Use dynamic import for DeveloperAgent to ensure it's loaded AFTER telemetry initialization
     const { DeveloperAgent } = await import("./agents/developer/agent");
@@ -1528,6 +1539,23 @@ export async function activate(context: vscode.ExtensionContext) {
       },
       "CodeBuddy.rules.reload": async () => {
         await projectRulesService.reloadRules();
+      },
+      "codebuddy.showOnboarding": async () => {
+        // Reset onboarding state so the wizard re-appears
+        await context.globalState.update(ONBOARDING_COMPLETED_KEY, false);
+        await context.globalState.update(ONBOARDING_VERSION_KEY, 0);
+        // Push re-hydration to any open webview panel
+        const provider =
+          WebViewProviderManager.getInstance(context).getCurrentProvider();
+        if (provider?.currentWebView?.webview) {
+          await provider.currentWebView.webview.postMessage({
+            command: "onboarding-request-hydrate",
+          });
+        } else {
+          vscode.window.showInformationMessage(
+            "Onboarding wizard will appear when you next open CodeBuddy.",
+          );
+        }
       },
     };
 
