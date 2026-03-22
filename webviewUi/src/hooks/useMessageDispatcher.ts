@@ -440,8 +440,16 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
         case "onboarding-step-result":
           useOnboardingStore.getState().setStepCompleting(false);
           break;
-        case "onboarding-providers-updated":
-          useOnboardingStore.getState().setProviders(message.providers ?? []);
+        case "onboarding-providers-updated": {
+          const obStore = useOnboardingStore.getState();
+          obStore.setProviders(message.providers ?? []);
+          if (message.savedProvider) {
+            obStore.setSavedKeyProvider(message.savedProvider);
+          }
+          break;
+        }
+        case "onboarding-key-input-cancelled":
+          useOnboardingStore.getState().setIsSavingKey(false);
           break;
         case "onboarding-project-detected": {
           const obs = useOnboardingStore.getState();

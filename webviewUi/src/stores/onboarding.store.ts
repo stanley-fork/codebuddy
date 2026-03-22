@@ -57,6 +57,9 @@ interface OnboardingState {
   isTestingProvider: boolean;
   testResult: ProviderTestResult | null;
   stepCompleting: boolean;
+  isSavingKey: boolean;
+  savedKeyProvider: string | null;
+  _testTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
   // Actions
   hydrate: () => void;
@@ -67,7 +70,7 @@ interface OnboardingState {
   prevStep: () => void;
   goToStep: (step: OnboardingStep) => void;
   completeStep: (step: number, data: Record<string, unknown>) => void;
-  submitProviderKey: (provider: string, apiKey: string) => void;
+  requestKeyInput: (provider: string) => void;
   testProvider: (provider: string) => void;
   detectProject: () => void;
   setVisible: (visible: boolean) => void;
@@ -77,6 +80,8 @@ interface OnboardingState {
   setTestResult: (result: ProviderTestResult | null) => void;
   setTestingProvider: (testing: boolean) => void;
   setStepCompleting: (completing: boolean) => void;
+  setSavedKeyProvider: (provider: string | null) => void;
+  setIsSavingKey: (saving: boolean) => void;
 }
 
 // ─── Store ──────────────────────────────────────────────
@@ -90,6 +95,9 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
   isTestingProvider: false,
   testResult: null,
   stepCompleting: false,
+  isSavingKey: false,
+  savedKeyProvider: null,
+  _testTimeoutId: undefined,
 
   hydrate: () => {
     vscode.postMessage({ command: "onboarding-hydrate" });
@@ -135,7 +143,7 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
 
   completeStep: (step, data) => {
     set({ stepCompleting: true });
-    // Strip secrets — extension host handles key storage via submitProviderKey
+    // Never include secrets in step-complete messages
     const safeData = { ...data };
     if ("apiKey" in safeData) {
       delete safeData.apiKey;
@@ -147,11 +155,12 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
     });
   },
 
-  submitProviderKey: (provider, apiKey) => {
+  requestKeyInput: (provider) => {
+    // Ask the extension host to open a secure input box — key never enters message bus
+    set({ isSavingKey: true, savedKeyProvider: null });
     vscode.postMessage({
-      command: "onboarding-store-provider-key",
+      command: "onboarding-request-key-input",
       provider,
-      apiKey,
     });
   },
 
@@ -161,6 +170,24 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
       command: "onboarding-test-provider",
       provider,
     });
+
+    // Safety net: reset if extension host doesn't respond in 10s
+    const timeoutId = setTimeout(() => {
+      const { isTestingProvider } = get();
+      if (isTestingProvider) {
+        set({
+          isTestingProvider: false,
+          testResult: {
+            provider,
+            success: false,
+            latencyMs: 10_000,
+            error: "Request timed out — extension host did not respond",
+          },
+          _testTimeoutId: undefined,
+        });
+      }
+    }, 10_000);
+    set({ _testTimeoutId: timeoutId });
   },
 
   detectProject: () => {
@@ -171,8 +198,18 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
   setProviders: (providers) => set({ providers }),
   setProjectInfo: (info) => set({ projectInfo: info }),
   setSuggestedTasks: (tasks) => set({ suggestedTasks: tasks }),
-  setTestResult: (result) =>
-    set({ testResult: result, isTestingProvider: false }),
+  setTestResult: (result) => {
+    const { _testTimeoutId } = get();
+    if (_testTimeoutId) clearTimeout(_testTimeoutId);
+    set({
+      testResult: result,
+      isTestingProvider: false,
+      _testTimeoutId: undefined,
+    });
+  },
   setTestingProvider: (testing) => set({ isTestingProvider: testing }),
   setStepCompleting: (completing) => set({ stepCompleting: completing }),
+  setSavedKeyProvider: (provider) =>
+    set({ savedKeyProvider: provider, isSavingKey: false }),
+  setIsSavingKey: (saving) => set({ isSavingKey: saving }),
 }));

@@ -1,5 +1,9 @@
 import { WebviewMessageHandler, HandlerContext } from "./types";
-import { OnboardingService } from "../../services/onboarding.service";
+import {
+  OnboardingService,
+  ONBOARDING_STEPS,
+} from "../../services/onboarding.service";
+import * as vscode from "vscode";
 import type {
   OnboardingStepResult,
   ProviderTestResult,
@@ -20,10 +24,9 @@ type OnboardingTestProviderMessage = {
   command: "onboarding-test-provider";
   provider: string;
 };
-type OnboardingStoreProviderKeyMessage = {
-  command: "onboarding-store-provider-key";
+type OnboardingRequestKeyInputMessage = {
+  command: "onboarding-request-key-input";
   provider: string;
-  apiKey: string;
 };
 type OnboardingDetectProjectMessage = { command: "onboarding-detect-project" };
 
@@ -33,7 +36,7 @@ type OnboardingMessage =
   | OnboardingSkipMessage
   | OnboardingDismissMessage
   | OnboardingTestProviderMessage
-  | OnboardingStoreProviderKeyMessage
+  | OnboardingRequestKeyInputMessage
   | OnboardingDetectProjectMessage;
 
 const ONBOARDING_COMMANDS = [
@@ -42,7 +45,7 @@ const ONBOARDING_COMMANDS = [
   "onboarding-skip",
   "onboarding-dismiss",
   "onboarding-test-provider",
-  "onboarding-store-provider-key",
+  "onboarding-request-key-input",
   "onboarding-detect-project",
 ] as const;
 
@@ -136,7 +139,7 @@ export class OnboardingHandler implements WebviewMessageHandler {
           await svc.completeStep(result);
 
           // After provider setup, re-send provider list so UI updates
-          if (message.step === 1) {
+          if (message.step === ONBOARDING_STEPS.PROVIDER) {
             ctx.webview.webview.postMessage({
               command: "onboarding-providers-updated",
               providers: svc.getProviders(),
@@ -162,41 +165,42 @@ export class OnboardingHandler implements WebviewMessageHandler {
         break;
       }
 
-      case "onboarding-store-provider-key": {
+      case "onboarding-request-key-input": {
         try {
           if (!svc.isValidProviderId(message.provider)) {
             ctx.logger.warn(`Rejected unknown provider: ${message.provider}`);
-            ctx.webview.webview.postMessage({
-              command: "onboarding-test-result",
-              data: {
-                provider: message.provider,
-                success: false,
-                latencyMs: 0,
-                error: "Unknown provider",
-              } as ProviderTestResult,
-            });
             return;
           }
-          if (!message.apiKey || message.apiKey.length < 10) {
-            ctx.webview.webview.postMessage({
-              command: "onboarding-test-result",
-              data: {
-                provider: message.provider,
-                success: false,
-                latencyMs: 0,
-                error: "Invalid key format",
-              } as ProviderTestResult,
-            });
-            return;
-          }
-          await svc.saveProviderConfig(message.provider, message.apiKey);
-          ctx.webview.webview.postMessage({
-            command: "onboarding-providers-updated",
-            providers: svc.getProviders(),
+
+          // Use VS Code's secure input box — key NEVER enters the message bus
+          const providerName =
+            svc.getProviders().find((p) => p.id === message.provider)?.name ??
+            message.provider;
+          const apiKey = await vscode.window.showInputBox({
+            prompt: `Enter your ${providerName} API key`,
+            password: true,
+            ignoreFocusOut: true,
+            validateInput: (v) =>
+              v && v.length >= 10 ? null : "Key must be at least 10 characters",
           });
+
+          if (apiKey) {
+            await svc.saveProviderConfig(message.provider, apiKey);
+            ctx.webview.webview.postMessage({
+              command: "onboarding-providers-updated",
+              providers: svc.getProviders(),
+              savedProvider: message.provider,
+            });
+          } else {
+            // User cancelled — notify webview
+            ctx.webview.webview.postMessage({
+              command: "onboarding-key-input-cancelled",
+              provider: message.provider,
+            });
+          }
         } catch (err) {
           ctx.logger.error(
-            `OnboardingHandler store key failed: ${err instanceof Error ? err.message : String(err)}`,
+            `OnboardingHandler key input failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
         break;

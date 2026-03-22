@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   useOnboardingStore,
   STEP_ORDER,
@@ -34,7 +34,6 @@ import {
   CardGrid,
   InputGroup,
   Label,
-  TextInput,
   InfoGrid,
   InfoLabel,
   InfoValue,
@@ -70,12 +69,14 @@ export const OnboardingWizard: React.FC = () => {
     isTestingProvider,
     testResult,
     stepCompleting,
+    isSavingKey,
+    savedKeyProvider,
     nextStep,
     prevStep,
     skip,
     dismiss,
     completeStep,
-    submitProviderKey,
+    requestKeyInput,
     testProvider,
   } = useOnboardingStore();
 
@@ -111,9 +112,11 @@ export const OnboardingWizard: React.FC = () => {
               isTestingProvider={isTestingProvider}
               testResult={testResult}
               onTestProvider={testProvider}
-              onSubmitKey={submitProviderKey}
+              onRequestKeyInput={requestKeyInput}
               onComplete={completeStep}
               stepCompleting={stepCompleting}
+              isSavingKey={isSavingKey}
+              savedKeyProvider={savedKeyProvider}
             />
           )}
           {currentStep === "workspace" && (
@@ -222,9 +225,11 @@ interface ProviderStepProps {
   isTestingProvider: boolean;
   testResult: { provider: string; success: boolean; error?: string } | null;
   onTestProvider: (provider: string) => void;
-  onSubmitKey: (provider: string, apiKey: string) => void;
+  onRequestKeyInput: (provider: string) => void;
   onComplete: (step: number, data: Record<string, unknown>) => void;
   stepCompleting: boolean;
+  isSavingKey: boolean;
+  savedKeyProvider: string | null;
 }
 
 const ProviderStep: React.FC<ProviderStepProps> = ({
@@ -232,32 +237,34 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
   isTestingProvider,
   testResult,
   onTestProvider,
-  onSubmitKey,
+  onRequestKeyInput,
   onComplete,
   stepCompleting,
+  isSavingKey,
+  savedKeyProvider,
 }) => {
   const [selectedProvider, setSelectedProvider] = useState<string>("");
-  const [apiKey, setApiKey] = useState("");
 
   const handleProviderSelect = useCallback((id: string) => {
     setSelectedProvider(id);
-    setApiKey("");
   }, []);
 
-  const handleSave = useCallback(() => {
-    if (stepCompleting || !selectedProvider || !apiKey) return;
-    // Store key securely via dedicated command, then mark step complete
-    onSubmitKey(selectedProvider, apiKey);
-    onComplete(1, { provider: selectedProvider });
-    setApiKey(""); // clear local state immediately
-  }, [selectedProvider, apiKey, onSubmitKey, onComplete, stepCompleting]);
+  // When the key is saved, auto-complete the step
+  useEffect(() => {
+    if (savedKeyProvider) {
+      onComplete(1, { provider: savedKeyProvider });
+    }
+  }, [savedKeyProvider, onComplete]);
+
+  const handleEnterKey = useCallback(() => {
+    if (isSavingKey || !selectedProvider) return;
+    onRequestKeyInput(selectedProvider);
+  }, [selectedProvider, isSavingKey, onRequestKeyInput]);
 
   const handleTest = useCallback(() => {
-    if (!selectedProvider || !apiKey) return;
-    // Store the key first, then test from stored key
-    onSubmitKey(selectedProvider, apiKey);
+    if (!selectedProvider) return;
     onTestProvider(selectedProvider);
-  }, [selectedProvider, apiKey, onSubmitKey, onTestProvider]);
+  }, [selectedProvider, onTestProvider]);
 
   const alreadyConfigured = providers.filter((p) => p.configured);
 
@@ -276,6 +283,15 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
             key={p.id}
             $selected={selectedProvider === p.id}
             onClick={() => handleProviderSelect(p.id)}
+            onKeyDown={(e: React.KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                handleProviderSelect(p.id);
+              }
+            }}
+            tabIndex={0}
+            role="option"
+            aria-selected={selectedProvider === p.id}
           >
             <ProviderName>{p.name}</ProviderName>
             <ProviderStatus>
@@ -295,24 +311,22 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
 
       {selectedProvider && selectedProvider !== "local" && (
         <InputGroup style={{ marginTop: 16 }}>
-          <Label htmlFor="apiKeyInput">
+          <Label>
             API Key for{" "}
             {providers.find((p) => p.id === selectedProvider)?.name}
           </Label>
           <div style={{ display: "flex", gap: 8 }}>
-            <TextInput
-              id="apiKeyInput"
-              type="password"
-              placeholder="sk-... or your API key"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-              aria-label="API key input"
-            />
+            <PrimaryButton
+              onClick={handleEnterKey}
+              disabled={isSavingKey}
+              style={{ flex: 1 }}
+              aria-label="Enter API key securely"
+            >
+              {isSavingKey ? "Waiting for input..." : "Enter API Key"}
+            </PrimaryButton>
             <PrimaryButton
               onClick={handleTest}
-              disabled={!apiKey || isTestingProvider}
+              disabled={isTestingProvider}
               style={{ flexShrink: 0 }}
               aria-label="Test API key"
             >
@@ -329,16 +343,6 @@ const ProviderStep: React.FC<ProviderStepProps> = ({
                 </StatusBadge>
               )}
             </div>
-          )}
-          {apiKey && (
-            <PrimaryButton
-              onClick={handleSave}
-              disabled={stepCompleting}
-              style={{ marginTop: 12, width: "100%" }}
-              aria-label="Save API key and set as active provider"
-            >
-              {stepCompleting ? "Saving..." : "Save & Set as Active Provider"}
-            </PrimaryButton>
           )}
         </InputGroup>
       )}
@@ -498,6 +502,15 @@ const SecurityStep: React.FC<SecurityStepProps> = ({ onComplete, stepCompleting 
             key={p.id}
             $selected={selectedProfile === p.id}
             onClick={() => setSelectedProfile(p.id)}
+            onKeyDown={(e: React.KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setSelectedProfile(p.id);
+              }
+            }}
+            tabIndex={0}
+            role="option"
+            aria-selected={selectedProfile === p.id}
           >
             <ProfileName>
               {p.icon} {p.name}

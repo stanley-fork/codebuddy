@@ -170,9 +170,13 @@ export const WebviewUI = () => {
   useEffect(() => {
     vsCode.postMessage({ command: "request-chat-history" });
     vsCode.postMessage({ command: "notifications-get" });
-    // Trigger onboarding hydration — the handler will decide whether to show the wizard
-    useOnboardingStore.getState().hydrate();
   }, []);
+
+  // Trigger onboarding hydration — the handler will decide whether to show the wizard
+  const onboardingHydrate = useOnboardingStore((s) => s.hydrate);
+  useEffect(() => {
+    onboardingHydrate();
+  }, [onboardingHydrate]);
 
   // Highlight code blocks when messages update
   useEffect(() => {

@@ -37,11 +37,9 @@ export interface OnboardingStepResult {
 
 // ─── Constants ──────────────────────────────────────────
 
-const ONBOARDING_COMPLETED_KEY = "codebuddy.onboarding.completed";
-const ONBOARDING_VERSION_KEY = "codebuddy.onboarding.version";
+export const ONBOARDING_COMPLETED_KEY = "codebuddy.onboarding.completed";
+export const ONBOARDING_VERSION_KEY = "codebuddy.onboarding.version";
 const CURRENT_WIZARD_VERSION = 1;
-
-const STEP_COUNT = 5;
 
 /** Named step indices — shared with the handler to avoid magic numbers. */
 export const ONBOARDING_STEPS = {
@@ -131,19 +129,24 @@ const LANGUAGE_INDICATORS: Record<string, string[]> = {
   Swift: ["Package.swift", ".swift"],
 };
 
-const FRAMEWORK_INDICATORS: Record<string, string[]> = {
+/** npm/yarn dependency-based framework indicators (for package.json). */
+const NPM_FRAMEWORK_INDICATORS: Record<string, string[]> = {
   React: ["react", "react-dom"],
   "Next.js": ["next"],
   Vue: ["vue"],
   Angular: ["@angular/core"],
   Express: ["express"],
   NestJS: ["@nestjs/core"],
-  FastAPI: ["fastapi"],
-  Django: ["django"],
-  Flask: ["flask"],
   Spring: ["spring-boot"],
   Rails: ["rails"],
   Laravel: ["laravel"],
+};
+
+/** pip/poetry requirement-based framework indicators (for requirements.txt / pyproject.toml). */
+const PIP_FRAMEWORK_INDICATORS: Record<string, string[]> = {
+  FastAPI: ["fastapi"],
+  Django: ["django"],
+  Flask: ["flask"],
 };
 
 // ─── Service ────────────────────────────────────────────
@@ -204,10 +207,14 @@ export class OnboardingService implements vscode.Disposable {
       0,
     );
 
-    if (!completed) return true;
-    if (version < CURRENT_WIZARD_VERSION) return true;
+    return !completed || version < CURRENT_WIZARD_VERSION;
+  }
 
-    return false;
+  /**
+   * Returns true if the service has been properly initialized.
+   */
+  get isInitialized(): boolean {
+    return this.context !== undefined;
   }
 
   // ─── State ─────────────────────────────────────────────
@@ -308,6 +315,8 @@ export class OnboardingService implements vscode.Disposable {
     configured: boolean;
     isActive: boolean;
   }> {
+    if (!this.isInitialized) return [];
+
     const activeProvider = getConfigValue(APP_CONFIG.generativeAi) as
       | string
       | undefined;
@@ -433,14 +442,30 @@ export class OnboardingService implements vscode.Disposable {
             error: "No base URL configured for local provider",
           };
         }
+        // Validate URL before fetching (SSRF protection)
+        const validated = this.validateLocalBaseUrl(baseUrl);
+        if (!validated) {
+          return {
+            provider: providerId,
+            success: false,
+            latencyMs: Date.now() - start,
+            error:
+              "Base URL must point to a local address (localhost, 127.x.x.x, or LAN)",
+          };
+        }
+
         // Quick reachability check for local provider
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
         try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 5000);
-          const resp = await fetch(`${baseUrl}/v1/models`, {
-            signal: controller.signal,
-            method: "GET",
-          });
+          const resp = await fetch(
+            new URL("/v1/models", validated).toString(),
+            {
+              signal: controller.signal,
+              method: "GET",
+              headers: { Accept: "application/json" },
+            },
+          );
           clearTimeout(timeout);
           return {
             provider: providerId,
@@ -455,6 +480,8 @@ export class OnboardingService implements vscode.Disposable {
             latencyMs: Date.now() - start,
             error: err instanceof Error ? err.message : "Connection failed",
           };
+        } finally {
+          clearTimeout(timeout);
         }
       }
 
@@ -563,7 +590,7 @@ export class OnboardingService implements vscode.Disposable {
         ...(pkg.devDependencies || {}),
       };
 
-      for (const [fw, indicators] of Object.entries(FRAMEWORK_INDICATORS)) {
+      for (const [fw, indicators] of Object.entries(NPM_FRAMEWORK_INDICATORS)) {
         for (const indicator of indicators) {
           if (indicator in allDeps) {
             frameworks.push(fw);
@@ -579,7 +606,7 @@ export class OnboardingService implements vscode.Disposable {
     const reqPath = path.join(root, "requirements.txt");
     try {
       const raw = (await fs.readFile(reqPath, "utf-8")).toLowerCase();
-      for (const [fw, indicators] of Object.entries(FRAMEWORK_INDICATORS)) {
+      for (const [fw, indicators] of Object.entries(PIP_FRAMEWORK_INDICATORS)) {
         for (const indicator of indicators) {
           if (raw.includes(indicator)) {
             if (!frameworks.includes(fw)) frameworks.push(fw);
@@ -630,7 +657,19 @@ export class OnboardingService implements vscode.Disposable {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) return;
 
-    const rulesPath = path.join(folder.uri.fsPath, ".codebuddy", "rules.md");
+    const workspaceRoot = path.resolve(folder.uri.fsPath);
+    const rulesPath = path.resolve(
+      path.join(workspaceRoot, ".codebuddy", "rules.md"),
+    );
+
+    // Confinement check — ensure resolved path stays within workspace
+    if (!rulesPath.startsWith(workspaceRoot + path.sep)) {
+      this.logger.error(
+        `Path traversal detected: ${rulesPath} escapes ${workspaceRoot}`,
+      );
+      return;
+    }
+
     try {
       await fs.access(rulesPath);
       this.logger.info("Rules file already exists, skipping scaffold");
@@ -736,8 +775,41 @@ ${fwLine}
 
   // ─── Lifecycle ─────────────────────────────────────────
 
+  /**
+   * Validates that a URL is safe for local provider connectivity checks.
+   * Only allows loopback, localhost, and LAN addresses with http/https schemes.
+   */
+  private validateLocalBaseUrl(rawUrl: string): URL | null {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      return null;
+    }
+
+    const ALLOWED_SCHEMES = new Set(["http:", "https:"]);
+    if (!ALLOWED_SCHEMES.has(parsed.protocol)) {
+      this.logger.warn(`Blocked non-HTTP scheme: ${parsed.protocol}`);
+      return null;
+    }
+
+    // Allow only loopback, localhost, or private LAN addresses
+    const ALLOWED_HOSTS =
+      /^(localhost|127\.\d+\.\d+\.\d+|::1|0\.0\.0\.0|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/;
+    if (!ALLOWED_HOSTS.test(parsed.hostname)) {
+      this.logger.warn(
+        `Blocked remote host for local provider: ${parsed.hostname}`,
+      );
+      return null;
+    }
+
+    return parsed;
+  }
+
   dispose(): void {
     this.disposables.forEach((d) => d.dispose());
+    this.context = undefined;
+    this.secretStorage = undefined;
     OnboardingService.instance = undefined;
   }
 }
