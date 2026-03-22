@@ -148,35 +148,6 @@ export const SecondaryButton = styled.button`
 
 // ─── Cards & Lists ──────────────────────────────────────
 
-export const Card = styled.div<{ $selected?: boolean }>`
-  background: var(--vscode-input-background, #3c3c3c);
-  border: 1px solid
-    ${(p) =>
-      p.$selected
-        ? "var(--vscode-focusBorder, #007acc)"
-        : "var(--vscode-widget-border, #3c3c3c)"};
-  border-radius: 6px;
-  padding: 12px 16px;
-  cursor: pointer;
-  transition: border-color 0.15s ease;
-
-  &:hover {
-    border-color: var(--vscode-focusBorder, #007acc);
-  }
-`;
-
-export const CardTitle = styled.div`
-  color: var(--vscode-foreground, #ccc);
-  font-size: 13px;
-  font-weight: 500;
-`;
-
-export const CardDescription = styled.div`
-  color: var(--vscode-descriptionForeground, #888);
-  font-size: 12px;
-  margin-top: 4px;
-`;
-
 export const CardGrid = styled.div`
   display: flex;
   flex-direction: column;
