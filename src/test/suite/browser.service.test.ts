@@ -349,27 +349,55 @@ suite("BrowserService", () => {
     assert.strictEqual(result.content, "42");
   });
 
+  test("evaluate blocks eval()", async () => {
+    const svc = BrowserService.getInstance();
+    const result = await svc.evaluate("eval('malicious')");
+    assert.strictEqual(result.success, false);
+    assert.ok(result.content.includes("blocked pattern"));
+  });
+
+  test("evaluate blocks new Function()", async () => {
+    const svc = BrowserService.getInstance();
+    const result = await svc.evaluate("new Function('return 1')()");
+    assert.strictEqual(result.success, false);
+    assert.ok(result.content.includes("blocked pattern"));
+  });
+
+  test("evaluate blocks indexedDB", async () => {
+    const svc = BrowserService.getInstance();
+    const result = await svc.evaluate("indexedDB.open('test')");
+    assert.strictEqual(result.success, false);
+    assert.ok(result.content.includes("blocked pattern"));
+  });
+
+  test("evaluate blocks bracket notation cookie access", async () => {
+    const svc = BrowserService.getInstance();
+    const result = await svc.evaluate("document['cookie']");
+    assert.strictEqual(result.success, false);
+    assert.ok(result.content.includes("blocked pattern"));
+  });
+
   // ── input guard on ref/key ──────────────────────────────────────────
 
-  test("click rejects malicious ref", async () => {
+  test("click rejects ref with shell injection", async () => {
     const svc = BrowserService.getInstance();
     await assert.rejects(
-      () => svc.click("'; DROP TABLE users; --"),
+      () => svc.click("btn; rm -rf /"),
       /Invalid ref parameter/,
     );
     assert.ok(callToolStub.notCalled);
   });
 
-  test("type rejects malicious ref", async () => {
+  test("type rejects ref with pipe injection", async () => {
     const svc = BrowserService.getInstance();
     await assert.rejects(
-      () => svc.type("<script>alert(1)</script>", "text"),
+      () => svc.type("btn | cat /etc/passwd", "text"),
       /Invalid ref parameter/,
     );
     assert.ok(callToolStub.notCalled);
   });
 
-  test("hover rejects malicious ref", async () => {
+  test("hover rejects ref with template literal", async () => {
     const svc = BrowserService.getInstance();
     await assert.rejects(
       () => svc.hover("${process.env.SECRET}"),
@@ -386,10 +414,10 @@ suite("BrowserService", () => {
     assert.ok(callToolStub.notCalled);
   });
 
-  test("selectOption rejects malicious ref", async () => {
+  test("selectOption rejects ref with backtick injection", async () => {
     const svc = BrowserService.getInstance();
     await assert.rejects(
-      () => svc.selectOption("../../etc/passwd", "val"),
+      () => svc.selectOption("`whoami`", "val"),
       /Invalid ref parameter/,
     );
   });

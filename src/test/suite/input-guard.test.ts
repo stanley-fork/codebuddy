@@ -17,16 +17,28 @@ suite("InputGuard", () => {
     assert.strictEqual(assertSafeRef("el@attr"), "el@attr");
   });
 
-  test("rejects SQL injection in ref", () => {
+  test("accepts refs with spaces (Playwright accessibility tree)", () => {
+    assert.strictEqual(
+      assertSafeRef("heading 'Welcome'"),
+      "heading 'Welcome'",
+    );
+    assert.strictEqual(assertSafeRef("button 'Login'"), "button 'Login'");
+  });
+
+  test("accepts refs with Unicode characters", () => {
+    assert.strictEqual(assertSafeRef("button 'ログイン'"), "button 'ログイン'");
+  });
+
+  test("rejects shell injection in ref", () => {
     assert.throws(
-      () => assertSafeRef("'; DROP TABLE users; --"),
+      () => assertSafeRef("btn; rm -rf /"),
       InputGuardError,
     );
   });
 
-  test("rejects XSS in ref", () => {
+  test("rejects pipe injection in ref", () => {
     assert.throws(
-      () => assertSafeRef("<script>alert(1)</script>"),
+      () => assertSafeRef("btn | cat /etc/passwd"),
       InputGuardError,
     );
   });
@@ -38,12 +50,27 @@ suite("InputGuard", () => {
     );
   });
 
+  test("rejects backtick injection in ref", () => {
+    assert.throws(
+      () => assertSafeRef("`whoami`"),
+      InputGuardError,
+    );
+  });
+
   test("rejects empty ref", () => {
     assert.throws(() => assertSafeRef(""), InputGuardError);
   });
 
+  test("rejects whitespace-only ref", () => {
+    assert.throws(() => assertSafeRef("   "), InputGuardError);
+  });
+
   test("rejects overlong ref", () => {
-    assert.throws(() => assertSafeRef("a".repeat(257)), InputGuardError);
+    assert.throws(() => assertSafeRef("a".repeat(513)), InputGuardError);
+  });
+
+  test("rejects null byte in ref", () => {
+    assert.throws(() => assertSafeRef("btn\x00evil"), InputGuardError);
   });
 
   // ── assertSafeKey ─────────────────────────────────────────────────
@@ -73,20 +100,24 @@ suite("InputGuard", () => {
   });
 
   test("InputGuardError has correct code property", () => {
-    try {
-      assertSafeRef("<evil>");
-    } catch (err) {
-      assert.ok(err instanceof InputGuardError);
-      assert.strictEqual(err.code, "INVALID_REF");
-    }
+    assert.throws(
+      () => assertSafeRef(""),
+      (err: unknown): err is InputGuardError => {
+        assert.ok(err instanceof InputGuardError, "Expected InputGuardError");
+        assert.strictEqual(err.code, "INVALID_REF");
+        return true;
+      },
+    );
   });
 
   test("InputGuardError key code", () => {
-    try {
-      assertSafeKey("");
-    } catch (err) {
-      assert.ok(err instanceof InputGuardError);
-      assert.strictEqual(err.code, "INVALID_KEY");
-    }
+    assert.throws(
+      () => assertSafeKey(""),
+      (err: unknown): err is InputGuardError => {
+        assert.ok(err instanceof InputGuardError, "Expected InputGuardError");
+        assert.strictEqual(err.code, "INVALID_KEY");
+        return true;
+      },
+    );
   });
 });
