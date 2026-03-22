@@ -453,6 +453,9 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
         case "onboarding-completed":
           useOnboardingStore.getState().setVisible(false);
           break;
+        case "onboarding-request-hydrate":
+          useOnboardingStore.getState().hydrate();
+          break;
 
         default:
           break;

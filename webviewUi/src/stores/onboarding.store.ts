@@ -38,7 +38,7 @@ export type OnboardingStep =
   | "security"
   | "firstTask";
 
-const STEP_ORDER: OnboardingStep[] = [
+export const STEP_ORDER: OnboardingStep[] = [
   "welcome",
   "provider",
   "workspace",
@@ -67,11 +67,12 @@ interface OnboardingState {
   prevStep: () => void;
   goToStep: (step: OnboardingStep) => void;
   completeStep: (step: number, data: Record<string, unknown>) => void;
-  testProvider: (provider: string, apiKey?: string) => void;
+  submitProviderKey: (provider: string, apiKey: string) => void;
+  testProvider: (provider: string) => void;
   detectProject: () => void;
   setVisible: (visible: boolean) => void;
   setProviders: (providers: ProviderInfo[]) => void;
-  setProjectInfo: (info: ProjectInfo) => void;
+  setProjectInfo: (info: ProjectInfo | null) => void;
   setSuggestedTasks: (tasks: SuggestedTask[]) => void;
   setTestResult: (result: ProviderTestResult | null) => void;
   setTestingProvider: (testing: boolean) => void;
@@ -134,19 +135,31 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
 
   completeStep: (step, data) => {
     set({ stepCompleting: true });
+    // Strip secrets — extension host handles key storage via submitProviderKey
+    const safeData = { ...data };
+    if ("apiKey" in safeData) {
+      delete safeData.apiKey;
+    }
     vscode.postMessage({
       command: "onboarding-step-complete",
       step,
-      data,
+      data: safeData,
     });
   },
 
-  testProvider: (provider, apiKey) => {
+  submitProviderKey: (provider, apiKey) => {
+    vscode.postMessage({
+      command: "onboarding-store-provider-key",
+      provider,
+      apiKey,
+    });
+  },
+
+  testProvider: (provider) => {
     set({ isTestingProvider: true, testResult: null });
     vscode.postMessage({
       command: "onboarding-test-provider",
       provider,
-      apiKey,
     });
   },
 
