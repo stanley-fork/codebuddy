@@ -22,12 +22,16 @@
 import { Logger, LogLevel } from "../infrastructure/logger/logger";
 import { MCPService } from "../MCP/service";
 import { MCPToolResult } from "../MCP/types";
-import { assertNavigationAllowed } from "./navigation-guard";
+import {
+  assertNavigationAllowed,
+  NavigationGuardError,
+} from "./navigation-guard";
 import { assertSafeRef, assertSafeKey } from "./input-guard";
 
 const MCP_SERVER = "playwright";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_EXPRESSION_LENGTH = 4096;
+const EXPRESSION_AUDIT_THRESHOLD = MAX_EXPRESSION_LENGTH * 0.75; // 3072 chars
 const MIN_WAIT_MS = 0;
 const MAX_WAIT_MS = 30_000;
 
@@ -35,6 +39,8 @@ const MAX_WAIT_MS = 30_000;
  * Patterns that indicate potentially dangerous JS expressions.
  * Blocked at the service layer as defense-in-depth (the MCP sandbox
  * is the primary isolation boundary).
+ *
+ * Covers both dot-notation and bracket-notation access where applicable.
  */
 const DANGEROUS_EXPRESSION_PATTERNS = [
   /\bfetch\s*\(/i,
@@ -42,9 +48,14 @@ const DANGEROUS_EXPRESSION_PATTERNS = [
   /\bnew\s+WebSocket\b/i,
   /\bnavigator\.sendBeacon\b/i,
   /\bimport\s*\(/i,
-  /\bdocument\.cookie\b/i,
+  // Cookie access — dot and bracket notation
+  /\bdocument\s*(?:\.\s*cookie|\[\s*['"`]cookie['"`]\s*\])/i,
   /\blocalStorage\b/i,
   /\bsessionStorage\b/i,
+  /\bindexedDB\b/i,
+  // Eval vectors that can obfuscate the above
+  /\beval\s*\(/i,
+  /\bnew\s+Function\s*\(/i,
 ];
 
 export interface BrowserActionResult {
@@ -116,6 +127,10 @@ export class BrowserService {
   private readonly mcp: MCPService;
   private readonly logger: Logger;
 
+  /** Pre-approved constant for the post-navigation hostname check. */
+  private static readonly HOSTNAME_CHECK_EXPRESSION =
+    "window.location.hostname" as const;
+
   private constructor(mcp?: MCPService, logger?: Logger) {
     this.mcp = mcp ?? MCPService.getInstance();
     this.logger =
@@ -157,34 +172,52 @@ export class BrowserService {
     );
     const parsed = parseResult(result);
 
-    // Post-navigation DNS rebinding check (best-effort)
     if (parsed.success) {
-      try {
-        const hostnameResult = await withTimeout(
-          this.mcp.callTool(
-            "browser_evaluate",
-            { expression: "window.location.hostname" },
-            MCP_SERVER,
-          ),
-          5_000,
-          "post-navigate-hostname-check",
-        );
-        const resolvedHost = parseResult(hostnameResult).content.trim();
-        if (resolvedHost) {
-          assertNavigationAllowed(`https://${resolvedHost}/`);
-        }
-      } catch (err) {
-        this.logger.warn(
-          "Post-navigation hostname check failed — possible DNS rebinding",
-          {
-            url: safeUrl,
-            error: err instanceof Error ? err.message : String(err),
-          },
-        );
-      }
+      await this.performPostNavigationHostnameCheck(safeUrl);
     }
 
     return parsed;
+  }
+
+  /**
+   * Post-navigation DNS rebinding check.
+   * Uses a hardcoded, pre-approved expression — NOT routed through evaluate()
+   * to avoid triggering the user-expression audit log on an internal call.
+   * Re-throws NavigationGuardErrors (active SSRF); swallows other errors
+   * (MCP timeout, parse failure) as best-effort.
+   */
+  private async performPostNavigationHostnameCheck(
+    navigatedUrl: string,
+  ): Promise<void> {
+    try {
+      const hostnameResult = await withTimeout(
+        this.mcp.callTool(
+          "browser_evaluate",
+          { expression: BrowserService.HOSTNAME_CHECK_EXPRESSION },
+          MCP_SERVER,
+        ),
+        5_000,
+        "post-navigate-hostname-check",
+      );
+      const resolvedHost = parseResult(hostnameResult).content.trim();
+      if (resolvedHost) {
+        assertNavigationAllowed(`https://${resolvedHost}/`);
+      }
+    } catch (err) {
+      // Re-throw NavigationGuardErrors — they indicate active SSRF
+      if (err instanceof NavigationGuardError) {
+        this.logger.warn(
+          "Post-navigation hostname check detected DNS rebinding",
+          { url: navigatedUrl, error: err.message },
+        );
+        throw err;
+      }
+      // Other errors (MCP timeout, parse failure) are best-effort
+      this.logger.warn("Post-navigation hostname check failed", {
+        url: navigatedUrl,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   async click(ref: string): Promise<BrowserActionResult> {
@@ -289,12 +322,17 @@ export class BrowserService {
     }
 
     // Audit log — security-critical operation
-    this.logger.warn(
-      `browser_evaluate — expression length=${expression.length}`,
-      {
-        expressionPreview: expression.slice(0, 120),
-      },
-    );
+    if (expression.length > EXPRESSION_AUDIT_THRESHOLD) {
+      this.logger.warn(
+        `browser_evaluate — large expression (${expression.length} chars)`,
+        { expressionPreview: expression.slice(0, 120) },
+      );
+    } else {
+      this.logger.info(
+        `browser_evaluate — expression length=${expression.length}`,
+        { expressionPreview: expression.slice(0, 120) },
+      );
+    }
 
     const result = await withTimeout(
       this.mcp.callTool("browser_evaluate", { expression }, MCP_SERVER),

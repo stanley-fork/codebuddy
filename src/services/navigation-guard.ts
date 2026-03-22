@@ -25,6 +25,8 @@ const BLOCKED_HOSTNAME_PATTERNS: RegExp[] = [
   // Unspecified address
   /^0\.0\.0\.0$/,
   /^::$/,
+  // Octal/decimal encoding of 0.0.0.0 — URL parser may normalise these
+  /^0+$/,
   // RFC 1918 private ranges
   /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/,
   /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/,
@@ -39,12 +41,70 @@ const BLOCKED_HOSTNAME_PATTERNS: RegExp[] = [
   /^::ffff:(10\.|127\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.)/i,
 ];
 
+/**
+ * Parse the hostname as an IPv4 address and check against private ranges.
+ * Catches octal (0177.0.0.1), decimal (2130706433), and hex (0x7f000001)
+ * representations that the regex-based patterns would miss.
+ */
+function isPrivateIPv4Numeric(hostname: string): boolean {
+  // Attempt to detect numeric-encoded IPs by checking if the hostname
+  // consists only of digits, dots, 'x', octal digits, or hex chars
+  if (!/^[0-9a-fA-Fx.]+$/.test(hostname)) return false;
+
+  // Try to interpret as a numeric IP (decimal, octal, hex) by parsing
+  // each dotted component or the whole number
+  let ip: number;
+  if (hostname.includes(".")) {
+    const parts = hostname.split(".");
+    if (parts.length !== 4) return false;
+    const octets = parts.map((p) => {
+      if (p.startsWith("0x") || p.startsWith("0X")) return parseInt(p, 16);
+      if (p.startsWith("0") && p.length > 1) return parseInt(p, 8);
+      return parseInt(p, 10);
+    });
+    if (octets.some((o) => isNaN(o) || o < 0 || o > 255)) return false;
+    ip =
+      ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>>
+      0;
+  } else {
+    // Single number — decimal or hex (e.g. 2130706433 = 127.0.0.1)
+    ip =
+      hostname.startsWith("0x") || hostname.startsWith("0X")
+        ? parseInt(hostname, 16)
+        : parseInt(hostname, 10);
+    if (isNaN(ip) || ip < 0 || ip > 0xffffffff) return false;
+    ip = ip >>> 0;
+  }
+
+  // Check against private/reserved ranges
+  const a = (ip >>> 24) & 0xff;
+  const b = (ip >>> 16) & 0xff;
+  // 0.0.0.0
+  if (ip === 0) return true;
+  // 127.0.0.0/8
+  if (a === 127) return true;
+  // 10.0.0.0/8
+  if (a === 10) return true;
+  // 172.16.0.0/12
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  // 192.168.0.0/16
+  if (a === 192 && b === 168) return true;
+  // 169.254.0.0/16
+  if (a === 169 && b === 254) return true;
+
+  return false;
+}
+
 function isBlockedHostname(hostname: string): boolean {
-  return BLOCKED_HOSTNAME_PATTERNS.some((pattern) => pattern.test(hostname));
+  if (BLOCKED_HOSTNAME_PATTERNS.some((pattern) => pattern.test(hostname))) {
+    return true;
+  }
+  return isPrivateIPv4Numeric(hostname);
 }
 
 const MAX_HOSTNAME_LENGTH = 253;
 const MAX_PATHNAME_LENGTH = 2048;
+const MAX_TOTAL_URL_LENGTH = 8192;
 
 export class NavigationGuardError extends Error {
   constructor(
@@ -66,6 +126,14 @@ export class NavigationGuardError extends Error {
  * Returns a normalised URL string on success.
  */
 export function assertNavigationAllowed(rawUrl: string): string {
+  // Check total length before parsing — avoids ReDoS on huge inputs
+  if (rawUrl.length > MAX_TOTAL_URL_LENGTH) {
+    throw new NavigationGuardError(
+      `URL exceeds maximum total length (${MAX_TOTAL_URL_LENGTH})`,
+      "URL_TOO_LONG",
+    );
+  }
+
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);

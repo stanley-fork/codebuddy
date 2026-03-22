@@ -522,7 +522,76 @@ export class DeepTerminalTool {
 
 // BrowserAction type imported from ./browser-actions (single source of truth)
 
+function assertNever(x: never): never {
+  throw new Error(`Unhandled browser action: ${JSON.stringify(x)}`);
+}
+
 export class BrowserTool {
+  private async dispatchAction(
+    browser: BrowserService,
+    input: {
+      action: BrowserAction;
+      url?: string;
+      ref?: string;
+      text?: string;
+      value?: string;
+      expression?: string;
+      key?: string;
+      time?: number;
+    },
+  ): Promise<BrowserActionResult> {
+    switch (input.action) {
+      case "navigate":
+        if (!input.url) throw new Error("url is required for navigate action.");
+        return browser.navigate(input.url);
+      case "click":
+        if (!input.ref)
+          throw new Error(
+            "ref is required for click action. Use snapshot first to get element refs.",
+          );
+        return browser.click(input.ref);
+      case "type":
+        if (!input.ref) throw new Error("ref is required for type action.");
+        if (!input.text) throw new Error("text is required for type action.");
+        return browser.type(input.ref, input.text);
+      case "screenshot":
+        return browser.screenshot();
+      case "snapshot":
+        return browser.snapshot();
+      case "evaluate":
+        if (!input.expression)
+          throw new Error("expression is required for evaluate action.");
+        return browser.evaluate(input.expression);
+      case "hover":
+        if (!input.ref) throw new Error("ref is required for hover action.");
+        return browser.hover(input.ref);
+      case "select_option":
+        if (!input.ref)
+          throw new Error("ref is required for select_option action.");
+        if (!input.value)
+          throw new Error("value is required for select_option action.");
+        return browser.selectOption(input.ref, input.value);
+      case "press_key":
+        if (!input.key)
+          throw new Error("key is required for press_key action.");
+        return browser.pressKey(input.key);
+      case "go_back":
+        return browser.goBack();
+      case "go_forward":
+        return browser.goForward();
+      case "wait":
+        return browser.wait(input.time ?? 2000);
+      case "tab_list":
+        return browser.tabList();
+      case "tab_new":
+        return browser.tabNew(input.url);
+      case "tab_close":
+        return browser.tabClose();
+      default:
+        return assertNever(input.action);
+    }
+  }
+
   public async execute(input: {
     action: BrowserAction;
     url?: string;
@@ -534,72 +603,8 @@ export class BrowserTool {
     time?: number;
   }): Promise<string> {
     const browser = BrowserService.getInstance();
-    let result: BrowserActionResult;
-
     try {
-      switch (input.action) {
-        case "navigate":
-          if (!input.url) return "Error: url is required for navigate action.";
-          result = await browser.navigate(input.url);
-          break;
-        case "click":
-          if (!input.ref)
-            return "Error: ref is required for click action. Use snapshot first to get element refs.";
-          result = await browser.click(input.ref);
-          break;
-        case "type":
-          if (!input.ref) return "Error: ref is required for type action.";
-          if (!input.text) return "Error: text is required for type action.";
-          result = await browser.type(input.ref, input.text);
-          break;
-        case "screenshot":
-          result = await browser.screenshot();
-          break;
-        case "snapshot":
-          result = await browser.snapshot();
-          break;
-        case "evaluate":
-          if (!input.expression)
-            return "Error: expression is required for evaluate action.";
-          result = await browser.evaluate(input.expression);
-          break;
-        case "hover":
-          if (!input.ref) return "Error: ref is required for hover action.";
-          result = await browser.hover(input.ref);
-          break;
-        case "select_option":
-          if (!input.ref)
-            return "Error: ref is required for select_option action.";
-          if (!input.value)
-            return "Error: value is required for select_option action.";
-          result = await browser.selectOption(input.ref, input.value);
-          break;
-        case "press_key":
-          if (!input.key) return "Error: key is required for press_key action.";
-          result = await browser.pressKey(input.key);
-          break;
-        case "go_back":
-          result = await browser.goBack();
-          break;
-        case "go_forward":
-          result = await browser.goForward();
-          break;
-        case "wait":
-          result = await browser.wait(input.time ?? 2000);
-          break;
-        case "tab_list":
-          result = await browser.tabList();
-          break;
-        case "tab_new":
-          result = await browser.tabNew(input.url);
-          break;
-        case "tab_close":
-          result = await browser.tabClose();
-          break;
-        default:
-          return `Error: Unknown action "${input.action}".`;
-      }
-
+      const result = await this.dispatchAction(browser, input);
       if (result.imageData) {
         return `[Screenshot captured: ${result.imageData.mimeType}]\n${result.content}`;
       }

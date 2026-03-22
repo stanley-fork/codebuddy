@@ -121,6 +121,43 @@ suite("NavigationGuard", () => {
       );
     });
 
+    // ── Octal/decimal IP bypass vectors ─────────────────────────────────
+
+    test("blocks octal-encoded 127.0.0.1 (0177.0.0.1)", () => {
+      assert.throws(
+        () => assertNavigationAllowed("http://0177.0.0.1"),
+        (err: NavigationGuardError) => err.code === "BLOCKED_HOST",
+      );
+    });
+
+    test("blocks decimal-encoded 127.0.0.1 (2130706433)", () => {
+      assert.throws(
+        () => assertNavigationAllowed("http://2130706433"),
+        (err: NavigationGuardError) => err.code === "BLOCKED_HOST",
+      );
+    });
+
+    test("blocks hex-encoded 127.0.0.1 (0x7f000001)", () => {
+      assert.throws(
+        () => assertNavigationAllowed("http://0x7f000001"),
+        (err: NavigationGuardError) => err.code === "BLOCKED_HOST",
+      );
+    });
+
+    test("blocks 127.1.2.3 (127.x.x.x loopback range)", () => {
+      assert.throws(
+        () => assertNavigationAllowed("http://127.1.2.3"),
+        (err: NavigationGuardError) => err.code === "BLOCKED_HOST",
+      );
+    });
+
+    test("blocks octal-encoded 10.0.0.1 (012.0.0.1)", () => {
+      assert.throws(
+        () => assertNavigationAllowed("http://012.0.0.1"),
+        (err: NavigationGuardError) => err.code === "BLOCKED_HOST",
+      );
+    });
+
     // ── IPv6 bypass vectors ─────────────────────────────────────────────
 
     test("blocks [::] (unspecified IPv6)", () => {
@@ -199,6 +236,14 @@ suite("NavigationGuard", () => {
       const longPath = "/" + "a".repeat(2049);
       assert.throws(
         () => assertNavigationAllowed(`http://example.com${longPath}`),
+        (err: NavigationGuardError) => err.code === "URL_TOO_LONG",
+      );
+    });
+
+    test("rejects URL exceeding total length limit", () => {
+      const longQuery = "?" + "q=".padEnd(9000, "a");
+      assert.throws(
+        () => assertNavigationAllowed(`http://example.com/${longQuery}`),
         (err: NavigationGuardError) => err.code === "URL_TOO_LONG",
       );
     });
