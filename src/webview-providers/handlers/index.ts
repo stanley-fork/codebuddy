@@ -23,3 +23,5 @@ export { CostTrackingHandler } from "./cost-tracking-handler";
 export { TerminalViewerHandler } from "./terminal-viewer-handler";
 export { DoctorHandler } from "./doctor-handler";
 export { OnboardingHandler } from "./onboarding-handler";
+export { GitStatusHandler } from "./git-status-handler";
+export { TestRunnerHandler } from "./test-runner-handler";

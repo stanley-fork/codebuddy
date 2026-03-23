@@ -160,9 +160,9 @@ const NotesTextArea = styled.textarea`
 `;
 
 const IngestButton = styled.button<{ $loading?: boolean }>`
-  background: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
-  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--vscode-foreground);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
   padding: 6px 14px;
   cursor: ${(p) => (p.$loading ? "wait" : "pointer")};
@@ -174,7 +174,7 @@ const IngestButton = styled.button<{ $loading?: boolean }>`
   transition: all 0.15s ease;
 
   &:hover:not(:disabled) {
-    background: var(--vscode-button-hoverBackground);
+    background: rgba(255, 255, 255, 0.14);
   }
 
   &:disabled {

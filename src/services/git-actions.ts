@@ -28,7 +28,7 @@ export class GitActions {
       baseDir: this.rootPath,
     };
     this.git = simpleGit(options);
-    this.logger = Logger.initialize(GitActions.name, {
+    this.logger = Logger.initialize("GitActions", {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,
       enableFile: true,

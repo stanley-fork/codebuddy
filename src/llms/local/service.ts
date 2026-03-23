@@ -13,7 +13,7 @@ export class LocalModelService {
   private static instance: LocalModelService;
 
   constructor() {
-    this.logger = Logger.initialize(LocalModelService.name, {
+    this.logger = Logger.initialize("LocalModelService", {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,
       enableFile: true,

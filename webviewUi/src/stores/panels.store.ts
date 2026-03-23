@@ -11,6 +11,7 @@ interface PanelState {
   isTeamPanelOpen: boolean;
   isCostDashboardOpen: boolean;
   isTerminalViewerOpen: boolean;
+  isTestRunnerOpen: boolean;
 
   openSettings: () => void;
   closeSettings: () => void;
@@ -32,6 +33,8 @@ interface PanelState {
   closeCostDashboard: () => void;
   openTerminalViewer: () => void;
   closeTerminalViewer: () => void;
+  openTestRunner: () => void;
+  closeTestRunner: () => void;
 }
 
 export const usePanelStore = create<PanelState>()((set) => ({
@@ -45,6 +48,7 @@ export const usePanelStore = create<PanelState>()((set) => ({
   isTeamPanelOpen: false,
   isCostDashboardOpen: false,
   isTerminalViewerOpen: false,
+  isTestRunnerOpen: false,
 
   openSettings: () => set({ isSettingsOpen: true }),
   closeSettings: () => set({ isSettingsOpen: false }),
@@ -67,4 +71,6 @@ export const usePanelStore = create<PanelState>()((set) => ({
   closeCostDashboard: () => set({ isCostDashboardOpen: false }),
   openTerminalViewer: () => set({ isTerminalViewerOpen: true }),
   closeTerminalViewer: () => set({ isTerminalViewerOpen: false }),
+  openTestRunner: () => set({ isTestRunnerOpen: true }),
+  closeTestRunner: () => set({ isTestRunnerOpen: false }),
 }));
