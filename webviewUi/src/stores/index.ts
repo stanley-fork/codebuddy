@@ -10,3 +10,4 @@ export { useSessionsStore } from "./sessions.store";
 export { useNotificationsStore } from "./notifications.store";
 export { useContentStore } from "./content.store";
 export { useChatStore } from "./chat.store";
+export { useTeamStore } from "./team.store";

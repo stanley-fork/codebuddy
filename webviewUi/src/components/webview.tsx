@@ -41,6 +41,7 @@ import { NotificationPanel } from "./notifications";
 import { UpdatesPanel } from "./updates/UpdatesPanel";
 import { ObservabilityPanel } from "./observability/ObservabilityPanel";
 import { CoWorkerPanel } from "./coworker/CoWorkerPanel";
+import { TeamPanel } from "./team/TeamPanel";
 import { BrowserPanel } from "./browser/BrowserPanel";
 import { PanelErrorBoundary } from "./PanelErrorBoundary";
 import { OnboardingWizard } from "./onboarding/OnboardingWizard";
@@ -54,6 +55,7 @@ import {
   ObservabilityToggleButton,
   BrowserToggleButton,
   CoWorkerToggleButton,
+  TeamToggleButton,
   FontSizeGroup,
   FontSizeButton,
   SessionsIcon,
@@ -62,6 +64,7 @@ import {
   BrowserIcon,
   CoWorkerIcon,
   ObservabilityIcon,
+  TeamIcon,
 } from "./webview.styles";
 
 const hljsApi = window["hljs" as any] as unknown as typeof hljs;
@@ -93,6 +96,7 @@ export const WebviewUI = () => {
   const isObservabilityOpen = usePanelStore((s) => s.isObservabilityOpen);
   const isCoWorkerOpen = usePanelStore((s) => s.isCoWorkerOpen);
   const isBrowserPanelOpen = usePanelStore((s) => s.isBrowserPanelOpen);
+  const isTeamPanelOpen = usePanelStore((s) => s.isTeamPanelOpen);
 
   // Onboarding
   const onboardingVisible = useOnboardingStore((s) => s.isVisible);
@@ -342,6 +346,14 @@ export const WebviewUI = () => {
           <CoWorkerIcon size={14} />
         </CoWorkerToggleButton>
 
+        <TeamToggleButton
+          onClick={() => usePanelStore.getState().openTeamPanel()}
+          aria-label="Open team graph"
+          title="Team Graph"
+        >
+          <TeamIcon size={14} />
+        </TeamToggleButton>
+
         <FontSizeGroup>
           <FontSizeButton onClick={() => useSettingsStore.getState().handleIncreaseFontSize()} title="Increase Font Size">
             A+
@@ -443,6 +455,14 @@ export const WebviewUI = () => {
         onDependencyCheckChange={settingsHandlers.onDependencyCheckChange}
         onGitWatchdogChange={settingsHandlers.onGitWatchdogChange}
         onEndOfDaySummaryChange={settingsHandlers.onEndOfDaySummaryChange}
+      />
+      </PanelErrorBoundary>
+
+      {/* Team Graph Panel */}
+      <PanelErrorBoundary fallbackLabel="Team Graph">
+      <TeamPanel
+        isOpen={isTeamPanelOpen}
+        onClose={() => usePanelStore.getState().closeTeamPanel()}
       />
       </PanelErrorBoundary>
 
