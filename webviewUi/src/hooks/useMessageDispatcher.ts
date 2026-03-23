@@ -547,6 +547,15 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
             .appendOutput(message.sessionId ?? "", message.output ?? "");
           break;
 
+        case "terminal-error":
+          useTerminalStore
+            .getState()
+            .setError(
+              message.sessionId ?? null,
+              message.error ?? "Unknown error",
+            );
+          break;
+
         default:
           break;
       }

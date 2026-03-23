@@ -59,7 +59,23 @@ export class TerminalViewerHandler implements WebviewMessageHandler {
 
       case "terminal-session-history": {
         const sessionId = message.sessionId;
+        if (typeof sessionId !== "string" || sessionId.trim() === "") {
+          await ctx.webview.webview.postMessage({
+            type: "terminal-error",
+            sessionId: null,
+            error: "Invalid session ID provided.",
+          });
+          return;
+        }
         const history = service.getFullHistory(sessionId);
+        if (history === null) {
+          await ctx.webview.webview.postMessage({
+            type: "terminal-error",
+            sessionId,
+            error: `Terminal session '${sessionId}' not found.`,
+          });
+          return;
+        }
         await ctx.webview.webview.postMessage({
           type: "terminal-session-history-result",
           sessionId,
@@ -70,7 +86,23 @@ export class TerminalViewerHandler implements WebviewMessageHandler {
 
       case "terminal-session-output": {
         const sessionId = message.sessionId;
+        if (typeof sessionId !== "string" || sessionId.trim() === "") {
+          await ctx.webview.webview.postMessage({
+            type: "terminal-error",
+            sessionId: null,
+            error: "Invalid session ID provided.",
+          });
+          return;
+        }
         const output = service.readOutput(sessionId);
+        if (output === null) {
+          await ctx.webview.webview.postMessage({
+            type: "terminal-error",
+            sessionId,
+            error: `Terminal session '${sessionId}' not found.`,
+          });
+          return;
+        }
         await ctx.webview.webview.postMessage({
           type: "terminal-session-output-result",
           sessionId,
