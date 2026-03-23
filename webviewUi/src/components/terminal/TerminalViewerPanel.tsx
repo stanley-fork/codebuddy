@@ -33,6 +33,7 @@ const PanelOverlay = styled.div<{ $isOpen: boolean }>`
 
 const PanelContainer = styled.div`
   width: 520px;
+  max-width: 100%;
   height: 100%;
   background: var(--vscode-editor-background);
   border-left: 1px solid var(--vscode-widget-border);

@@ -50,6 +50,7 @@ const Panel = styled.div<{ $isOpen: boolean }>`
   display: flex;
   flex-direction: column;
   box-shadow: -4px 0 24px rgba(0, 0, 0, 0.4);
+  max-width: 100%;
 `;
 
 const Header = styled.div`
