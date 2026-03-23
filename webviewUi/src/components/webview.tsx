@@ -517,13 +517,7 @@ export const WebviewUI = () => {
                 <div style={{ minWidth: 0, maxWidth: "100%" }}>
                   {/* Show welcome screen when there are no messages */}
                   {streamedMessages.length === 0 && !isBotLoading && !isCommandExecuting ? (
-                    <WelcomeScreen
-                      username={username}
-                      onGetStarted={() => {
-                        // Optional: Focus on the input or trigger a sample prompt
-                        console.log("User is ready to start!");
-                      }}
-                    />
+                    <WelcomeScreen username={username} />
                   ) : (
                     <>
                       {memoizedMessages}

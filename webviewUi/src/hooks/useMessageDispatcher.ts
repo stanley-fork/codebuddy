@@ -491,10 +491,11 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
         // ── Onboarding ──
         case "onboarding-state": {
           const ob = useOnboardingStore.getState();
+          ob.setCompleted(message.data?.completed ?? false);
+          ob.setProviders(message.data?.providers ?? []);
+          ob.setProjectInfo(message.data?.projectInfo ?? null);
+          ob.setSuggestedTasks(message.data?.suggestedTasks ?? []);
           if (message.data?.shouldShow) {
-            ob.setProviders(message.data.providers ?? []);
-            ob.setProjectInfo(message.data.projectInfo ?? null);
-            ob.setSuggestedTasks(message.data.suggestedTasks ?? []);
             ob.show();
           }
           break;
@@ -525,6 +526,7 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
         }
         case "onboarding-completed":
           useOnboardingStore.getState().setVisible(false);
+          useOnboardingStore.getState().setCompleted(true);
           break;
         case "onboarding-request-hydrate":
           useOnboardingStore.getState().hydrate();
