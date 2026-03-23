@@ -14,6 +14,8 @@ import { useOnboardingStore } from "../stores/onboarding.store";
 import { useTeamStore } from "../stores/team.store";
 import { useCostStore } from "../stores/cost.store";
 import { useTerminalStore } from "../stores/terminal.store";
+import { useGitStore } from "../stores/git.store";
+import { useTestRunnerStore } from "../stores/testRunner.store";
 import type { IWebviewMessage } from "./useStreamingChat";
 
 interface ConfigData {
@@ -556,6 +558,33 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
               message.sessionId ?? null,
               message.error ?? "Unknown error",
             );
+          break;
+
+        // ── Git Status ──
+        case "git-status-result":
+          useGitStore.getState().setStatus({
+            branch: message.branch ?? null,
+            upstream: message.upstream ?? null,
+            changedFiles: message.changedFiles ?? 0,
+            staged: message.staged ?? 0,
+            ahead: message.ahead ?? 0,
+            behind: message.behind ?? 0,
+          });
+          break;
+
+        // ── Test Runner ──
+        case "test-run-started":
+          useTestRunnerStore.getState().setRunning();
+          break;
+
+        case "test-run-result":
+          useTestRunnerStore.getState().setResult(message.result);
+          break;
+
+        case "test-run-error":
+          useTestRunnerStore
+            .getState()
+            .setError(message.error ?? "Test run failed");
           break;
 
         default:

@@ -121,18 +121,30 @@ class JestVitestStrategy implements TestFrameworkStrategy {
   }
 
   parseCounts(output: string) {
-    // "Tests: 3 passed, 1 failed, 4 total"
-    const m = output.match(
-      /Tests:\s*(?:(\d+)\s*failed,?\s*)?(?:(\d+)\s*skipped,?\s*)?(?:(\d+)\s*passed,?\s*)?(\d+)\s*total/i,
-    );
-    if (!m) return null;
-    return {
-      failed: parseInt(m[1] || "0"),
-      skipped: parseInt(m[2] || "0"),
-      passed: parseInt(m[3] || "0"),
-      total: parseInt(m[4] || "0"),
-      duration: "unknown",
-    };
+    // Match the Jest/Vitest summary line: "Tests:  N passed, N failed, N total"
+    // Fields can appear in any order, so extract each independently.
+    const summaryMatch = output.match(/Tests:\s*(.+?)\s*total/i);
+    if (!summaryMatch) return null;
+
+    const line = summaryMatch[0];
+    const passedM = line.match(/(\d+)\s*passed/i);
+    const failedM = line.match(/(\d+)\s*failed/i);
+    const skippedM = line.match(/(\d+)\s*(?:skipped|pending|todo)/i);
+    const totalM = line.match(/(\d+)\s*total/i);
+
+    if (!totalM) return null;
+
+    const passed = passedM ? parseInt(passedM[1]) : 0;
+    const failed = failedM ? parseInt(failedM[1]) : 0;
+    const skipped = skippedM ? parseInt(skippedM[1]) : 0;
+    const total = parseInt(totalM[1]);
+
+    // Duration: "Time:  20.56 s" or "Time: 1.234s"
+    let duration = "unknown";
+    const durMatch = output.match(/Time:\s*([\d.]+\s*m?s)/i);
+    if (durMatch) duration = durMatch[1].trim();
+
+    return { failed, skipped, passed, total, duration };
   }
 
   parseFailures(output: string): TestFailure[] {

@@ -22,7 +22,7 @@ export class DockerModelService implements vscode.Disposable {
   private static readonly DAEMON_CHECK_COOLDOWN_MS = 15_000; // Re-check at most once per 15 seconds
 
   constructor() {
-    this.logger = Logger.initialize(DockerModelService.name, {
+    this.logger = Logger.initialize("DockerModelService", {
       minLevel: LogLevel.INFO,
       enableConsole: true,
       enableFile: true,

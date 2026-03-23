@@ -18,7 +18,9 @@ export const SidebarButton = styled.button`
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 6px;
-  padding: 5px;
+  padding: 4px;
+  width: 26px;
+  height: 26px;
   cursor: pointer;
   color: rgba(255, 255, 255, 0.85);
   display: flex;
@@ -49,6 +51,7 @@ export const CoWorkerToggleButton = SidebarButton;
 export const TeamToggleButton = SidebarButton;
 export const CostToggleButton = SidebarButton;
 export const TerminalToggleButton = SidebarButton;
+export const TestRunnerToggleButton = SidebarButton;
 
 // ── Font Size Controls ──
 
@@ -222,5 +225,23 @@ export const TerminalIcon = ({ size = 14 }: { size?: number }) => (
   >
     <polyline points="4 17 10 11 4 5" />
     <line x1="12" y1="19" x2="20" y2="19" />
+  </svg>
+);
+
+export const TestRunnerIcon = ({ size = 14 }: { size?: number }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M9 2h6v6l4 10H5L9 8V2z" />
+    <line x1="9" y1="2" x2="15" y2="2" />
+    <line x1="8" y1="22" x2="16" y2="22" />
+    <line x1="12" y1="18" x2="12" y2="22" />
   </svg>
 );
