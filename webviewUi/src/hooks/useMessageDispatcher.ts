@@ -13,6 +13,7 @@ import { useDoctorStore } from "../stores/doctor.store";
 import { useOnboardingStore } from "../stores/onboarding.store";
 import { useTeamStore } from "../stores/team.store";
 import { useCostStore } from "../stores/cost.store";
+import { useTerminalStore } from "../stores/terminal.store";
 import type { IWebviewMessage } from "./useStreamingChat";
 
 interface ConfigData {
@@ -527,6 +528,23 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
           break;
         case "onboarding-request-hydrate":
           useOnboardingStore.getState().hydrate();
+          break;
+
+        // ── Terminal Viewer ──
+        case "terminal-list-sessions-result":
+          useTerminalStore.getState().setSessions(message.sessions ?? []);
+          break;
+
+        case "terminal-session-history-result":
+          useTerminalStore
+            .getState()
+            .setHistory(message.sessionId ?? "", message.output ?? "");
+          break;
+
+        case "terminal-session-output-result":
+          useTerminalStore
+            .getState()
+            .appendOutput(message.sessionId ?? "", message.output ?? "");
           break;
 
         default:
