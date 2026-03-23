@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import styled from "styled-components";
 import { useTeamStore } from "../../stores/team.store";
-import type { TeamMember, TeamRelationshipEdge } from "../../stores/team.store";
+import { useStandupStore } from "../../stores/standup.store";
+import type { TeamRelationshipEdge } from "../../stores/team.store";
 
 interface TeamPanelProps {
   isOpen: boolean;
@@ -118,6 +119,148 @@ const EmptyState = styled.div`
 `;
 
 const ErrorText = styled.div`
+  color: var(--vscode-editorError-foreground, #f14c4c);
+  font-size: 11px;
+  margin-top: 4px;
+`;
+
+const SectionDescription = styled.div`
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.4;
+  margin-bottom: 8px;
+`;
+
+/* ── Meeting Intelligence Styled Components ── */
+
+const NotesTextArea = styled.textarea`
+  width: 100%;
+  min-height: 80px;
+  max-height: 200px;
+  resize: vertical;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.12));
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 12px;
+  font-family: var(--vscode-font-family);
+  line-height: 1.4;
+  box-sizing: border-box;
+
+  &::placeholder {
+    color: var(--vscode-input-placeholderForeground);
+  }
+
+  &:focus {
+    outline: none;
+    border-color: var(--vscode-focusBorder);
+  }
+`;
+
+const IngestButton = styled.button<{ $loading?: boolean }>`
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: ${(p) => (p.$loading ? "wait" : "pointer")};
+  font-size: 12px;
+  font-weight: 500;
+  width: 100%;
+  margin-top: 8px;
+  opacity: ${(p) => (p.$loading ? 0.7 : 1)};
+  transition: all 0.15s ease;
+
+  &:hover:not(:disabled) {
+    background: var(--vscode-button-hoverBackground);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+`;
+
+const QuickActions = styled.div`
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+`;
+
+const QuickActionButton = styled.button`
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--vscode-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+`;
+
+const RecentList = styled.div`
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+`;
+
+const RecentItem = styled.div`
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.08));
+  font-size: 11px;
+`;
+
+const RecentDate = styled.span`
+  color: var(--vscode-foreground);
+  font-weight: 500;
+`;
+
+const RecentMeta = styled.span`
+  color: var(--vscode-descriptionForeground);
+`;
+
+const DeleteButton = styled.button`
+  background: none;
+  border: none;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 12px;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+
+  ${RecentItem}:hover & {
+    opacity: 1;
+  }
+
+  &:hover {
+    color: var(--vscode-editorError-foreground, #f14c4c);
+    background: rgba(241, 76, 76, 0.1);
+  }
+`;
+
+const StandupErrorText = styled.div`
   color: var(--vscode-editorError-foreground, #f14c4c);
   font-size: 11px;
   margin-top: 4px;
@@ -484,18 +627,16 @@ const PersonDetailView: React.FC<{
       )}
 
       {/* Commitments */}
-      {(personCommitments.length > 0 || (selectedPerson?.commitments?.length ?? 0) > 0) && (
+      {personCommitments.length > 0 && (
         <Section>
           <SectionTitle>Recent Commitments</SectionTitle>
-          {(personCommitments.length > 0 ? personCommitments : selectedPerson!.commitments).map(
-            (c, i) => (
-              <CommitmentRow key={i}>
-                <span>{c.status === "done" ? "✅" : "⬜"}</span>
-                <span style={{ flex: 1 }}>{c.action}</span>
-                <CommitmentDate>{c.date}</CommitmentDate>
-              </CommitmentRow>
-            ),
-          )}
+          {personCommitments.map((c, i) => (
+            <CommitmentRow key={i}>
+              <span>{c.status === "done" ? "✅" : "⬜"}</span>
+              <span style={{ flex: 1 }}>{c.action}</span>
+              <CommitmentDate>{c.date}</CommitmentDate>
+            </CommitmentRow>
+          ))}
         </Section>
       )}
 
@@ -528,7 +669,6 @@ export const TeamPanel: React.FC<TeamPanelProps> = ({ isOpen, onClose }) => {
   const {
     members,
     edges,
-    healthMarkdown,
     blockersMarkdown,
     isLoading,
     lastError,
@@ -539,12 +679,38 @@ export const TeamPanel: React.FC<TeamPanelProps> = ({ isOpen, onClose }) => {
     clearSelectedPerson,
   } = useTeamStore();
 
+  // Meeting Intelligence state
+  const [notesInput, setNotesInput] = useState("");
+  const {
+    isIngesting,
+    lastError: standupError,
+    recentStandups,
+    ingestNotes,
+    requestMyTasks,
+    requestBlockers,
+    requestHistory,
+    deleteStandup,
+    deletingKey,
+    hydrate: hydrateStandups,
+  } = useStandupStore();
+
+  const handleIngest = () => {
+    if (!notesInput.trim() || isIngesting) return;
+    ingestNotes(notesInput.trim());
+    setNotesInput("");
+  };
+
   const [activeTab, setActiveTab] = useState<PanelTab>("members");
 
   // Hydrate on first open
   useEffect(() => {
     if (isOpen && members.length === 0) hydrate();
   }, [isOpen, members.length, hydrate]);
+
+  // Rehydrate recent standups from backend when panel opens
+  useEffect(() => {
+    if (isOpen && recentStandups.length === 0) hydrateStandups();
+  }, [isOpen, recentStandups.length, hydrateStandups]);
 
   // Request blockers when switching to that tab
   useEffect(() => {
@@ -553,20 +719,8 @@ export const TeamPanel: React.FC<TeamPanelProps> = ({ isOpen, onClose }) => {
     }
   }, [activeTab, blockersMarkdown, requestRecurringBlockers]);
 
-  // Parse health stats from markdown
-  const healthStats = React.useMemo(() => {
-    if (!healthMarkdown) return null;
-    const teamSize = healthMarkdown.match(/Team Size:\*\*\s*(\d+)/)?.[1];
-    const standups = healthMarkdown.match(/Total Standups:\*\*\s*(\d+)/)?.[1];
-    const avgCompletion = healthMarkdown.match(/Avg Completion Rate:\*\*\s*(\d+)/)?.[1];
-    const totalBlockers = healthMarkdown.match(/Total Blockers Recorded:\*\*\s*(\d+)/)?.[1];
-    return {
-      teamSize: teamSize ? parseInt(teamSize, 10) : members.length,
-      standups: standups ? parseInt(standups, 10) : 0,
-      avgCompletion: avgCompletion ? parseInt(avgCompletion, 10) : 0,
-      totalBlockers: totalBlockers ? parseInt(totalBlockers, 10) : 0,
-    };
-  }, [healthMarkdown, members.length]);
+  // Structured health stats from the extension (no markdown parsing needed)
+  const healthStats = useTeamStore((s) => s.healthStats);
 
   // Group edges by kind for the graph tab
   const edgesByKind = React.useMemo(() => {
@@ -595,6 +749,68 @@ export const TeamPanel: React.FC<TeamPanelProps> = ({ isOpen, onClose }) => {
         </Header>
         <Content>
           {lastError && <ErrorText>{lastError}</ErrorText>}
+
+          {/* ── Meeting Intelligence Section ── */}
+          <Section>
+            <SectionTitle>Meeting Intelligence</SectionTitle>
+            <SectionDescription>
+              Paste meeting or standup notes to extract action items, blockers,
+              and decisions automatically.
+            </SectionDescription>
+            <NotesTextArea
+              placeholder="Paste your standup / meeting notes here..."
+              value={notesInput}
+              onChange={(e) => setNotesInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  handleIngest();
+                }
+              }}
+            />
+            <IngestButton
+              $loading={isIngesting}
+              disabled={isIngesting || !notesInput.trim()}
+              onClick={handleIngest}
+            >
+              {isIngesting ? "⏳ Parsing..." : "📋 Parse Meeting Notes"}
+            </IngestButton>
+            {standupError && <StandupErrorText>{standupError}</StandupErrorText>}
+
+            <QuickActions>
+              <QuickActionButton onClick={() => requestMyTasks()}>
+                ✅ My Tasks
+              </QuickActionButton>
+              <QuickActionButton onClick={() => requestBlockers()}>
+                🔴 Blockers
+              </QuickActionButton>
+              <QuickActionButton onClick={() => requestHistory({ dateRange: "this week" })}>
+                📅 This Week
+              </QuickActionButton>
+            </QuickActions>
+
+            {recentStandups.length > 0 && (
+              <RecentList>
+                {recentStandups.map((s) => (
+                  <RecentItem key={`${s.date}-${s.teamName}`}>
+                    <div>
+                      <RecentDate>{s.date} — {s.teamName}</RecentDate>
+                      <RecentMeta>
+                        {s.commitmentCount} tasks · {s.blockerCount} blockers
+                      </RecentMeta>
+                    </div>
+                    <DeleteButton
+                      onClick={() => deleteStandup(s.date, s.teamName)}
+                      disabled={deletingKey === `${s.date}-${s.teamName}`}
+                      title={`Delete standup for ${s.date}`}
+                      aria-label={`Delete standup for ${s.date}`}
+                    >
+                      {deletingKey === `${s.date}-${s.teamName}` ? "⏳" : "🗑"}
+                    </DeleteButton>
+                  </RecentItem>
+                ))}
+              </RecentList>
+            )}
+          </Section>
 
           {/* Person Detail View */}
           {selectedPerson ? (
@@ -654,7 +870,7 @@ export const TeamPanel: React.FC<TeamPanelProps> = ({ isOpen, onClose }) => {
                     <EmptyState>
                       No team members tracked yet.
                       <br />
-                      Ingest meeting notes via the Co-Worker panel to populate the
+                      Ingest meeting notes above to populate the
                       team graph.
                     </EmptyState>
                   ) : (

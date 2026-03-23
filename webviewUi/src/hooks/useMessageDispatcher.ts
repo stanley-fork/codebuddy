@@ -432,6 +432,7 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
               message.members ?? [],
               message.edges ?? [],
               message.health ?? "",
+              message.healthStats ?? null,
             );
           break;
 

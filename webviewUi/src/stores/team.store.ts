@@ -31,6 +31,13 @@ export interface TeamCommitment {
   deadline?: string | null;
 }
 
+export interface TeamHealthStats {
+  teamSize: number;
+  standups: number;
+  avgCompletion: number;
+  totalBlockers: number;
+}
+
 export interface TeamPersonDetail {
   member: TeamMember | null;
   commitments: Array<{ action: string; status: string; date: string }>;
@@ -47,6 +54,8 @@ interface TeamState {
   edges: TeamRelationshipEdge[];
   /** Team health markdown. */
   healthMarkdown: string | null;
+  /** Structured health stats for the dashboard. */
+  healthStats: TeamHealthStats | null;
   /** Recurring blockers markdown. */
   blockersMarkdown: string | null;
   /** Selected person detail view. */
@@ -71,6 +80,7 @@ interface TeamState {
     members: TeamMember[],
     edges: TeamRelationshipEdge[],
     health: string,
+    healthStats?: TeamHealthStats | null,
   ) => void;
   setPersonProfile: (detail: TeamPersonDetail) => void;
   setHealth: (health: string) => void;
@@ -85,6 +95,7 @@ export const useTeamStore = create<TeamState>()((set) => ({
   members: [],
   edges: [],
   healthMarkdown: null,
+  healthStats: null,
   blockersMarkdown: null,
   selectedPerson: null,
   personCommitments: [],
@@ -117,8 +128,14 @@ export const useTeamStore = create<TeamState>()((set) => ({
     vscode.postMessage({ command: "team-commitments", name });
   },
 
-  setHydrateResult: (members, edges, health) => {
-    set({ members, edges, healthMarkdown: health, isLoading: false });
+  setHydrateResult: (members, edges, health, healthStats) => {
+    set({
+      members,
+      edges,
+      healthMarkdown: health,
+      healthStats: healthStats ?? null,
+      isLoading: false,
+    });
   },
 
   setPersonProfile: (detail) => {
