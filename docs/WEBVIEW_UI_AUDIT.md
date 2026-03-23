@@ -259,22 +259,6 @@ These services exist in `src/services/` with **no corresponding handler or UI su
 
 ---
 
-## 7. Dead Code & Cleanup Candidates
-
-| File | Status | Action |
-|------|--------|--------|
-| `settings.tsx` (root) | Superseded by `settings/SettingsPanel.tsx` | Delete |
-| `AgentActivityFeed.tsx` | Orphaned, replaced by `AgentTimeline.tsx` | Merge unique features into AgentTimeline, then delete |
-| `futureFeatures.tsx` | Orphaned, never rendered | Wire into UI or delete |
-| `extensions.tsx` | Orphaned, uses mock data | Wire into MCP/Agent management or delete |
-| `userMessageTest.tsx` | Test harness, not needed in prod | Move to test directory or delete |
-| `thinkingExample.tsx` | Example file, not needed in prod | Move to test directory or delete |
-| `thinkingTest.tsx` | Test file, not needed in prod | Move to test directory or delete |
-| `THINKING_COMPONENT.md` | Documentation in components dir | Move to docs/ |
-| `errorBoundry.tsx` | Typo in filename | Rename to `errorBoundary.tsx` |
-
----
-
 ## Appendix: Full Wiring Map
 
 ### Extension Handler → Webview Store/Component Mapping

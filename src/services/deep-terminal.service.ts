@@ -576,6 +576,21 @@ export class DeepTerminalService extends EventEmitter {
   }
 
   /**
+   * Returns metadata for all active sessions (for webview display).
+   */
+  public listSessions(): Array<{
+    id: string;
+    createdAt: number;
+    bufferSize: number;
+  }> {
+    return [...this.sessions.entries()].map(([id, s]) => ({
+      id,
+      createdAt: s.createdAt,
+      bufferSize: s.outputBuffer.length,
+    }));
+  }
+
+  /**
    * Kills the session's child process and removes it from the registry.
    *
    * @param id  Session identifier.

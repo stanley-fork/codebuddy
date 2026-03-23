@@ -10,6 +10,7 @@ interface PanelState {
   isBrowserPanelOpen: boolean;
   isTeamPanelOpen: boolean;
   isCostDashboardOpen: boolean;
+  isTerminalViewerOpen: boolean;
 
   openSettings: () => void;
   closeSettings: () => void;
@@ -29,6 +30,8 @@ interface PanelState {
   closeTeamPanel: () => void;
   openCostDashboard: () => void;
   closeCostDashboard: () => void;
+  openTerminalViewer: () => void;
+  closeTerminalViewer: () => void;
 }
 
 export const usePanelStore = create<PanelState>()((set) => ({
@@ -41,6 +44,7 @@ export const usePanelStore = create<PanelState>()((set) => ({
   isBrowserPanelOpen: false,
   isTeamPanelOpen: false,
   isCostDashboardOpen: false,
+  isTerminalViewerOpen: false,
 
   openSettings: () => set({ isSettingsOpen: true }),
   closeSettings: () => set({ isSettingsOpen: false }),
@@ -61,4 +65,6 @@ export const usePanelStore = create<PanelState>()((set) => ({
   closeTeamPanel: () => set({ isTeamPanelOpen: false }),
   openCostDashboard: () => set({ isCostDashboardOpen: true }),
   closeCostDashboard: () => set({ isCostDashboardOpen: false }),
+  openTerminalViewer: () => set({ isTerminalViewerOpen: true }),
+  closeTerminalViewer: () => set({ isTerminalViewerOpen: false }),
 }));
