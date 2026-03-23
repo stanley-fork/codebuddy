@@ -70,7 +70,7 @@ export class ProjectRulesService implements vscode.Disposable {
   private statusCallback: ((status: IProjectRulesStatus) => void) | undefined;
 
   private constructor() {
-    this.logger = Logger.initialize(ProjectRulesService.name, {
+    this.logger = Logger.initialize("ProjectRulesService", {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,
       enableFile: true,

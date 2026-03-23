@@ -25,7 +25,7 @@ export class Terminal {
   > = new Map();
 
   constructor() {
-    this.logger = Logger.initialize(Terminal.name, {
+    this.logger = Logger.initialize("Terminal", {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,
       enableFile: true,

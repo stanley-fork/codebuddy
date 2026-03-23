@@ -18,7 +18,7 @@ export class FileStorage implements IStorage {
 
   constructor() {
     this.createCodeBuddyFolder();
-    this.logger = Logger.initialize(FileStorage.name, {
+    this.logger = Logger.initialize("FileStorage", {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,
       enableFile: true,

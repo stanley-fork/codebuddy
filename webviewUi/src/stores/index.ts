@@ -13,3 +13,5 @@ export { useChatStore } from "./chat.store";
 export { useTeamStore } from "./team.store";
 export { useCostStore } from "./cost.store";
 export { useTerminalStore } from "./terminal.store";
+export { useGitStore } from "./git.store";
+export { useTestRunnerStore } from "./testRunner.store";

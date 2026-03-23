@@ -99,7 +99,7 @@ export class ChatHistoryWorker {
 
   constructor() {
     this.chatHistoryRepo = ChatHistoryRepository.getInstance();
-    this.logger = Logger.initialize(ChatHistoryWorker.name, {
+    this.logger = Logger.initialize("ChatHistoryWorker", {
       minLevel: LogLevel.DEBUG,
       enableConsole: true,
       enableFile: true,
