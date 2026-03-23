@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import { useEffect } from "react";
 import styled from "styled-components";
 import { useCostStore } from "../../stores/cost.store";
 import type { ProviderBreakdown, ConversationCostEntry } from "../../stores/cost.store";
