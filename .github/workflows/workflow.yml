@@ -36,6 +36,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Security audit
+        run: npm audit --audit-level=moderate || true
+
       - name: Lint and Fix
         run: npm run fix
 

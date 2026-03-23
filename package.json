@@ -8,7 +8,7 @@
   },
   "publisher": "fiatinnovations",
   "description": "%description%",
-  "version": "4.1.17",
+  "version": "4.2.1",
   "engines": {
     "vscode": "^1.78.0"
   },
@@ -47,6 +47,9 @@
     "productivity"
   ],
   "homepage": "https://github.com/olasunkanmi-SE/codebuddy#readme",
+  "bugs": {
+    "url": "https://github.com/olasunkanmi-SE/codebuddy/issues"
+  },
   "l10n": "./l10n",
   "main": "./dist/extension.js",
   "contributes": {
