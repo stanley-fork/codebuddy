@@ -85,7 +85,8 @@
     "featureMCP": "MCP Tools",
     "featureMCPDesc": "Extend with GitHub, GitLab, and custom integrations",
     "featureMentions": "@ Mentions",
-    "featureMentionsDesc": "Use @filename to include specific files as context"
+    "featureMentionsDesc": "Use @filename to include specific files as context",
+    "setupCTA": "Complete Setup"
   },
 
   "webview": {
