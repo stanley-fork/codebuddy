@@ -18,6 +18,30 @@ export interface IConversationCost extends ITokenUsage {
   requestCount: number;
 }
 
+export interface IProviderBreakdown {
+  provider: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUSD: number;
+  requestCount: number;
+}
+
+export interface ICostTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUSD: number;
+  requestCount: number;
+  conversationCount: number;
+}
+
+export interface ICostSummary {
+  totals: ICostTotals;
+  providers: IProviderBreakdown[];
+  conversations: Array<{ threadId: string } & IConversationCost>;
+}
+
 interface IPricing {
   inputPerMillion: number;
   outputPerMillion: number;
@@ -140,6 +164,59 @@ export class CostTrackingService {
    */
   resetAll(): void {
     this.conversations.clear();
+  }
+
+  /**
+   * Returns an aggregated cost summary across all tracked conversations.
+   */
+  getCostSummary(): ICostSummary {
+    const conversations: ICostSummary["conversations"] = [];
+    const providerMap = new Map<string, IProviderBreakdown>();
+
+    let totalInput = 0;
+    let totalOutput = 0;
+    let totalCost = 0;
+    let totalRequests = 0;
+
+    for (const [threadId, cost] of this.conversations) {
+      conversations.push({ threadId, ...cost });
+
+      totalInput += cost.inputTokens;
+      totalOutput += cost.outputTokens;
+      totalCost += cost.estimatedCostUSD;
+      totalRequests += cost.requestCount;
+
+      const existing = providerMap.get(cost.provider);
+      if (existing) {
+        existing.inputTokens += cost.inputTokens;
+        existing.outputTokens += cost.outputTokens;
+        existing.totalTokens += cost.totalTokens;
+        existing.estimatedCostUSD += cost.estimatedCostUSD;
+        existing.requestCount += cost.requestCount;
+      } else {
+        providerMap.set(cost.provider, {
+          provider: cost.provider,
+          inputTokens: cost.inputTokens,
+          outputTokens: cost.outputTokens,
+          totalTokens: cost.totalTokens,
+          estimatedCostUSD: cost.estimatedCostUSD,
+          requestCount: cost.requestCount,
+        });
+      }
+    }
+
+    return {
+      totals: {
+        inputTokens: totalInput,
+        outputTokens: totalOutput,
+        totalTokens: totalInput + totalOutput,
+        estimatedCostUSD: Math.round(totalCost * 1_000_000) / 1_000_000,
+        requestCount: totalRequests,
+        conversationCount: conversations.length,
+      },
+      providers: [...providerMap.values()],
+      conversations,
+    };
   }
 
   private getPricing(model: string): IPricing {

@@ -20,5 +20,6 @@ export { CheckpointHandler } from "./checkpoint-handler";
 export { ComposerHandler } from "./composer-handler";
 export { StandupHandler } from "./standup-handler";
 export { TeamGraphHandler } from "./team-graph-handler";
+export { CostTrackingHandler } from "./cost-tracking-handler";
 export { DoctorHandler } from "./doctor-handler";
 export { OnboardingHandler } from "./onboarding-handler";

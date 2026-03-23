@@ -42,6 +42,7 @@ import { UpdatesPanel } from "./updates/UpdatesPanel";
 import { ObservabilityPanel } from "./observability/ObservabilityPanel";
 import { CoWorkerPanel } from "./coworker/CoWorkerPanel";
 import { TeamPanel } from "./team/TeamPanel";
+import { CostDashboardPanel } from "./cost/CostDashboardPanel";
 import { BrowserPanel } from "./browser/BrowserPanel";
 import { PanelErrorBoundary } from "./PanelErrorBoundary";
 import { OnboardingWizard } from "./onboarding/OnboardingWizard";
@@ -56,6 +57,7 @@ import {
   BrowserToggleButton,
   CoWorkerToggleButton,
   TeamToggleButton,
+  CostToggleButton,
   FontSizeGroup,
   FontSizeButton,
   SessionsIcon,
@@ -65,6 +67,7 @@ import {
   CoWorkerIcon,
   ObservabilityIcon,
   TeamIcon,
+  CostIcon,
 } from "./webview.styles";
 
 const hljsApi = window["hljs" as any] as unknown as typeof hljs;
@@ -97,6 +100,7 @@ export const WebviewUI = () => {
   const isCoWorkerOpen = usePanelStore((s) => s.isCoWorkerOpen);
   const isBrowserPanelOpen = usePanelStore((s) => s.isBrowserPanelOpen);
   const isTeamPanelOpen = usePanelStore((s) => s.isTeamPanelOpen);
+  const isCostDashboardOpen = usePanelStore((s) => s.isCostDashboardOpen);
 
   // Onboarding
   const onboardingVisible = useOnboardingStore((s) => s.isVisible);
@@ -354,6 +358,14 @@ export const WebviewUI = () => {
           <TeamIcon size={14} />
         </TeamToggleButton>
 
+        <CostToggleButton
+          onClick={() => usePanelStore.getState().openCostDashboard()}
+          aria-label="Open cost dashboard"
+          title="Cost Dashboard"
+        >
+          <CostIcon size={14} />
+        </CostToggleButton>
+
         <FontSizeGroup>
           <FontSizeButton onClick={() => useSettingsStore.getState().handleIncreaseFontSize()} title="Increase Font Size">
             A+
@@ -463,6 +475,14 @@ export const WebviewUI = () => {
       <TeamPanel
         isOpen={isTeamPanelOpen}
         onClose={() => usePanelStore.getState().closeTeamPanel()}
+      />
+      </PanelErrorBoundary>
+
+      {/* Cost Dashboard Panel */}
+      <PanelErrorBoundary fallbackLabel="Cost Dashboard">
+      <CostDashboardPanel
+        isOpen={isCostDashboardOpen}
+        onClose={() => usePanelStore.getState().closeCostDashboard()}
       />
       </PanelErrorBoundary>
 
