@@ -546,10 +546,10 @@ export class DeepTerminalService extends EventEmitter {
    * @param id  Session identifier.
    * @returns Concatenated new output, or an empty string if none.
    */
-  public readOutput(id: string): string {
+  public readOutput(id: string): string | null {
     const session = this.sessions.get(id);
     if (!session) {
-      return `Session ${id} not found.`;
+      return null;
     }
 
     const newLines = session.outputBuffer.slice(session.lastReadIndex);
@@ -567,10 +567,10 @@ export class DeepTerminalService extends EventEmitter {
    *
    * @param id  Session identifier.
    */
-  public getFullHistory(id: string): string {
+  public getFullHistory(id: string): string | null {
     const session = this.sessions.get(id);
     if (!session) {
-      return `Session ${id} not found.`;
+      return null;
     }
     return session.outputBuffer.toArray().join("");
   }

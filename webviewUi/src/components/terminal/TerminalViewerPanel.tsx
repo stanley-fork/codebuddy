@@ -2,6 +2,9 @@ import { useEffect, useRef, useCallback } from "react";
 import styled from "styled-components";
 import { useTerminalStore } from "../../stores/terminal.store";
 import type { TerminalSessionInfo } from "../../stores/terminal.store";
+import { TerminalIcon } from "../webview.styles";
+
+const TERMINAL_POLLING_INTERVAL_MS = 2000;
 
 interface TerminalViewerPanelProps {
   isOpen: boolean;
@@ -200,6 +203,19 @@ const SessionCount = styled.span`
   margin-left: auto;
 `;
 
+const ErrorBanner = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  margin: 8px 12px 0;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
+  border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+  color: var(--vscode-errorForeground, #f48771);
+`;
+
 /* ─── Helpers ─── */
 
 function formatAge(createdAt: number): string {
@@ -219,10 +235,12 @@ export function TerminalViewerPanel({ isOpen, onClose }: TerminalViewerPanelProp
     selectedSessionId,
     sessionOutput,
     isLoading,
+    error,
     requestSessions,
     requestHistory,
     requestNewOutput,
     selectSession,
+    clearError,
   } = useTerminalStore();
 
   const outputRef = useRef<HTMLDivElement>(null);
@@ -249,7 +267,7 @@ export function TerminalViewerPanel({ isOpen, onClose }: TerminalViewerPanelProp
     if (selectedSessionId && isOpen) {
       pollRef.current = setInterval(() => {
         requestNewOutput(selectedSessionId);
-      }, 2000);
+      }, TERMINAL_POLLING_INTERVAL_MS);
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
@@ -269,10 +287,7 @@ export function TerminalViewerPanel({ isOpen, onClose }: TerminalViewerPanelProp
       <PanelContainer onClick={(e) => e.stopPropagation()}>
         <Header>
           <Title>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="4 17 10 11 4 5" />
-              <line x1="12" y1="19" x2="20" y2="19" />
-            </svg>
+            <TerminalIcon size={16} />
             Terminal Activity
           </Title>
           <CloseButton onClick={onClose} aria-label="Close">
@@ -301,6 +316,16 @@ export function TerminalViewerPanel({ isOpen, onClose }: TerminalViewerPanelProp
                 {sessions.length} session{sessions.length !== 1 ? "s" : ""}
               </SessionCount>
             </SessionList>
+          )}
+
+          {/* Error banner */}
+          {error && (
+            <ErrorBanner>
+              {error}
+              <CloseButton onClick={clearError} aria-label="Dismiss error">
+                ✕
+              </CloseButton>
+            </ErrorBanner>
           )}
 
           {/* Terminal output */}
