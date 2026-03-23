@@ -1,5 +1,5 @@
 import React from "react";
-import { UserMessage } from "./personMessage";
+import { UserMessage } from "../components/personMessage";
 
 export const UserMessageTest: React.FC = () => {
   return (

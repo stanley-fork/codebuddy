@@ -1,4 +1,4 @@
-import { ThinkingComponent } from './thinkingComponent';
+import { ThinkingComponent } from '../components/thinkingComponent';
 
 // Example of how the component works with different content types
 
