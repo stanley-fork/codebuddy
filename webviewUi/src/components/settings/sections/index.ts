@@ -1,4 +1,3 @@
-export { ConnectorsSettings } from "./ConnectorsSettings";
 export { SkillsSettings } from "./SkillsSettings";
 export { AccountSettings } from "./AccountSettings";
 export { GeneralSettings } from "./GeneralSettings";

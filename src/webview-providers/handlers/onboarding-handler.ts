@@ -66,6 +66,7 @@ function isOnboardingMessage(msg: unknown): msg is OnboardingMessage {
 
 interface OnboardingStateDTO {
   shouldShow: boolean;
+  completed: boolean;
   providers: Array<{
     id: string;
     name: string;
@@ -94,16 +95,14 @@ export class OnboardingHandler implements WebviewMessageHandler {
         try {
           const shouldShow = svc.shouldShowOnboarding();
           const providers = svc.getProviders();
-          let projectInfo: ProjectInfo | null = null;
-          let suggestedTasks: Array<{ label: string; prompt: string }> = [];
 
-          if (shouldShow) {
-            projectInfo = await svc.detectProjectInfo();
-            suggestedTasks = svc.getSuggestedTasks(projectInfo);
-          }
+          // Always detect project info so the WelcomeScreen can show it
+          const projectInfo = await svc.detectProjectInfo();
+          const suggestedTasks = svc.getSuggestedTasks(projectInfo);
 
           const dto: OnboardingStateDTO = {
             shouldShow,
+            completed: !shouldShow,
             providers,
             projectInfo,
             suggestedTasks,
@@ -121,6 +120,7 @@ export class OnboardingHandler implements WebviewMessageHandler {
             command: "onboarding-state",
             data: {
               shouldShow: false,
+              completed: false,
               providers: [],
               projectInfo: null,
               suggestedTasks: [],

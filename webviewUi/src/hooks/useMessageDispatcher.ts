@@ -13,6 +13,7 @@ import { useDoctorStore } from "../stores/doctor.store";
 import { useOnboardingStore } from "../stores/onboarding.store";
 import { useTeamStore } from "../stores/team.store";
 import { useCostStore } from "../stores/cost.store";
+import { useTerminalStore } from "../stores/terminal.store";
 import type { IWebviewMessage } from "./useStreamingChat";
 
 interface ConfigData {
@@ -490,10 +491,11 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
         // ── Onboarding ──
         case "onboarding-state": {
           const ob = useOnboardingStore.getState();
+          ob.setCompleted(message.data?.completed ?? false);
+          ob.setProviders(message.data?.providers ?? []);
+          ob.setProjectInfo(message.data?.projectInfo ?? null);
+          ob.setSuggestedTasks(message.data?.suggestedTasks ?? []);
           if (message.data?.shouldShow) {
-            ob.setProviders(message.data.providers ?? []);
-            ob.setProjectInfo(message.data.projectInfo ?? null);
-            ob.setSuggestedTasks(message.data.suggestedTasks ?? []);
             ob.show();
           }
           break;
@@ -524,9 +526,36 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
         }
         case "onboarding-completed":
           useOnboardingStore.getState().setVisible(false);
+          useOnboardingStore.getState().setCompleted(true);
           break;
         case "onboarding-request-hydrate":
           useOnboardingStore.getState().hydrate();
+          break;
+
+        // ── Terminal Viewer ──
+        case "terminal-list-sessions-result":
+          useTerminalStore.getState().setSessions(message.sessions ?? []);
+          break;
+
+        case "terminal-session-history-result":
+          useTerminalStore
+            .getState()
+            .setHistory(message.sessionId ?? "", message.output ?? "");
+          break;
+
+        case "terminal-session-output-result":
+          useTerminalStore
+            .getState()
+            .appendOutput(message.sessionId ?? "", message.output ?? "");
+          break;
+
+        case "terminal-error":
+          useTerminalStore
+            .getState()
+            .setError(
+              message.sessionId ?? null,
+              message.error ?? "Unknown error",
+            );
           break;
 
         default:

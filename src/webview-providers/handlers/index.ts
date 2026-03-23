@@ -6,7 +6,6 @@ export {
 export { SettingsHandler } from "./settings-handler";
 export { DockerHandler } from "./docker-handler";
 export { MCPHandler } from "./mcp-handler";
-export { ConnectorHandler } from "./connector-handler";
 export { SkillHandler } from "./skill-handler";
 export { NewsHandler } from "./news-handler";
 export { BrowserHandler } from "./browser-handler";
@@ -21,5 +20,6 @@ export { ComposerHandler } from "./composer-handler";
 export { StandupHandler } from "./standup-handler";
 export { TeamGraphHandler } from "./team-graph-handler";
 export { CostTrackingHandler } from "./cost-tracking-handler";
+export { TerminalViewerHandler } from "./terminal-viewer-handler";
 export { DoctorHandler } from "./doctor-handler";
 export { OnboardingHandler } from "./onboarding-handler";

@@ -43,6 +43,7 @@ import { ObservabilityPanel } from "./observability/ObservabilityPanel";
 import { CoWorkerPanel } from "./coworker/CoWorkerPanel";
 import { TeamPanel } from "./team/TeamPanel";
 import { CostDashboardPanel } from "./cost/CostDashboardPanel";
+import { TerminalViewerPanel } from "./terminal/TerminalViewerPanel";
 import { BrowserPanel } from "./browser/BrowserPanel";
 import { PanelErrorBoundary } from "./PanelErrorBoundary";
 import { OnboardingWizard } from "./onboarding/OnboardingWizard";
@@ -58,6 +59,7 @@ import {
   CoWorkerToggleButton,
   TeamToggleButton,
   CostToggleButton,
+  TerminalToggleButton,
   FontSizeGroup,
   FontSizeButton,
   SessionsIcon,
@@ -68,6 +70,7 @@ import {
   ObservabilityIcon,
   TeamIcon,
   CostIcon,
+  TerminalIcon,
 } from "./webview.styles";
 
 const hljsApi = window["hljs" as any] as unknown as typeof hljs;
@@ -101,6 +104,7 @@ export const WebviewUI = () => {
   const isBrowserPanelOpen = usePanelStore((s) => s.isBrowserPanelOpen);
   const isTeamPanelOpen = usePanelStore((s) => s.isTeamPanelOpen);
   const isCostDashboardOpen = usePanelStore((s) => s.isCostDashboardOpen);
+  const isTerminalViewerOpen = usePanelStore((s) => s.isTerminalViewerOpen);
 
   // Onboarding
   const onboardingVisible = useOnboardingStore((s) => s.isVisible);
@@ -366,6 +370,14 @@ export const WebviewUI = () => {
           <CostIcon size={14} />
         </CostToggleButton>
 
+        <TerminalToggleButton
+          onClick={() => usePanelStore.getState().openTerminalViewer()}
+          aria-label="Open terminal viewer"
+          title="Terminal Activity"
+        >
+          <TerminalIcon size={14} />
+        </TerminalToggleButton>
+
         <FontSizeGroup>
           <FontSizeButton onClick={() => useSettingsStore.getState().handleIncreaseFontSize()} title="Increase Font Size">
             A+
@@ -486,6 +498,14 @@ export const WebviewUI = () => {
       />
       </PanelErrorBoundary>
 
+      {/* Terminal Viewer Panel */}
+      <PanelErrorBoundary fallbackLabel="Terminal Viewer">
+      <TerminalViewerPanel
+        isOpen={isTerminalViewerOpen}
+        onClose={() => usePanelStore.getState().closeTerminalViewer()}
+      />
+      </PanelErrorBoundary>
+
       <VSCodePanels className="vscodePanels" activeid="tab-1">
         <VSCodePanelTab id="tab-1">CHAT</VSCodePanelTab>
         <VSCodePanelTab id="tab-2">FAQ</VSCodePanelTab>
@@ -497,13 +517,7 @@ export const WebviewUI = () => {
                 <div style={{ minWidth: 0, maxWidth: "100%" }}>
                   {/* Show welcome screen when there are no messages */}
                   {streamedMessages.length === 0 && !isBotLoading && !isCommandExecuting ? (
-                    <WelcomeScreen
-                      username={username}
-                      onGetStarted={() => {
-                        // Optional: Focus on the input or trigger a sample prompt
-                        console.log("User is ready to start!");
-                      }}
-                    />
+                    <WelcomeScreen username={username} />
                   ) : (
                     <>
                       {memoizedMessages}

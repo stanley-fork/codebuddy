@@ -39,6 +39,7 @@ const PanelOverlay = styled.div<{ isOpen: boolean }>`
 
 const PanelContainer = styled.div`
   width: 450px; /* Slightly wider than notifications for news readability */
+  max-width: 100%;
   height: 100%;
   background: var(--vscode-editor-background);
   border-left: 1px solid var(--vscode-widget-border);

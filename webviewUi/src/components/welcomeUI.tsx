@@ -1,24 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import styled, { keyframes } from "styled-components";
-import {
-  WelcomeHero,
-  WelcomeLogo,
-  WelcomeSubtitle as OnboardingSubtitle,
-  FeatureList,
-  FeatureItem,
-  FeatureIcon,
-  FeatureText,
-} from "./onboarding/styles";
-import {
-  CodeBuddyLogo,
-  ChatBubbleIcon,
-  SearchIcon,
-  LockIcon,
-  GlobeIcon,
-  WrenchIcon,
-  RefreshIcon,
-} from "./onboarding/icons";
+import { WelcomeHero, WelcomeLogo } from "./onboarding/styles";
+import { CodeBuddyLogo } from "./onboarding/icons";
+import { useOnboardingStore } from "../stores/onboarding.store";
 
 interface WelcomeScreenProps {
   username?: string;
@@ -55,9 +40,37 @@ const GreetingTitle = styled.h1`
   text-align: center;
 `;
 
+const Tagline = styled.p`
+  font-size: 13px;
+  color: var(--vscode-descriptionForeground, #999);
+  margin: 0 0 24px 0;
+  text-align: center;
+  max-width: 380px;
+  line-height: 1.5;
+`;
+
+const SetupCTA = styled.button`
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: var(--vscode-button-hoverBackground);
+  }
+`;
+
 export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ username }) => {
   const { t } = useTranslation();
   const [displayedText, setDisplayedText] = useState("");
+  const isCompleted = useOnboardingStore((s) => s.isCompleted);
+  const show = useOnboardingStore((s) => s.show);
+
   const greeting = username
     ? t("welcome.greetingWithName", { username })
     : t("welcome.greetingDefault");
@@ -83,53 +96,12 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ username }) => {
           <CodeBuddyLogo />
         </WelcomeLogo>
         <GreetingTitle>{displayedText}</GreetingTitle>
-        <OnboardingSubtitle>
-          {t("welcome.subtitle")}
-        </OnboardingSubtitle>
-        <FeatureList>
-          <FeatureItem>
-            <FeatureIcon><ChatBubbleIcon /></FeatureIcon>
-            <FeatureText>
-              <strong>{t("welcome.featureAgentMode")}</strong>
-              {t("welcome.featureAgentModeDesc")}
-            </FeatureText>
-          </FeatureItem>
-          <FeatureItem>
-            <FeatureIcon><SearchIcon /></FeatureIcon>
-            <FeatureText>
-              <strong>{t("welcome.featureAskMode")}</strong>
-              {t("welcome.featureAskModeDesc")}
-            </FeatureText>
-          </FeatureItem>
-          <FeatureItem>
-            <FeatureIcon><GlobeIcon /></FeatureIcon>
-            <FeatureText>
-              <strong>{t("welcome.featureProviders")}</strong>
-              {t("welcome.featureProvidersDesc")}
-            </FeatureText>
-          </FeatureItem>
-          <FeatureItem>
-            <FeatureIcon><LockIcon /></FeatureIcon>
-            <FeatureText>
-              <strong>{t("welcome.featureDiffReview")}</strong>
-              {t("welcome.featureDiffReviewDesc")}
-            </FeatureText>
-          </FeatureItem>
-          <FeatureItem>
-            <FeatureIcon><WrenchIcon /></FeatureIcon>
-            <FeatureText>
-              <strong>{t("welcome.featureMCP")}</strong>
-              {t("welcome.featureMCPDesc")}
-            </FeatureText>
-          </FeatureItem>
-          <FeatureItem>
-            <FeatureIcon><RefreshIcon /></FeatureIcon>
-            <FeatureText>
-              <strong>{t("welcome.featureMentions")}</strong>
-              {t("welcome.featureMentionsDesc")}
-            </FeatureText>
-          </FeatureItem>
-        </FeatureList>
+        <Tagline>{t("welcome.subtitle")}</Tagline>
+        {!isCompleted && (
+          <SetupCTA onClick={show}>
+            {t("welcome.setupCTA")}
+          </SetupCTA>
+        )}
       </WelcomeHero>
     </WelcomeContainer>
   );
