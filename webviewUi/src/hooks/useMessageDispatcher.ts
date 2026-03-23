@@ -12,6 +12,7 @@ import { useStandupStore } from "../stores/standup.store";
 import { useDoctorStore } from "../stores/doctor.store";
 import { useOnboardingStore } from "../stores/onboarding.store";
 import { useTeamStore } from "../stores/team.store";
+import { useCostStore } from "../stores/cost.store";
 import type { IWebviewMessage } from "./useStreamingChat";
 
 interface ConfigData {
@@ -473,6 +474,17 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
 
         case "team-error":
           useTeamStore.getState().setError(message.error ?? "Unknown error");
+          break;
+
+        // ── Cost Dashboard ──
+        case "cost-summary-result":
+          useCostStore
+            .getState()
+            .setSummary(
+              message.totals ?? null,
+              message.providers ?? [],
+              message.conversations ?? [],
+            );
           break;
 
         // ── Onboarding ──
