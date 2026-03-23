@@ -28,6 +28,9 @@ import AttachmentIcon from "./attachmentIcon";
 import ChatInput from "./ChatInput";
 import { CostDisplay } from "./CostDisplay";
 import { ProviderHealthIndicator } from "./ProviderHealthIndicator";
+import { GitStatusBar } from "./GitStatusBar";
+import { ModelSelector } from "./ModelSelector";
+import { ModeSelector } from "./ModeSelector";
 import { CommandFeedbackLoader } from "./commandFeedbackLoader";
 import MessageRenderer from "./MessageRenderer";
 import { PendingChangesPanel } from "./PendingChangesPanel";
@@ -45,6 +48,7 @@ import { TeamPanel } from "./team/TeamPanel";
 import { CostDashboardPanel } from "./cost/CostDashboardPanel";
 import { TerminalViewerPanel } from "./terminal/TerminalViewerPanel";
 import { BrowserPanel } from "./browser/BrowserPanel";
+import { TestRunnerPanel } from "./test-runner/TestRunnerPanel";
 import { PanelErrorBoundary } from "./PanelErrorBoundary";
 import { OnboardingWizard } from "./onboarding/OnboardingWizard";
 import { useOnboardingStore } from "../stores/onboarding.store";
@@ -60,6 +64,7 @@ import {
   TeamToggleButton,
   CostToggleButton,
   TerminalToggleButton,
+  TestRunnerToggleButton,
   FontSizeGroup,
   FontSizeButton,
   SessionsIcon,
@@ -71,6 +76,7 @@ import {
   TeamIcon,
   CostIcon,
   TerminalIcon,
+  TestRunnerIcon,
 } from "./webview.styles";
 
 const hljsApi = window["hljs" as any] as unknown as typeof hljs;
@@ -105,6 +111,7 @@ export const WebviewUI = () => {
   const isTeamPanelOpen = usePanelStore((s) => s.isTeamPanelOpen);
   const isCostDashboardOpen = usePanelStore((s) => s.isCostDashboardOpen);
   const isTerminalViewerOpen = usePanelStore((s) => s.isTerminalViewerOpen);
+  const isTestRunnerOpen = usePanelStore((s) => s.isTestRunnerOpen);
 
   // Onboarding
   const onboardingVisible = useOnboardingStore((s) => s.isVisible);
@@ -281,7 +288,7 @@ export const WebviewUI = () => {
           aria-label="Open settings"
           title="Settings"
         >
-          <SettingsGearIcon size={14} />
+          <SettingsGearIcon size={12} />
         </SettingsToggleButton>
 
         <SessionsToggleButton
@@ -289,7 +296,7 @@ export const WebviewUI = () => {
           aria-label="Open sessions"
           title="Sessions"
         >
-          <SessionsIcon size={14} />
+          <SessionsIcon size={12} />
         </SessionsToggleButton>
 
         <NotificationToggleButton
@@ -297,7 +304,7 @@ export const WebviewUI = () => {
           aria-label="Open notifications"
           title="Notifications"
         >
-          <NotificationIcon size={14} />
+          <NotificationIcon size={12} />
           {unreadNotificationCount > 0 && (
             <span
               style={{
@@ -327,7 +334,7 @@ export const WebviewUI = () => {
           aria-label="Open updates"
           title="Updates"
         >
-          <BookIcon size={14} />
+          <BookIcon size={12} />
         </UpdatesToggleButton>
 
         <ObservabilityToggleButton
@@ -335,7 +342,7 @@ export const WebviewUI = () => {
           aria-label="Open observability"
           title="Observability"
         >
-          <ObservabilityIcon size={14} />
+          <ObservabilityIcon size={12} />
         </ObservabilityToggleButton>
 
         <BrowserToggleButton
@@ -343,7 +350,7 @@ export const WebviewUI = () => {
           aria-label="Open browser"
           title="Browser"
         >
-          <BrowserIcon size={14} />
+          <BrowserIcon size={12} />
         </BrowserToggleButton>
 
         <CoWorkerToggleButton
@@ -351,7 +358,7 @@ export const WebviewUI = () => {
           aria-label="Open co-worker"
           title="Co-Worker"
         >
-          <CoWorkerIcon size={14} />
+          <CoWorkerIcon size={12} />
         </CoWorkerToggleButton>
 
         <TeamToggleButton
@@ -359,7 +366,7 @@ export const WebviewUI = () => {
           aria-label="Open team graph"
           title="Team Graph"
         >
-          <TeamIcon size={14} />
+          <TeamIcon size={12} />
         </TeamToggleButton>
 
         <CostToggleButton
@@ -367,7 +374,7 @@ export const WebviewUI = () => {
           aria-label="Open cost dashboard"
           title="Cost Dashboard"
         >
-          <CostIcon size={14} />
+          <CostIcon size={12} />
         </CostToggleButton>
 
         <TerminalToggleButton
@@ -375,8 +382,16 @@ export const WebviewUI = () => {
           aria-label="Open terminal viewer"
           title="Terminal Activity"
         >
-          <TerminalIcon size={14} />
+          <TerminalIcon size={12} />
         </TerminalToggleButton>
+
+        <TestRunnerToggleButton
+          onClick={() => usePanelStore.getState().openTestRunner()}
+          aria-label="Open test runner"
+          title="Test Runner"
+        >
+          <TestRunnerIcon size={12} />
+        </TestRunnerToggleButton>
 
         <FontSizeGroup>
           <FontSizeButton onClick={() => useSettingsStore.getState().handleIncreaseFontSize()} title="Increase Font Size">
@@ -506,6 +521,14 @@ export const WebviewUI = () => {
       />
       </PanelErrorBoundary>
 
+      {/* Test Runner Panel */}
+      <PanelErrorBoundary fallbackLabel="Test Runner">
+      <TestRunnerPanel
+        isOpen={isTestRunnerOpen}
+        onClose={() => usePanelStore.getState().closeTestRunner()}
+      />
+      </PanelErrorBoundary>
+
       <VSCodePanels className="vscodePanels" activeid="tab-1">
         <VSCodePanelTab id="tab-1">CHAT</VSCodePanelTab>
         <VSCodePanelTab id="tab-2">FAQ</VSCodePanelTab>
@@ -630,6 +653,9 @@ export const WebviewUI = () => {
           )}
           <div className="status-bar-row">
             <ProviderHealthIndicator activeProvider={providerHealth?.activeProvider} health={providerHealth?.health} />
+            <ModelSelector />
+            <ModeSelector />
+            <GitStatusBar />
             <CostDisplay costData={conversationCost} isStreaming={isStreaming} />
           </div>
           <ChatInput onSendMessage={handleSend} disabled={isStreaming || isBotLoading} folders={folders} activeEditor={activeEditor} />

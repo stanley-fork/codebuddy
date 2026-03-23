@@ -72,6 +72,8 @@ import {
   TeamGraphHandler,
   DoctorHandler,
   OnboardingHandler,
+  GitStatusHandler,
+  TestRunnerHandler,
 } from "./handlers";
 import { HandlerContext, MessageHandlerRegistry } from "./handlers/types";
 import { AccessControlService } from "../services/access-control.service";
@@ -274,6 +276,8 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
     this.handlerRegistry.register(new TerminalViewerHandler());
     this.handlerRegistry.register(new DoctorHandler());
     this.handlerRegistry.register(new OnboardingHandler());
+    this.handlerRegistry.register(new GitStatusHandler());
+    this.handlerRegistry.register(new TestRunnerHandler());
     this.handlerRegistry.register(
       new PerformanceHandler(
         () => this.performanceProfiler,
