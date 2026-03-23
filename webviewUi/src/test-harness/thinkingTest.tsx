@@ -1,4 +1,4 @@
-import { ThinkingComponent } from "./thinkingComponent";
+import { ThinkingComponent } from "../components/thinkingComponent";
 
 // Test data to verify the component is working
 const testData = {
