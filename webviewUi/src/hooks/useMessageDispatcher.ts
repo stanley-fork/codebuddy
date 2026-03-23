@@ -11,6 +11,7 @@ import { useChatStore } from "../stores/chat.store";
 import { useStandupStore } from "../stores/standup.store";
 import { useDoctorStore } from "../stores/doctor.store";
 import { useOnboardingStore } from "../stores/onboarding.store";
+import { useTeamStore } from "../stores/team.store";
 import type { IWebviewMessage } from "./useStreamingChat";
 
 interface ConfigData {
@@ -421,6 +422,57 @@ export function useMessageDispatcher(streamingChat: StreamingChatAPI) {
               message.error,
               message.fixesApplied,
             );
+          break;
+
+        // ── Team Graph ──
+        case "team-hydrate-result":
+          useTeamStore
+            .getState()
+            .setHydrateResult(
+              message.members ?? [],
+              message.edges ?? [],
+              message.health ?? "",
+              message.healthStats ?? null,
+            );
+          break;
+
+        case "team-person-profile-result":
+          if (message.error) {
+            useTeamStore.getState().setError(message.error);
+          } else {
+            useTeamStore.getState().setPersonProfile({
+              member: message.member ?? null,
+              commitments: message.commitments ?? [],
+              collaborators: message.collaborators ?? [],
+              profileMarkdown: message.profileMarkdown ?? "",
+            });
+          }
+          break;
+
+        case "team-health-result":
+          useTeamStore.getState().setHealth(message.health ?? "");
+          break;
+
+        case "team-relationships-result":
+          useTeamStore.getState().setEdges(message.edges ?? []);
+          break;
+
+        case "team-recurring-blockers-result":
+          useTeamStore.getState().setBlockers(message.blockers ?? "");
+          break;
+
+        case "team-commitments-result":
+          if (message.error) {
+            useTeamStore.getState().setError(message.error);
+          } else {
+            useTeamStore
+              .getState()
+              .setCommitments(message.name ?? "", message.commitments ?? []);
+          }
+          break;
+
+        case "team-error":
+          useTeamStore.getState().setError(message.error ?? "Unknown error");
           break;
 
         // ── Onboarding ──
