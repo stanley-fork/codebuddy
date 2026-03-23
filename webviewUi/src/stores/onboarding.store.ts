@@ -50,6 +50,7 @@ export const STEP_ORDER: OnboardingStep[] = [
 
 interface OnboardingState {
   isVisible: boolean;
+  isCompleted: boolean;
   currentStep: OnboardingStep;
   providers: ProviderInfo[];
   projectInfo: ProjectInfo | null;
@@ -82,12 +83,14 @@ interface OnboardingState {
   setStepCompleting: (completing: boolean) => void;
   setSavedKeyProvider: (provider: string | null) => void;
   setIsSavingKey: (saving: boolean) => void;
+  setCompleted: (completed: boolean) => void;
 }
 
 // ─── Store ──────────────────────────────────────────────
 
 export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
   isVisible: false,
+  isCompleted: false,
   currentStep: "welcome",
   providers: [],
   projectInfo: null,
@@ -109,12 +112,12 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
 
   dismiss: () => {
     vscode.postMessage({ command: "onboarding-dismiss" });
-    set({ isVisible: false });
+    set({ isVisible: false, isCompleted: true });
   },
 
   skip: () => {
     vscode.postMessage({ command: "onboarding-skip" });
-    set({ isVisible: false });
+    set({ isVisible: false, isCompleted: true });
   },
 
   nextStep: () => {
@@ -125,7 +128,7 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
     } else {
       // Last step — complete the wizard
       vscode.postMessage({ command: "onboarding-dismiss" });
-      set({ isVisible: false });
+      set({ isVisible: false, isCompleted: true });
     }
   },
 
@@ -212,4 +215,5 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
   setSavedKeyProvider: (provider) =>
     set({ savedKeyProvider: provider, isSavingKey: false }),
   setIsSavingKey: (saving) => set({ isSavingKey: saving }),
+  setCompleted: (completed) => set({ isCompleted: completed }),
 }));

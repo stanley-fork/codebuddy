@@ -507,9 +507,9 @@ suite("DeepTerminalService — lifecycle", () => {
     assert.strictEqual(service.readOutput("ro1"), "");
   });
 
-  test("readOutput returns not-found for missing session", () => {
+  test("readOutput returns null for missing session", () => {
     const out = service.readOutput("missing");
-    assert.ok(out.includes("not found"));
+    assert.strictEqual(out, null);
   });
 
   test("singleton identity", () => {

@@ -123,11 +123,11 @@ export const AboutSettings: React.FC<AboutSettingsProps> = ({ searchQuery: _sear
             <span>GitHub Repository</span>
             <SettingsIcon name="externalLink" size={16} />
           </LinkItem>
-          <LinkItem href="https://codebuddy.dev/docs" target="_blank" rel="noopener noreferrer">
+          <LinkItem href="https://github.com/olasunkanmi-SE/codebuddy/blob/main/README.md" target="_blank" rel="noopener noreferrer">
             <span>Documentation</span>
             <SettingsIcon name="externalLink" size={16} />
           </LinkItem>
-          <LinkItem href="https://codebuddy.dev/changelog" target="_blank" rel="noopener noreferrer">
+          <LinkItem href="https://github.com/olasunkanmi-SE/codebuddy/releases/" target="_blank" rel="noopener noreferrer">
             <span>Changelog</span>
             <SettingsIcon name="externalLink" size={16} />
           </LinkItem>
