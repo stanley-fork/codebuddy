@@ -139,14 +139,35 @@ export class TeamGraphHandler implements WebviewMessageHandler {
             }
           }
 
-          // Health stats
+          // Health stats — send structured data alongside markdown
           const healthMarkdown = store.getTeamHealth();
+          const totalCommitments = people.reduce(
+            (s, p) => s + p.commitment_count,
+            0,
+          );
+          const totalCompleted = people.reduce(
+            (s, p) => s + p.completion_count,
+            0,
+          );
+          const summaries = store.getRecentSummaries(10000);
 
           await ctx.webview.webview.postMessage({
             command: "team-hydrate-result",
             members,
             edges,
             health: healthMarkdown,
+            healthStats: {
+              teamSize: members.length,
+              standups: summaries.length,
+              avgCompletion:
+                totalCommitments > 0
+                  ? Math.round((totalCompleted / totalCommitments) * 100)
+                  : 0,
+              totalBlockers: summaries.reduce(
+                (s, su) => s + su.blockerCount,
+                0,
+              ),
+            },
           });
           break;
         }
