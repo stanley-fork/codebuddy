@@ -74,8 +74,6 @@
   color: var(--vscode-editor-foreground, #bb9af7);
   display: block;
   white-space: pre;
-  max-width: none !important;
-  width: max-content;
 }
 
 .doc-content strong {
@@ -169,7 +167,7 @@ code {
 
 pre {
   overflow-x: auto !important;
-  max-width: calc(100vw - 60px) !important;
+  max-width: 100% !important;
   white-space: pre;
   box-sizing: border-box;
 }
