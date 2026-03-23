@@ -4,7 +4,6 @@ export type SettingsCategory =
   | "browser"
   | "agents"
   | "mcp"
-  | "connectors"
   | "skills"
   | "conversation"
   | "models"
@@ -79,12 +78,6 @@ export const SETTINGS_CATEGORIES: SettingsCategoryInfo[] = [
     label: "MCP",
     icon: "server",
     description: "Model Context Protocol servers",
-  },
-  {
-    id: "connectors",
-    label: "Connectors",
-    icon: "plug",
-    description: "Connect to external services",
   },
   {
     id: "skills",

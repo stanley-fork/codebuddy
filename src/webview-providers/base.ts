@@ -54,7 +54,6 @@ import { type ProviderKey, toProviderKey } from "./provider-name";
 import {
   BrowserHandler,
   ComposerHandler,
-  ConnectorHandler,
   CostTrackingHandler,
   TerminalViewerHandler,
   SkillHandler,
@@ -242,7 +241,6 @@ export abstract class BaseWebViewProvider implements vscode.Disposable {
     );
     this.handlerRegistry.register(new DockerHandler());
     this.handlerRegistry.register(new MCPHandler());
-    this.handlerRegistry.register(new ConnectorHandler());
     this.handlerRegistry.register(new SkillHandler());
     this.handlerRegistry.register(
       new NewsHandler(() => this.synchronizeNews()),

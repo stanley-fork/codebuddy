@@ -11,6 +11,7 @@ import {
   Button,
   Badge,
 } from '../ui';
+import { useSettingsStore } from '../../../stores/settings.store';
 
 interface AccountSettingsProps {
   searchQuery: string;
@@ -70,12 +71,18 @@ const ProfileBadge = styled.div`
 `;
 
 export const AccountSettings: React.FC<AccountSettingsProps> = ({ searchQuery: _searchQuery }) => {
+  const username = useSettingsStore((s) => s.username);
+  const displayName = username || 'CodeBuddy User';
+  const initials = username
+    ? username.split(/\s+/).map((w) => w[0]).join('').toUpperCase().slice(0, 2)
+    : 'CB';
+
   return (
     <>
       <ProfileCard>
-        <Avatar>CB</Avatar>
+        <Avatar>{initials}</Avatar>
         <ProfileInfo>
-          <ProfileName>CodeBuddy User</ProfileName>
+          <ProfileName>{displayName}</ProfileName>
           <ProfileEmail>user@codebuddy.dev</ProfileEmail>
           <ProfileBadge>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
