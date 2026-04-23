@@ -11,7 +11,6 @@ It supports 10 AI providers (cloud and local), over 20 built-in tools, 16 bundle
 
 [![CI](https://github.com/olasunkanmi-SE/codebuddy/actions/workflows/workflow.yml/badge.svg)](https://github.com/olasunkanmi-SE/codebuddy/actions/workflows/workflow.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Nerq Trust Score](https://nerq.ai/badge/olasunkanmi-SE/codebuddy)](https://nerq.ai/safe/olasunkanmi-SE/codebuddy)
 
 ---
 
